@@ -70,7 +70,7 @@ If UDP port forwarding doesn't work in your Docker setup, run the relay on the h
 
 ```toml
 [dependencies]
-moqros = { git = "…", features = ["ros"] }   # omit `ros` for the ROS-independent core
+moqros = { git = "https://github.com/yuma-m/moqros", features = ["ros"] }   # omit `ros` for the ROS-independent core
 ```
 
 ### ROS → MoQ
