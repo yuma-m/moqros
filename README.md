@@ -26,18 +26,22 @@ subscribe to a broadcast, decode it, and republish it as a ROS topic. Optional *
 
 ## End-to-end sample (Docker)
 
-You need Docker and ffmpeg (ffmpeg only generates the sample inputs).
+You only need Docker:
 
 ```sh
-./scripts/gen_sample.sh                      # samples/sample.mp4 + samples/frames/*.png
 docker compose -f docker/compose.yml up --build
 ```
+
+On first start, the one-shot `samples` service generates a test video (`samples/sample.mp4`) and a PNG
+sequence (`samples/frames/`) with ffmpeg inside the container. Files that already exist are kept. To stream
+your own footage, put a video file or a directory of PNG/JPEG frames in `samples/` and pass `SAMPLE=<name>`.
 
 Open <http://localhost:8080> in a Chromium-based browser or Firefox. Both support WebTransport. The page
 connects to `http://localhost:4443/anon` and plays the broadcast `sample/image_raw`.
 
 The compose file runs these services:
 
+- `samples`: creates the sample inputs if they're missing, then exits.
 - `relay`: `moq-relay` with a self-signed certificate. It allows anonymous access under `anon/`.
 - `source`: `image_source` publishes `/sample/image_raw` at 30 fps as `bgr8` (1280x720; set `WIDTH=640` to scale down).
 - `moqros-pub`: subscribes to `/sample/image_raw` and publishes the MoQ broadcast `sample/image_raw`.

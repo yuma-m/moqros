@@ -1,8 +1,9 @@
 # End-to-end sample:
 #   image_source (/sample/image_raw) -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image)
 #
-#   ./scripts/gen_sample.sh
 #   docker compose -f docker/compose.yml up --build
+#
+# Sample inputs are generated into ./samples on first start (no host ffmpeg needed).
 #   open http://localhost:8080
 name: moqros
 
@@ -25,6 +26,15 @@ services:
       - "4443:4443/tcp" # certificate fingerprint + WebSocket fallback
     restart: unless-stopped
 
+  # One-shot job: create the sample video and PNG sequence in ./samples if missing.
+  samples:
+    <<: *ros
+    command: ["/scripts/gen_sample.sh", "/samples"]
+    volumes:
+      - ../scripts:/scripts:ro
+      - ../samples:/samples
+    restart: "no"
+
   source:
     <<: *ros
     # The ROS services share one image; build it once here.
@@ -32,6 +42,9 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: ros
+    depends_on:
+      samples:
+        condition: service_completed_successfully
     # SAMPLE may be a video file or a directory of frames under ./samples.
     command: ["image_source", "/samples/${SAMPLE:-sample.mp4}", "--topic", "/sample/image_raw", "--fps", "30", "--width", "${WIDTH:-1280}"]
     volumes:
