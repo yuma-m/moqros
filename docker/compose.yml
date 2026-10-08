@@ -1,0 +1,63 @@
+# End-to-end sample:
+#   image_source (/sample/image_raw) -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image)
+#
+#   ./scripts/gen_sample.sh
+#   docker compose -f docker/compose.yml up --build
+#   open http://localhost:8080
+name: moqros
+
+x-ros: &ros
+  image: moqros/ros:latest
+  environment:
+    ROS_DOMAIN_ID: "42"
+    RUST_LOG: info
+  restart: unless-stopped
+
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: relay
+    image: moqros/relay:latest
+    ports:
+      - "4443:4443/udp" # QUIC / WebTransport
+      - "4443:4443/tcp" # certificate fingerprint + WebSocket fallback
+    restart: unless-stopped
+
+  source:
+    <<: *ros
+    # The ROS services share one image; build it once here.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: ros
+    # SAMPLE may be a video file or a directory of frames under ./samples.
+    command: ["image_source", "/samples/${SAMPLE:-sample.mp4}", "--topic", "/sample/image_raw", "--fps", "30", "--width", "${WIDTH:-1280}"]
+    volumes:
+      - ../samples:/samples:ro
+    # The ROS services share this container's network and IPC namespaces, like
+    # processes on one robot. Fast DDS then moves images over shared memory;
+    # large best-effort images over UDP between containers drop many frames.
+    ipc: shareable
+
+  moqros-pub:
+    <<: *ros
+    command: ["moqros-pub", "--topic", "/sample/image_raw", "--url", "http://relay:4443/anon", "--reliable"]
+    network_mode: service:source
+    ipc: service:source
+    depends_on: [relay, source]
+
+  moqros-sub:
+    <<: *ros
+    command: ["moqros-sub", "--broadcast", "sample/image_raw", "--topic", "/moqros/image", "--url", "http://relay:4443/anon"]
+    network_mode: service:source
+    ipc: service:source
+    depends_on: [relay, source]
+
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ../examples/web:/usr/share/nginx/html:ro

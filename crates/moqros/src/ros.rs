@@ -1,0 +1,248 @@
+//! ROS 2 integration built on [r2r](https://docs.rs/r2r).
+//!
+//! The bridges only register subscriptions/publishers on a node you own.
+//! [`spawn_ros_to_moq`] needs that node to be spun (e.g. `node.spin_once(..)` in a
+//! blocking task) for messages to flow; [`spawn_moq_to_ros`] only publishes, which
+//! r2r does without spinning.
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use futures::StreamExt;
+use r2r::builtin_interfaces::msg::Time;
+use r2r::std_msgs::msg::Header;
+use tokio::task::JoinHandle;
+
+use crate::{Error, Image, ImagePublisher, Result, Subscriber};
+
+pub use r2r;
+pub use r2r::QosProfile;
+
+/// The ROS message type handled by moqros.
+pub type RosImage = r2r::sensor_msgs::msg::Image;
+
+/// Convert a `sensor_msgs/Image` into an [`Image`] without copying the pixel buffer.
+pub fn image_from_ros(msg: RosImage) -> Result<Image> {
+	if msg.is_bigendian != 0 && msg.encoding.contains("16") {
+		return Err(Error::UnsupportedEncoding(format!("{} (big endian)", msg.encoding)));
+	}
+	let format = msg.encoding.parse()?;
+	let stamp = &msg.header.stamp;
+	let timestamp = Duration::new(stamp.sec.max(0) as u64, stamp.nanosec);
+	Image::with_step(msg.width, msg.height, format, msg.step, msg.data, timestamp)
+}
+
+/// Convert an [`Image`] into a `sensor_msgs/Image` with the given header.
+pub fn image_to_ros(image: &Image, header: Header) -> RosImage {
+	RosImage {
+		header,
+		height: image.height,
+		width: image.width,
+		encoding: image.format.as_ros_encoding().to_string(),
+		is_bigendian: 0,
+		step: image.step,
+		data: image.data.to_vec(),
+	}
+}
+
+/// A `builtin_interfaces/Time` for the current wall clock.
+pub fn now_stamp() -> Time {
+	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+	Time {
+		sec: now.as_secs() as i32,
+		nanosec: now.subsec_nanos(),
+	}
+}
+
+/// Statistics returned when a bridge stops.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BridgeStats {
+	pub received: u64,
+	pub sent: u64,
+	pub dropped: u64,
+}
+
+/// Forward a ROS image topic into a MoQ broadcast.
+///
+/// Encoding runs on a dedicated blocking thread. When it can't keep up, a
+/// pending image is replaced by the newest one so latency stays bounded.
+/// The returned task resolves when the topic stream or the broadcast ends.
+pub fn spawn_ros_to_moq(
+	node: &mut r2r::Node,
+	topic: &str,
+	qos: QosProfile,
+	mut broadcast: ImagePublisher,
+) -> Result<JoinHandle<Result<BridgeStats>>> {
+	let mut stream = node.subscribe::<RosImage>(topic, qos).map_err(ros_error)?;
+	let topic = topic.to_string();
+
+	let slot = Arc::new(LatestSlot::default());
+
+	let encoder = tokio::task::spawn_blocking({
+		let slot = slot.clone();
+		move || -> Result<u64> {
+			let mut sent = 0;
+			let mut warned = false;
+			while let Some(msg) = slot.take() {
+				let image = match image_from_ros(msg) {
+					Ok(image) => image,
+					Err(err) => {
+						if !warned {
+							tracing::warn!(%err, "skipping image");
+							warned = true;
+						}
+						continue;
+					}
+				};
+				if broadcast.publish(&image)? {
+					sent += 1;
+				}
+			}
+			Ok(sent)
+		}
+	});
+
+	Ok(tokio::spawn(async move {
+		let mut stats = BridgeStats::default();
+		let mut meter = RateMeter::new("ROS -> MoQ");
+		while let Some(msg) = stream.next().await {
+			stats.received += 1;
+			meter.tick();
+			if slot.put(msg) {
+				stats.dropped += 1;
+				tracing::debug!(topic, "encoder busy, dropped an older image");
+			}
+			if encoder.is_finished() {
+				break;
+			}
+		}
+		slot.close();
+		stats.sent = encoder.await.expect("encoder thread panicked")?;
+		Ok(stats)
+	}))
+}
+
+/// A single-element mailbox where a new value replaces the pending one.
+#[derive(Default)]
+struct LatestSlot<T> {
+	state: Mutex<(Option<T>, bool)>,
+	ready: Condvar,
+}
+
+impl<T> LatestSlot<T> {
+	/// Store `value`, returning true if it replaced one that was never taken.
+	fn put(&self, value: T) -> bool {
+		let mut state = self.state.lock().unwrap();
+		let replaced = state.0.replace(value).is_some();
+		self.ready.notify_one();
+		replaced
+	}
+
+	/// Block until a value is available; `None` once closed and drained.
+	fn take(&self) -> Option<T> {
+		let mut state = self.state.lock().unwrap();
+		loop {
+			if let Some(value) = state.0.take() {
+				return Some(value);
+			}
+			if state.1 {
+				return None;
+			}
+			state = self.ready.wait(state).unwrap();
+		}
+	}
+
+	fn close(&self) {
+		self.state.lock().unwrap().1 = true;
+		self.ready.notify_all();
+	}
+}
+
+/// Republish a decoded MoQ image broadcast onto a ROS topic as `rgb8`.
+///
+/// Waits for `broadcast` to be announced and resubscribes whenever it ends, so the
+/// publisher side may restart freely. The header stamp is the local receive time,
+/// since MoQ timestamps are relative to the start of the broadcast.
+pub fn spawn_moq_to_ros(
+	node: &mut r2r::Node,
+	topic: &str,
+	qos: QosProfile,
+	frame_id: &str,
+	subscriber: Subscriber,
+	broadcast: &str,
+) -> Result<JoinHandle<Result<()>>> {
+	let publisher = node.create_publisher::<RosImage>(topic, qos).map_err(ros_error)?;
+	let frame_id = frame_id.to_string();
+	let broadcast = broadcast.to_string();
+
+	Ok(tokio::spawn(async move {
+		loop {
+			let mut images = match subscriber.subscribe_images(&broadcast).await {
+				Ok(images) => images,
+				Err(err) => {
+					tracing::warn!(%err, broadcast, "subscribe failed, retrying");
+					tokio::time::sleep(Duration::from_secs(1)).await;
+					continue;
+				}
+			};
+
+			// r2r publishers are Send but not Sync, so never hold `&publisher` across an await.
+			let mut count = 0u64;
+			let mut meter = RateMeter::new("MoQ -> ROS");
+			let ended = loop {
+				match images.next_image().await {
+					Ok(Some(image)) => {
+						let header = Header {
+							stamp: now_stamp(),
+							frame_id: frame_id.clone(),
+						};
+						publisher.publish(&image_to_ros(&image, header)).map_err(ros_error)?;
+						count += 1;
+						meter.tick();
+					}
+					Ok(None) => break None,
+					Err(err) => break Some(err),
+				}
+			};
+
+			match ended {
+				None => tracing::info!(broadcast, count, "broadcast ended, waiting for it to return"),
+				Some(err) => tracing::warn!(%err, broadcast, count, "subscription failed, resubscribing"),
+			}
+		}
+	}))
+}
+
+/// Logs the message rate of a bridge every few seconds.
+struct RateMeter {
+	label: &'static str,
+	count: u64,
+	since: std::time::Instant,
+}
+
+impl RateMeter {
+	const PERIOD: Duration = Duration::from_secs(10);
+
+	fn new(label: &'static str) -> Self {
+		Self {
+			label,
+			count: 0,
+			since: std::time::Instant::now(),
+		}
+	}
+
+	fn tick(&mut self) {
+		self.count += 1;
+		let elapsed = self.since.elapsed();
+		if elapsed >= Self::PERIOD {
+			let fps = self.count as f64 / elapsed.as_secs_f64();
+			tracing::info!(bridge = self.label, fps = format!("{fps:.1}"), "image rate");
+			self.count = 0;
+			self.since = std::time::Instant::now();
+		}
+	}
+}
+
+fn ros_error(err: r2r::Error) -> Error {
+	Error::Ros(err.to_string())
+}

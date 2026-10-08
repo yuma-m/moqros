@@ -1,0 +1,20 @@
+[package]
+name = "moqros-image-source"
+description = "Publish a video file or an image sequence as a ROS 2 sensor_msgs/Image topic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "image_source"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+moqros = { workspace = true, features = ["ros"] }
+moqros-cli = { path = "../../crates/moqros-cli" }
+tokio.workspace = true
+tracing.workspace = true

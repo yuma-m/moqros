@@ -1,0 +1,17 @@
+# moq-relay configuration for local development. Authentication is limited to
+# anonymous access under `anon/`, and TLS uses a generated self-signed cert whose
+# fingerprint clients fetch over plain HTTP from /certificate.sha256.
+
+[log]
+level = "info"
+
+[listen]
+bind = "[::]:4443"
+tls.generate = ["localhost", "relay"]
+
+[web.http]
+# Serves certificate.sha256 (and HTTP/WebSocket fallbacks) on TCP 4443.
+listen = "[::]:4443"
+
+[auth]
+public = "anon/**"

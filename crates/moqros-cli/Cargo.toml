@@ -1,0 +1,29 @@
+[package]
+name = "moqros-cli"
+description = "ROS 2 <-> Media over QUIC image bridge nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# H.264 support (loads Cisco's OpenH264 binary from OPENH264_LIBRARY at runtime).
+h264 = ["moqros/h264"]
+
+[[bin]]
+name = "moqros-pub"
+path = "src/bin/moqros-pub.rs"
+
+[[bin]]
+name = "moqros-sub"
+path = "src/bin/moqros-sub.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+moqros = { workspace = true, features = ["ros"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
