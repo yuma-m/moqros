@@ -1,11 +1,13 @@
 //! Shared plumbing for the moqros bridge binaries.
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::builder::BoolishValueParser;
+use clap::error::ErrorKind;
 use clap::{ArgAction, Args, Command, Parser};
 use moqros::ros::r2r::ParameterValue;
 use moqros::ros::{QosProfile, r2r};
@@ -60,6 +62,12 @@ impl QosArgs {
 /// …) fills that argument: flags win over parameters, which win over environment
 /// variables and defaults.
 pub fn init<T: Parser>(node_name: &str) -> anyhow::Result<(T, r2r::Node)> {
+	let args = strip_ros_args(std::env::args());
+	// Answer `--help` and `--version` without bringing up ROS.
+	if let Some(err) = help_or_version(T::command(), &args) {
+		err.exit();
+	}
+
 	let ctx = r2r::Context::create().context("failed to create ROS context")?;
 	let node = r2r::Node::create(ctx, node_name, "").context("failed to create ROS node")?;
 
@@ -71,7 +79,16 @@ pub fn init<T: Parser>(node_name: &str) -> anyhow::Result<(T, r2r::Node)> {
 			.iter()
 			.map(|(name, param)| (name.as_str(), &param.value)),
 	)?;
-	let cli = parse_args(strip_ros_args(std::env::args()), flags).unwrap_or_else(|err| err.exit());
+	let cli = match parse_args(args, flags) {
+		Ok(cli) => cli,
+		Err(ParseError::CommandLine(err)) => err.exit(),
+		Err(ParseError::Param(err)) => {
+			// Just clap's first line; its usage hints are about the command line.
+			let message = err.to_string();
+			let message = message.lines().next().unwrap_or_default().trim_start_matches("error: ");
+			bail!("invalid ROS parameter: {message}");
+		}
+	};
 	Ok((cli, node))
 }
 
@@ -89,17 +106,40 @@ pub fn strip_ros_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
 		.collect()
 }
 
+/// The error to exit with if `args` ask for help or the version.
+///
+/// Clap answers these as soon as it meets the flag, before checking anything else.
+fn help_or_version(command: Command, args: &[String]) -> Option<clap::Error> {
+	let err = command.try_get_matches_from(args).err()?;
+	matches!(err.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion).then_some(err)
+}
+
+/// Why [`parse_args`] failed.
+#[derive(Debug)]
+enum ParseError {
+	/// The command line itself is invalid.
+	CommandLine(clap::Error),
+	/// The command line is fine on its own, so a ROS parameter is invalid.
+	Param(clap::Error),
+}
+
 /// Parse `T` from `args` (program name first, ROS arguments already stripped) and
 /// `param_flags`.
 ///
 /// The parameter flags go right after the program name. With `args_override_self` a
 /// later occurrence of a flag wins, so the command line overrides them, while
 /// environment variables and defaults only apply to flags given neither way.
-fn parse_args<T: Parser>(args: Vec<String>, param_flags: Vec<String>) -> clap::error::Result<T> {
-	let mut args = args.into_iter();
-	let args = args.next().into_iter().chain(param_flags).chain(args);
-	let matches = T::command().args_override_self(true).try_get_matches_from(args)?;
-	T::from_arg_matches(&matches)
+fn parse_args<T: Parser>(args: Vec<String>, param_flags: Vec<String>) -> Result<T, ParseError> {
+	let parse = |param_flags: Vec<String>| {
+		let mut args = args.iter().cloned();
+		let args = args.next().into_iter().chain(param_flags).chain(args);
+		let matches = T::command().args_override_self(true).try_get_matches_from(args)?;
+		T::from_arg_matches(&matches)
+	};
+	parse(param_flags).map_err(|err| match parse(Vec::new()) {
+		Ok(_) => ParseError::Param(err),
+		Err(err) => ParseError::CommandLine(err),
+	})
 }
 
 /// Command-line flags (`--name=value`) for the ROS parameters named after an argument
@@ -110,10 +150,10 @@ fn param_flags<'a>(
 ) -> anyhow::Result<Vec<String>> {
 	let mut flags = Vec::new();
 	for (name, value) in params {
-		let Some(long) = command
+		let Some((long, arg)) = command
 			.get_arguments()
 			.find(|arg| arg.get_id() == name)
-			.and_then(|arg| arg.get_long())
+			.and_then(|arg| Some((arg.get_long()?, arg)))
 		else {
 			// r2r reads `use_sim_time` itself.
 			if name != "use_sim_time" {
@@ -126,8 +166,12 @@ fn param_flags<'a>(
 			ParameterValue::NotSet => continue,
 			ParameterValue::Bool(value) => value.to_string(),
 			ParameterValue::Integer(value) => value.to_string(),
-			// Debug keeps the fraction of whole numbers, so `1.0` isn't turned into `1`.
-			ParameterValue::Double(value) => format!("{value:?}"),
+			// Keep the fraction of whole numbers for strings (`1.0` stays `1.0`), but drop
+			// it for numbers so `2000000.0` still fits an integer flag.
+			ParameterValue::Double(value) if arg.get_value_parser().type_id() == TypeId::of::<String>() => {
+				format!("{value:?}")
+			}
+			ParameterValue::Double(value) => value.to_string(),
 			ParameterValue::String(value) => value.clone(),
 			value => bail!("ROS parameter `{name}` has unsupported type: {value:?}"),
 		};
@@ -158,20 +202,25 @@ pub fn spawn_spinner(mut node: r2r::Node) -> Spinner {
 			node.spin_once(Duration::from_millis(50));
 		}
 	});
-	Spinner { stop, task }
+	Spinner { stop, task: Some(task) }
 }
 
 /// Stops the [`spawn_spinner`] thread when dropped.
 pub struct Spinner {
 	stop: Arc<AtomicBool>,
-	task: JoinHandle<()>,
+	task: Option<JoinHandle<()>>,
 }
 
 impl Spinner {
 	/// Resolves if the spinner thread dies, which only happens when it panics, since
-	/// without spinning no ROS message arrives anymore.
+	/// without spinning no ROS message arrives anymore. Never resolves again after that.
 	pub async fn failed(&mut self) -> anyhow::Error {
-		match (&mut self.task).await {
+		let Some(task) = self.task.as_mut() else {
+			return std::future::pending().await;
+		};
+		let result = task.await;
+		self.task = None;
+		match result {
 			Err(err) => anyhow::Error::new(err).context("ROS spinner failed"),
 			Ok(()) => anyhow::anyhow!("ROS spinner stopped"),
 		}
@@ -186,6 +235,8 @@ impl Drop for Spinner {
 
 #[cfg(test)]
 mod tests {
+	use clap::CommandFactory;
+
 	use super::*;
 
 	fn strip(args: &[&str]) -> Vec<String> {
@@ -193,6 +244,7 @@ mod tests {
 	}
 
 	#[derive(Debug, Parser)]
+	#[command(version = "1.2.3")]
 	struct TestCli {
 		#[arg(long, default_value = "/image_raw")]
 		topic: String,
@@ -213,7 +265,7 @@ mod tests {
 		qos: QosArgs,
 	}
 
-	/// Only parsed by `params_override_env`, so no other test sees its variable.
+	/// Only parsed by `params_override_env`, in a child process of its own.
 	#[derive(Debug, Parser)]
 	struct EnvCli {
 		#[arg(long, env = "MOQROS_TEST_BITRATE", default_value_t = 1)]
@@ -224,12 +276,15 @@ mod tests {
 		param_flags(&T::command(), params.iter().map(|(name, value)| (*name, value)))
 	}
 
-	fn parse<T: Parser>(args: &[&str], params: &[(&str, ParameterValue)]) -> clap::error::Result<T> {
-		let args = std::iter::once("bin")
+	fn args(args: &[&str]) -> Vec<String> {
+		std::iter::once("bin")
 			.chain(args.iter().copied())
 			.map(String::from)
-			.collect();
-		parse_args(args, flags::<T>(params).unwrap())
+			.collect()
+	}
+
+	fn parse<T: Parser>(args_: &[&str], params: &[(&str, ParameterValue)]) -> Result<T, ParseError> {
+		parse_args(args(args_), flags::<T>(params).unwrap())
 	}
 
 	fn string(value: &str) -> ParameterValue {
@@ -301,21 +356,42 @@ mod tests {
 		assert!(cli.relay.insecure);
 	}
 
+	/// Setting a variable while other tests read the environment is undefined behavior,
+	/// so this test reruns itself in a child process for each value of the variable.
 	#[test]
 	fn params_override_env() {
-		// SAFETY: no other test reads or writes this variable.
-		unsafe { std::env::set_var("MOQROS_TEST_BITRATE", "bogus") };
+		const VAR: &str = "MOQROS_TEST_BITRATE";
 		let bitrate = ("bitrate", ParameterValue::Integer(2));
-		// An invalid environment variable is never looked at when a parameter or flag is set.
-		assert_eq!(parse::<EnvCli>(&[], std::slice::from_ref(&bitrate)).unwrap().bitrate, 2);
-		assert_eq!(parse::<EnvCli>(&["--bitrate", "3"], &[]).unwrap().bitrate, 3);
-		assert!(parse::<EnvCli>(&[], &[]).is_err());
-
-		unsafe { std::env::set_var("MOQROS_TEST_BITRATE", "4") };
-		assert_eq!(parse::<EnvCli>(&[], &[]).unwrap().bitrate, 4);
-		assert_eq!(parse::<EnvCli>(&[], std::slice::from_ref(&bitrate)).unwrap().bitrate, 2);
-		assert_eq!(parse::<EnvCli>(&["--bitrate=3"], &[bitrate]).unwrap().bitrate, 3);
-		unsafe { std::env::remove_var("MOQROS_TEST_BITRATE") };
+		match std::env::var(VAR).ok().as_deref() {
+			None => {
+				for value in ["bogus", "4"] {
+					let output = std::process::Command::new(std::env::current_exe().unwrap())
+						.args(["--exact", "tests::params_override_env"])
+						.env(VAR, value)
+						.output()
+						.unwrap();
+					let stdout = String::from_utf8_lossy(&output.stdout);
+					assert!(
+						output.status.success() && stdout.contains("1 passed"),
+						"{VAR}={value}:\n{stdout}"
+					);
+				}
+			}
+			// An invalid variable is never looked at when a parameter or flag is set.
+			Some("bogus") => {
+				assert_eq!(parse::<EnvCli>(&[], std::slice::from_ref(&bitrate)).unwrap().bitrate, 2);
+				assert_eq!(parse::<EnvCli>(&["--bitrate", "3"], &[]).unwrap().bitrate, 3);
+				assert!(matches!(parse::<EnvCli>(&[], &[]), Err(ParseError::CommandLine(_))));
+				let help = help_or_version(EnvCli::command(), &args(&["--help"]));
+				assert_eq!(help.map(|err| err.kind()), Some(ErrorKind::DisplayHelp));
+			}
+			Some(value) => {
+				assert_eq!(value, "4");
+				assert_eq!(parse::<EnvCli>(&[], &[]).unwrap().bitrate, 4);
+				assert_eq!(parse::<EnvCli>(&[], std::slice::from_ref(&bitrate)).unwrap().bitrate, 2);
+				assert_eq!(parse::<EnvCli>(&["--bitrate=3"], &[bitrate]).unwrap().bitrate, 3);
+			}
+		}
 	}
 
 	#[test]
@@ -330,6 +406,10 @@ mod tests {
 		.unwrap();
 		assert_eq!(cli.broadcast.as_deref(), Some("1.0"));
 		assert_eq!(cli.fps, 12.5);
+
+		// Whole numbers still fit integer flags.
+		let cli: TestCli = parse(&[], &[("keyframe_interval_ms", ParameterValue::Double(500.0))]).unwrap();
+		assert_eq!(cli.keyframe_interval_ms, 500);
 
 		// YAML `fps: 15` is an integer parameter.
 		let cli: TestCli = parse(&[], &[("fps", ParameterValue::Integer(15))]).unwrap();
@@ -349,6 +429,9 @@ mod tests {
 			("use_sim_time", ParameterValue::Bool(false)),
 			("bitrat", ParameterValue::Integer(1)),
 			("keyframe-interval-ms", ParameterValue::Integer(1)),
+			// Clap's own arguments aren't parameters.
+			("help", ParameterValue::Bool(true)),
+			("version", string("2")),
 		];
 		assert!(flags::<TestCli>(&params).unwrap().is_empty());
 	}
@@ -361,10 +444,34 @@ mod tests {
 	}
 
 	#[test]
-	fn invalid_param_values_fail_validation() {
-		let err = parse::<TestCli>(&[], &[("keyframe_interval_ms", string("soon"))]).unwrap_err();
-		assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-		let err = parse::<TestCli>(&[], &[("url", string("not a url"))]).unwrap_err();
-		assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+	fn invalid_param_values_are_blamed_on_the_param() {
+		for (name, value) in [("keyframe_interval_ms", "soon"), ("url", "not a url")] {
+			match parse::<TestCli>(&[], &[(name, string(value))]) {
+				Err(ParseError::Param(err)) => assert_eq!(err.kind(), ErrorKind::ValueValidation, "{name}"),
+				other => panic!("{name}: {other:?}"),
+			}
+		}
+	}
+
+	#[test]
+	fn invalid_command_lines_are_blamed_on_the_command_line() {
+		let params = [("keyframe_interval_ms", string("soon"))];
+		for args in [&["--fps=fast"][..], &["--unknown"]] {
+			assert!(
+				matches!(parse::<TestCli>(args, &params), Err(ParseError::CommandLine(_))),
+				"{args:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn detects_help_and_version() {
+		let kind = |args_: &[&str]| help_or_version(TestCli::command(), &args(args_)).map(|err| err.kind());
+		assert_eq!(kind(&["--help"]), Some(ErrorKind::DisplayHelp));
+		assert_eq!(kind(&["-V"]), Some(ErrorKind::DisplayVersion));
+		// Arguments after the help flag aren't looked at.
+		assert_eq!(kind(&["-h", "--fps=fast"]), Some(ErrorKind::DisplayHelp));
+		assert_eq!(kind(&["--topic", "/a"]), None);
+		assert_eq!(kind(&["--fps=fast"]), None);
 	}
 }

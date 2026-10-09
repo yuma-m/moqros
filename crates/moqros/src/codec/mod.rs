@@ -454,28 +454,35 @@ pub(crate) mod tests {
 			..Default::default()
 		})
 		.unwrap();
-		let mut keyframes = Vec::new();
+		// Rate control may drop unforced frames, but never turns them into keyframes.
 		for t in 0..4 {
 			if t == 2 {
 				encoder.force_keyframe();
 			}
-			if let Some(frame) = encoder.encode(&test_pattern(32, 32, t)).unwrap() {
-				keyframes.push((t, frame.keyframe));
+			let frame = encoder.encode(&test_pattern(32, 32, t)).unwrap();
+			match t {
+				0 | 2 => assert!(frame.expect("forced keyframes aren't dropped").keyframe, "frame {t}"),
+				_ => assert!(frame.is_none_or(|frame| !frame.keyframe), "frame {t}"),
 			}
 		}
-		assert_eq!(keyframes, [(0, true), (1, false), (2, true), (3, false)]);
 	}
 
+	/// A rejected image leaves a running encoder untouched.
 	pub(crate) fn rejects_invalid_images(codec: Codec) {
 		let mut encoder = Encoder::new(EncoderSettings {
 			codec,
+			keyframe_interval: Duration::from_secs(60),
 			..Default::default()
 		})
 		.unwrap();
-		let tiny = Image::new(1, 1, PixelFormat::Rgb8, vec![0u8; 3], Duration::ZERO).unwrap();
-		assert!(matches!(encoder.encode(&tiny), Err(Error::InvalidImage(_))));
-		// The encoder is still usable afterwards.
 		assert!(encoder.encode(&test_pattern(32, 32, 0)).unwrap().unwrap().keyframe);
+		let tiny = Image::new(1, 1, PixelFormat::Rgb8, vec![0u8; 3], Duration::from_millis(33)).unwrap();
+		assert!(matches!(encoder.encode(&tiny), Err(Error::InvalidImage(_))));
+		// Same resolution as before, so the encoder carries on without a new keyframe.
+		if let Some(frame) = encoder.encode(&test_pattern(32, 32, 2)).unwrap() {
+			assert!(!frame.keyframe);
+			assert_eq!((frame.width, frame.height), (32, 32));
+		}
 	}
 
 	#[test]
