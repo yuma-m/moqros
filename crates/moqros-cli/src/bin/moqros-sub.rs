@@ -1,8 +1,7 @@
 //! Subscribe to a MoQ image broadcast, decode it and republish it as a ROS 2 topic.
 
-use anyhow::Context;
 use clap::Parser;
-use moqros::ros::{r2r, spawn_moq_to_ros};
+use moqros::ros::spawn_moq_to_ros;
 use moqros_cli::{QosArgs, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
@@ -30,10 +29,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	init_logging();
-	let cli = Cli::parse();
-
-	let ctx = r2r::Context::create().context("failed to create ROS context")?;
-	let mut node = r2r::Node::create(ctx, "moqros_sub", "").context("failed to create ROS node")?;
+	let (cli, mut node) = moqros_cli::init::<Cli>("moqros_sub")?;
 
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
 	let bridge = spawn_moq_to_ros(

@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use clap::Args;
+use anyhow::{Context, bail};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Args, Command, Parser};
+use moqros::ros::r2r::ParameterValue;
 use moqros::ros::{QosProfile, r2r};
 
 /// Relay connection flags.
@@ -44,6 +47,85 @@ impl QosArgs {
 	}
 }
 
+/// Parse `T` from the command line and create the ROS node.
+///
+/// Arguments between `--ros-args` and `--` are left to rcl, so the binaries accept
+/// remapping (`-r __node:=…`, `-r __ns:=…`), `-p` and `--params-file` like any ROS
+/// node. Each ROS parameter named after an argument (`bitrate`, `keyframe_interval_ms`,
+/// …) fills that argument unless it was given on the command line: flags win over
+/// parameters, which win over environment variables and defaults.
+pub fn init<T: Parser>(node_name: &str) -> anyhow::Result<(T, r2r::Node)> {
+	let args = strip_ros_args(std::env::args());
+	let command = T::command();
+	let matches = command.clone().get_matches_from(&args);
+
+	let ctx = r2r::Context::create().context("failed to create ROS context")?;
+	let node = r2r::Node::create(ctx, node_name, "").context("failed to create ROS node")?;
+
+	let extra = param_args(&command, &matches, &node)?;
+	let matches = if extra.is_empty() {
+		matches
+	} else {
+		command
+			.try_get_matches_from(args.into_iter().chain(extra))
+			.context("invalid ROS parameter")?
+	};
+	Ok((T::from_arg_matches(&matches)?, node))
+}
+
+/// Drop the ROS arguments (`--ros-args … [--]`, possibly repeated) from `args`.
+pub fn strip_ros_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
+	let mut in_ros_args = false;
+	args.into_iter()
+		.filter(|arg| match (in_ros_args, arg.as_str()) {
+			(false, "--ros-args") | (true, "--") => {
+				in_ros_args = !in_ros_args;
+				false
+			}
+			_ => !in_ros_args,
+		})
+		.collect()
+}
+
+/// Command-line flags for the node's ROS parameters that `matches` did not get on the
+/// command line.
+fn param_args(command: &Command, matches: &ArgMatches, node: &r2r::Node) -> anyhow::Result<Vec<String>> {
+	let mut extra = Vec::new();
+	for (name, param) in node.params.lock().unwrap().iter() {
+		if name == "use_sim_time" {
+			continue;
+		}
+		let Some((arg, long)) = command
+			.get_arguments()
+			.find(|arg| arg.get_id() == name.as_str())
+			.and_then(|arg| Some((arg, arg.get_long()?)))
+		else {
+			tracing::warn!(name, "ignoring unknown ROS parameter");
+			continue;
+		};
+		if matches.value_source(name) == Some(ValueSource::CommandLine) {
+			continue;
+		}
+		let flag = format!("--{long}");
+		let value = match &param.value {
+			ParameterValue::Bool(value) if !arg.get_action().takes_values() => {
+				if *value {
+					extra.push(flag);
+				}
+				continue;
+			}
+			_ if !arg.get_action().takes_values() => bail!("ROS parameter `{name}` must be a bool"),
+			ParameterValue::Bool(value) => value.to_string(),
+			ParameterValue::Integer(value) => value.to_string(),
+			ParameterValue::Double(value) => value.to_string(),
+			ParameterValue::String(value) => value.clone(),
+			value => bail!("ROS parameter `{name}` has unsupported type: {value:?}"),
+		};
+		extra.extend([flag, value]);
+	}
+	Ok(extra)
+}
+
 pub fn init_logging() {
 	tracing_subscriber::fmt()
 		.with_env_filter(
@@ -60,4 +142,45 @@ pub fn spawn_spinner(mut node: r2r::Node) -> tokio::task::JoinHandle<()> {
 			node.spin_once(Duration::from_millis(50));
 		}
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn strip(args: &[&str]) -> Vec<String> {
+		strip_ros_args(args.iter().map(|arg| arg.to_string()))
+	}
+
+	#[test]
+	fn strips_ros_args() {
+		assert_eq!(strip(&["bin", "--topic", "a"]), ["bin", "--topic", "a"]);
+		assert_eq!(
+			strip(&[
+				"bin",
+				"--topic",
+				"a",
+				"--ros-args",
+				"-r",
+				"__node:=n",
+				"-p",
+				"bitrate:=1"
+			]),
+			["bin", "--topic", "a"]
+		);
+		assert_eq!(
+			strip(&[
+				"bin",
+				"--ros-args",
+				"-r",
+				"__ns:=/x",
+				"--",
+				"--reliable",
+				"--ros-args",
+				"-p",
+				"a:=1"
+			]),
+			["bin", "--reliable"]
+		);
+	}
 }

@@ -97,6 +97,27 @@ source install/setup.bash
 ros2 run moqros-cli moqros-pub --help
 ```
 
+### ROS arguments and parameters
+
+Both bridges accept the standard `--ros-args`: remap the node name (`-r __node:=…`) and namespace
+(`-r __ns:=…`), and set ROS parameters with `-p` or `--params-file`. Each command-line flag can also be
+set as a parameter of the same name in snake_case (`--keyframe-interval-ms` becomes `keyframe_interval_ms`).
+A flag on the command line wins over a parameter, and a parameter wins over environment variables and
+defaults. Parameters are read once at startup.
+
+```sh
+ros2 run moqros-cli moqros-pub --ros-args -r __ns:=/front \
+  -p topic:=/front/image_raw -p bitrate:=1000000 -p reliable:=true
+ros2 run moqros-cli moqros-sub --ros-args --params-file crates/moqros-cli/config/moqros.yaml
+```
+
+The colcon package installs a launch file (`moqros.launch.py`) and a sample parameter file
+(`config/moqros.yaml`):
+
+```sh
+ros2 launch moqros-cli moqros.launch.py url:=http://localhost:4443/anon namespace:=camera
+```
+
 ## Library usage
 
 The library is published on [crates.io](https://crates.io/crates/moqros) as `moqros`; API docs are on
