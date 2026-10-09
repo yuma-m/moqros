@@ -228,7 +228,8 @@ fn check(err: vpx::vpx_codec_err_t, ctx: Option<&vpx::vpx_codec_ctx_t>) -> Resul
 			.to_string_lossy()
 			.into_owned();
 		if let Some(ctx) = ctx {
-			let detail = vpx::vpx_codec_error_detail(ctx);
+			// libvpx < 1.13 takes `*mut`; newer versions take `*const`, which `*mut` coerces to.
+			let detail = vpx::vpx_codec_error_detail(ctx as *const _ as *mut _);
 			if !detail.is_null() {
 				message = format!("{message}: {}", CStr::from_ptr(detail).to_string_lossy());
 			}
