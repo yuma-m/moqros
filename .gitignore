@@ -1,5 +1,6 @@
-/target
-/samples/*
-!/samples/.gitkeep
-/openh264
-/.idea
+target
+samples/*
+!samples/.gitkeep
+openh264
+.idea
+.DS_Store

@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: &docs-only
+      - "**.md"
+      - "LICENSE-*"
+      - "logo.png"
+      - ".dockerignore"
+      - "docker/**"
+      - "examples/web/**"
   pull_request:
+    paths-ignore: *docs-only
   workflow_dispatch:
 
 concurrency:
