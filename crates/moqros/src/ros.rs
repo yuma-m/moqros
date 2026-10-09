@@ -103,12 +103,15 @@ pub fn spawn_ros_to_moq(
 	});
 
 	Ok(tokio::spawn(async move {
+		// Closing on drop also releases the encoder thread when this task is cancelled
+		// (e.g. at runtime shutdown); otherwise the runtime would wait on it forever.
+		let slot = CloseOnDrop(slot);
 		let mut stats = BridgeStats::default();
 		let mut meter = RateMeter::new("ROS -> MoQ");
 		while let Some(msg) = stream.next().await {
 			stats.received += 1;
 			meter.tick();
-			if slot.put(msg) {
+			if slot.0.put(msg) {
 				stats.dropped += 1;
 				tracing::debug!(topic, "encoder busy, dropped an older image");
 			}
@@ -116,7 +119,7 @@ pub fn spawn_ros_to_moq(
 				break;
 			}
 		}
-		slot.close();
+		drop(slot);
 		stats.sent = encoder.await.expect("encoder thread panicked")?;
 		Ok(stats)
 	}))
@@ -155,6 +158,15 @@ impl<T> LatestSlot<T> {
 	fn close(&self) {
 		self.state.lock().unwrap().1 = true;
 		self.ready.notify_all();
+	}
+}
+
+/// Closes the slot when dropped.
+struct CloseOnDrop<T>(Arc<LatestSlot<T>>);
+
+impl<T> Drop for CloseOnDrop<T> {
+	fn drop(&mut self) {
+		self.0.close();
 	}
 }
 

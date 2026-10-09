@@ -103,7 +103,9 @@ Both bridges accept the standard `--ros-args`: remap the node name (`-r __node:=
 (`-r __ns:=…`), and set ROS parameters with `-p` or `--params-file`. Each command-line flag can also be
 set as a parameter of the same name in snake_case (`--keyframe-interval-ms` becomes `keyframe_interval_ms`).
 A flag on the command line wins over a parameter, and a parameter wins over environment variables and
-defaults. Parameters are read once at startup.
+defaults. Bool flags also take a value (`--reliable=false`). Parameters are read once at startup. In a
+parameter file, key a namespaced node by its fully qualified name (`/front/moqros_pub`); the bare node
+name only matches in the root namespace.
 
 ```sh
 ros2 run moqros-cli moqros-pub --ros-args -r __ns:=/front \
@@ -117,6 +119,9 @@ The colcon package installs a launch file (`moqros.launch.py`) and a sample para
 ```sh
 ros2 launch moqros-cli moqros.launch.py url:=http://localhost:4443/anon namespace:=camera
 ```
+
+The launch file uses `$MOQROS_URL` when `url` isn't given, and publishes the broadcast
+`<namespace>/image_raw`.
 
 ## Library usage
 

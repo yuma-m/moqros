@@ -3,6 +3,9 @@
 # command line take precedence.
 #
 #   ros2 run moqros-cli moqros-pub --ros-args --params-file config/moqros.yaml
+#
+# Keys are node names. A node in a namespace only matches its fully qualified
+# name (e.g. `/front/moqros_pub`), not the bare name below.
 moqros_pub:
   ros__parameters:
     topic: /camera/image_raw

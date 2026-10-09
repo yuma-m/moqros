@@ -1,10 +1,13 @@
 //! Shared plumbing for the moqros bridge binaries.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use clap::builder::BoolishValueParser;
 use clap::parser::ValueSource;
-use clap::{ArgMatches, Args, Command, Parser};
+use clap::{ArgAction, ArgMatches, Args, Command, Parser};
 use moqros::ros::r2r::ParameterValue;
 use moqros::ros::{QosProfile, r2r};
 
@@ -16,7 +19,8 @@ pub struct RelayArgs {
 	pub url: moqros::Url,
 
 	/// Disable TLS certificate verification (development only).
-	#[arg(long, env = "MOQROS_INSECURE")]
+	#[arg(long, env = "MOQROS_INSECURE", action = ArgAction::Set, value_parser = BoolishValueParser::new(),
+		num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true")]
 	pub insecure: bool,
 }
 
@@ -33,7 +37,8 @@ impl RelayArgs {
 #[derive(Debug, Clone, Args)]
 pub struct QosArgs {
 	/// Use reliable QoS instead of the best-effort sensor-data profile.
-	#[arg(long)]
+	#[arg(long, action = ArgAction::Set, value_parser = BoolishValueParser::new(),
+		num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true")]
 	pub reliable: bool,
 }
 
@@ -95,33 +100,27 @@ fn param_args(command: &Command, matches: &ArgMatches, node: &r2r::Node) -> anyh
 		if name == "use_sim_time" {
 			continue;
 		}
-		let Some((arg, long)) = command
+		let Some(long) = command
 			.get_arguments()
 			.find(|arg| arg.get_id() == name.as_str())
-			.and_then(|arg| Some((arg, arg.get_long()?)))
+			.and_then(|arg| arg.get_long())
 		else {
-			tracing::warn!(name, "ignoring unknown ROS parameter");
+			// Shared parameter files (`/**`) may hold parameters for other nodes.
+			tracing::debug!(name, "ignoring unknown ROS parameter");
 			continue;
 		};
 		if matches.value_source(name) == Some(ValueSource::CommandLine) {
 			continue;
 		}
-		let flag = format!("--{long}");
 		let value = match &param.value {
-			ParameterValue::Bool(value) if !arg.get_action().takes_values() => {
-				if *value {
-					extra.push(flag);
-				}
-				continue;
-			}
-			_ if !arg.get_action().takes_values() => bail!("ROS parameter `{name}` must be a bool"),
 			ParameterValue::Bool(value) => value.to_string(),
 			ParameterValue::Integer(value) => value.to_string(),
 			ParameterValue::Double(value) => value.to_string(),
 			ParameterValue::String(value) => value.clone(),
 			value => bail!("ROS parameter `{name}` has unsupported type: {value:?}"),
 		};
-		extra.extend([flag, value]);
+		// One token, so values starting with `-` aren't taken for flags.
+		extra.push(format!("--{long}={value}"));
 	}
 	Ok(extra)
 }
@@ -135,13 +134,28 @@ pub fn init_logging() {
 		.init();
 }
 
-/// Spin `node` forever on a blocking thread.
-pub fn spawn_spinner(mut node: r2r::Node) -> tokio::task::JoinHandle<()> {
+/// Spin `node` on a blocking thread until the returned guard is dropped.
+///
+/// The tokio runtime waits for blocking tasks on shutdown, so a spinner that never
+/// stops would keep the process alive after `main` returns.
+pub fn spawn_spinner(mut node: r2r::Node) -> Spinner {
+	let stop = Arc::new(AtomicBool::new(false));
+	let stopped = stop.clone();
 	tokio::task::spawn_blocking(move || {
-		loop {
+		while !stopped.load(Ordering::Relaxed) {
 			node.spin_once(Duration::from_millis(50));
 		}
-	})
+	});
+	Spinner(stop)
+}
+
+/// Stops the [`spawn_spinner`] thread when dropped.
+pub struct Spinner(Arc<AtomicBool>);
+
+impl Drop for Spinner {
+	fn drop(&mut self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
 }
 
 #[cfg(test)]
