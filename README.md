@@ -4,6 +4,8 @@
 [![docs.rs](https://img.shields.io/docsrs/moqros)](https://docs.rs/moqros)
 [![crates.io (moqros-cli)](https://img.shields.io/crates/v/moqros-cli.svg?label=moqros-cli)](https://crates.io/crates/moqros-cli)
 
+![MoQROS Logo](https://github.com/yuma-m/moqros/raw/main/logo.png)
+
 Stream ROS 2 image topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust.
 
 moqros converts each image to I420, encodes it (VP8 or H.264), and publishes it to a MoQ relay as a
