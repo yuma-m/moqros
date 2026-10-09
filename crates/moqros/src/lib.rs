@@ -22,6 +22,9 @@
 //!
 //! Enable the `ros` feature for [`ros`] bridges built on r2r.
 
+// On docs.rs, label feature-gated items with the feature they need.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod client;
 mod codec;
 mod convert;

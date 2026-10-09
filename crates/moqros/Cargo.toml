@@ -6,6 +6,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+documentation = "https://docs.rs/moqros"
+readme = "../../README.md"
+keywords = ["ros2", "moq", "quic", "video", "robotics"]
+categories = ["multimedia::video", "network-programming", "science::robotics"]
+exclude = ["COLCON_IGNORE"]
+
+[package.metadata.docs.rs]
+features = ["h264", "doc-only"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["vp8"]
@@ -15,6 +24,8 @@ vp8 = ["dep:env-libvpx-sys"]
 h264 = ["dep:openh264"]
 # ROS 2 bridge built on r2r. Requires a sourced ROS 2 environment at build time.
 ros = ["dep:r2r", "dep:futures"]
+# Build docs without a ROS environment (docs.rs). Not for real use.
+doc-only = ["ros", "r2r/doc-only"]
 
 [dependencies]
 bytes.workspace = true

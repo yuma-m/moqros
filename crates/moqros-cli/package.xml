@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>moqros-cli</name>
+  <version>0.1.0</version>
+  <description>ROS 2 &lt;-&gt; Media over QUIC image bridge nodes (moqros-pub, moqros-sub)</description>
+  <maintainer email="yuma-m@users.noreply.github.com">Yuma.M</maintainer>
+  <license>MIT</license>
+  <license>Apache-2.0</license>
+  <url type="repository">https://github.com/yuma-m/moqros</url>
+
+  <!-- r2r generates bindings with bindgen; env-libvpx-sys finds libvpx via pkg-config. -->
+  <build_depend>libclang-dev</build_depend>
+  <build_depend>pkg-config</build_depend>
+  <!-- The -dev package pulls in the shared library needed at run time. -->
+  <depend>libvpx-dev</depend>
+
+  <!-- Linked by r2r, plus the message packages moqros uses. -->
+  <depend>rcl</depend>
+  <depend>rcl_action</depend>
+  <depend>rmw_implementation</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rosgraph_msgs</depend>
+
+  <export>
+    <build_type>ament_cargo</build_type>
+  </export>
+</package>
