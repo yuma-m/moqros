@@ -19,7 +19,7 @@ subscribe to a broadcast, decode it, and republish it as a ROS topic. Optional *
 | Path | What |
 | --- | --- |
 | `crates/moqros` | The library. The core (conversion, codec, MoQ publish/subscribe) is ROS-independent; the `ros` feature adds r2r bridges. |
-| `crates/moqros-cli` | Bridge nodes: `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). |
+| `crates/moqros-cli` | Bridge nodes: `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). Also a colcon (`ament_cargo`) package. |
 | `examples/image_source` | Sample node that plays a video file (via ffmpeg) or a PNG/JPEG directory as an Image topic. |
 | `examples/web` | Static browser viewer built on `@moq/watch`. |
 | `docker/` | Dockerfile (ROS 2 Jazzy + Rust, moq-relay) and the end-to-end `compose.yml`. |
@@ -66,11 +66,38 @@ docker compose -f docker/compose.yml exec moqros-sub bash -c \
 If UDP port forwarding doesn't work in your Docker setup, run the relay on the host instead
 (`cargo install moq-relay && moq-relay docker/relay.toml`).
 
+## Installing the bridge nodes
+
+`moqros-pub` and `moqros-sub` need a ROS 2 environment, libvpx, pkg-config, and libclang at build time
+(see [Development](#development)).
+
+With cargo:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs" cargo install moqros-cli
+```
+
+As a ROS 2 package with colcon (`crates/moqros-cli` has an `ament_cargo` `package.xml`):
+
+```sh
+pip install colcon-cargo colcon-ros-cargo
+cargo install cargo-ament-build
+
+cd ~/ros2_ws/src && git clone https://github.com/yuma-m/moqros
+cd ~/ros2_ws
+rosdep install --from-paths src -iy
+source /opt/ros/jazzy/setup.bash
+colcon build
+source install/setup.bash
+ros2 run moqros-cli moqros-pub --help
+```
+
 ## Library usage
 
 ```toml
 [dependencies]
-moqros = { git = "https://github.com/yuma-m/moqros", features = ["ros"] }   # omit `ros` for the ROS-independent core
+moqros = { version = "0.1", features = ["ros"] }   # omit `ros` for the ROS-independent core
 ```
 
 ### ROS → MoQ
@@ -170,9 +197,25 @@ source /opt/ros/jazzy/setup.bash
 IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs" cargo build --workspace
 ```
 
+### CI and releasing
+
+`.github/workflows/ci.yml` runs fmt, clippy, and tests for the core (including H.264 and the relay round
+trip), builds the docs the way docs.rs does, and builds the workspace and the colcon package on ROS 2 Humble
+and Jazzy.
+
+To release, bump the version in `Cargo.toml` and `crates/moqros-cli/package.xml`, then push a matching tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` checks that the versions match the tag and runs `cargo publish --workspace`
+inside a ROS 2 container. It needs a `CARGO_REGISTRY_TOKEN` secret in the `crates-io` environment.
+To publish by hand instead, source ROS 2, set `IDL_PACKAGE_FILTER`, and run `cargo publish --workspace`.
+
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
 
 Dependencies have their own licenses. libvpx is BSD-3-Clause, and the `env-libvpx-sys` bindings are MPL-2.0.
 Cisco's OpenH264 binary is covered by [Cisco's binary license](https://www.openh264.org/BINARY_LICENSE.txt).

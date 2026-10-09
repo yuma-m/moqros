@@ -11,7 +11,7 @@ repository = "https://github.com/yuma-m/moqros"
 rust-version = "1.91"
 
 [workspace.dependencies]
-moqros = { path = "crates/moqros" }
+moqros = { path = "crates/moqros", version = "0.1.0" }
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
