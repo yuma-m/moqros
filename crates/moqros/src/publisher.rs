@@ -205,4 +205,14 @@ mod tests {
 		assert_eq!(clock.micros(Duration::from_millis(100_033)), 33_001);
 		assert_eq!(clock.micros(Duration::from_secs(99)), 33_002);
 	}
+
+	#[test]
+	fn stream_clock_resumes_after_a_backwards_jump() {
+		let mut clock = StreamClock::default();
+		assert_eq!(clock.micros(Duration::from_secs(10)), 0);
+		assert_eq!(clock.micros(Duration::from_secs(5)), 1);
+		assert_eq!(clock.micros(Duration::from_secs(5)), 2);
+		// Time keeps counting from the first stamp, not from the jump.
+		assert_eq!(clock.micros(Duration::from_secs(11)), 1_000_000);
+	}
 }

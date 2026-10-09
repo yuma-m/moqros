@@ -258,3 +258,96 @@ impl RateMeter {
 fn ros_error(err: r2r::Error) -> Error {
 	Error::Ros(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+	use std::thread;
+
+	use super::*;
+	use crate::PixelFormat;
+
+	fn ros_image(encoding: &str, width: u32, height: u32, step: u32) -> RosImage {
+		RosImage {
+			header: Header {
+				stamp: Time { sec: 12, nanosec: 34 },
+				frame_id: "camera".into(),
+			},
+			height,
+			width,
+			encoding: encoding.into(),
+			is_bigendian: 0,
+			step,
+			data: (0..step * height).map(|i| i as u8).collect(),
+		}
+	}
+
+	#[test]
+	fn converts_ros_images() {
+		let image = image_from_ros(ros_image("bgr8", 2, 2, 8)).unwrap();
+		assert_eq!(
+			(image.width, image.height, image.format, image.step),
+			(2, 2, PixelFormat::Bgr8, 8)
+		);
+		assert_eq!(image.timestamp, Duration::new(12, 34));
+		assert_eq!(image.data.len(), 16);
+
+		let header = Header {
+			stamp: Time { sec: 1, nanosec: 2 },
+			frame_id: "out".into(),
+		};
+		let back = image_to_ros(&image, header.clone());
+		assert_eq!(back.header, header);
+		assert_eq!(back.encoding, "bgr8");
+		assert_eq!((back.width, back.height, back.step, back.is_bigendian), (2, 2, 8, 0));
+		assert_eq!(back.data, ros_image("bgr8", 2, 2, 8).data);
+	}
+
+	#[test]
+	fn clamps_negative_stamps() {
+		let mut msg = ros_image("mono8", 2, 2, 2);
+		msg.header.stamp.sec = -5;
+		assert_eq!(image_from_ros(msg).unwrap().timestamp, Duration::new(0, 34));
+	}
+
+	#[test]
+	fn rejects_unsupported_ros_images() {
+		assert!(matches!(
+			image_from_ros(ros_image("16UC1", 2, 2, 4)),
+			Err(Error::UnsupportedEncoding(_))
+		));
+		let mut big_endian = ros_image("mono16", 2, 2, 4);
+		big_endian.is_bigendian = 1;
+		assert!(matches!(image_from_ros(big_endian), Err(Error::UnsupportedEncoding(e)) if e.contains("big endian")));
+		assert!(matches!(
+			image_from_ros(ros_image("rgb8", 4, 2, 8)),
+			Err(Error::InvalidImage(_))
+		));
+	}
+
+	#[test]
+	fn latest_slot_keeps_only_the_newest_value() {
+		let slot = LatestSlot::default();
+		assert!(!slot.put(1));
+		assert!(slot.put(2));
+		assert_eq!(slot.take(), Some(2));
+		assert!(!slot.put(3));
+		slot.close();
+		// Closing still hands out the pending value first.
+		assert_eq!(slot.take(), Some(3));
+		assert_eq!(slot.take(), None);
+	}
+
+	#[test]
+	fn latest_slot_take_waits_for_put_or_close() {
+		let slot = Arc::new(LatestSlot::default());
+		let taker = thread::spawn({
+			let slot = slot.clone();
+			move || (slot.take(), slot.take())
+		});
+		thread::sleep(Duration::from_millis(50));
+		slot.put(7);
+		thread::sleep(Duration::from_millis(50));
+		drop(CloseOnDrop(slot));
+		assert_eq!(taker.join().unwrap(), (Some(7), None));
+	}
+}

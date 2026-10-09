@@ -200,4 +200,32 @@ mod tests {
 			assert!(frame.codec.to_string().starts_with("avc3.42"), "{}", frame.codec);
 		}
 	}
+
+	#[test]
+	fn pixel_formats() {
+		if available() {
+			tests::pixel_formats(Codec::H264);
+		}
+	}
+
+	#[test]
+	fn irregular_timestamps() {
+		if available() {
+			tests::irregular_timestamps(Codec::H264);
+		}
+	}
+
+	#[test]
+	fn forced_keyframe() {
+		if available() {
+			tests::forced_keyframe(Codec::H264);
+		}
+	}
+
+	#[test]
+	fn rejects_invalid_images() {
+		if available() {
+			tests::rejects_invalid_images(Codec::H264);
+		}
+	}
 }

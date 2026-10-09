@@ -44,4 +44,18 @@ mod tests {
 		assert_eq!(broadcast_name_for_topic("/camera/image_raw"), "camera/image_raw");
 		assert_eq!(broadcast_name_for_topic("image"), "image");
 	}
+
+	#[test]
+	fn broadcast_name_trims_all_outer_slashes() {
+		assert_eq!(broadcast_name_for_topic("/front/image_raw/"), "front/image_raw");
+		assert_eq!(broadcast_name_for_topic("//image"), "image");
+		assert_eq!(broadcast_name_for_topic("/"), "");
+	}
+
+	#[test]
+	fn new_config_verifies_tls() {
+		let config = ClientConfig::new("https://relay.example/anon".parse().unwrap());
+		assert!(!config.insecure);
+		assert_eq!(config.url.path(), "/anon");
+	}
 }

@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let images = publisher.create_image_broadcast(&broadcast, settings)?;
 	let bridge = spawn_ros_to_moq(&mut node, &cli.topic, cli.qos.profile(), images)?;
-	let _spinner = spawn_spinner(node);
+	let mut spinner = spawn_spinner(node);
 
 	tracing::info!(topic = cli.topic, broadcast, url = %cli.relay.url, "bridging ROS -> MoQ");
 
@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
 			tracing::info!(?stats, "topic stream ended");
 		}
 		res = publisher.closed() => res.context("relay connection closed")?,
+		err = spinner.failed() => return Err(err),
 		_ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
 	}
 	Ok(())
