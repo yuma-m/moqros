@@ -275,4 +275,125 @@ mod tests {
 		assert_eq!((i420.width(), i420.height()), (2, 2));
 		assert!(i420.y().iter().all(|&y| y == 235));
 	}
+
+	fn i420(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> I420 {
+		I420::from_image(&Image::new(width, height, format, data, Duration::ZERO).unwrap()).unwrap()
+	}
+
+	/// BT.601 limited-range values (within 1 of the exact ones, from the integer math).
+	#[test]
+	fn converts_reference_colors() {
+		for (rgb, yuv) in [
+			([0u8, 0, 0], [16u8, 128, 128]),
+			([255, 255, 255], [235, 128, 128]),
+			([255, 0, 0], [82, 90, 240]),
+			([0, 255, 0], [144, 54, 34]),
+			([0, 0, 255], [41, 240, 110]),
+		] {
+			let frame = i420(2, 2, PixelFormat::Rgb8, rgb.repeat(4));
+			assert_eq!(frame.y(), &[yuv[0]; 4], "{rgb:?}");
+			assert_eq!((frame.u(), frame.v()), (&[yuv[1]][..], &[yuv[2]][..]), "{rgb:?}");
+		}
+	}
+
+	#[test]
+	fn averages_chroma_over_2x2_blocks() {
+		// Left column black, right column white.
+		let rgb = [[0u8; 3], [255; 3], [0; 3], [255; 3]].concat();
+		let frame = i420(2, 2, PixelFormat::Rgb8, rgb);
+		assert_eq!(frame.y(), &[16, 235, 16, 235]);
+		assert_eq!((frame.u(), frame.v()), (&[128][..], &[128][..]));
+	}
+
+	#[test]
+	fn rgba_ignores_alpha() {
+		let rgb = i420(2, 2, PixelFormat::Rgb8, [10u8, 200, 60].repeat(4));
+		let rgba = i420(2, 2, PixelFormat::Rgba8, [10u8, 200, 60, 0].repeat(4));
+		assert_eq!(rgb, rgba);
+	}
+
+	#[test]
+	fn mono_maps_to_limited_range_gray() {
+		let frame = i420(4, 2, PixelFormat::Mono8, vec![0, 128, 255, 64, 0, 128, 255, 64]);
+		assert_eq!(frame.y(), &[16, 126, 235, 71, 16, 126, 235, 71]);
+		assert!(frame.u().iter().chain(frame.v()).all(|&c| c == 128));
+	}
+
+	#[test]
+	fn rejects_images_too_small_to_encode() {
+		for (width, height) in [(1, 1), (1, 4), (4, 1), (0, 0)] {
+			let image = Image::new(width, height, PixelFormat::Mono8, vec![0u8; 4], Duration::ZERO).unwrap();
+			assert!(
+				matches!(I420::from_image(&image), Err(Error::InvalidImage(_))),
+				"{width}x{height}"
+			);
+		}
+	}
+
+	#[test]
+	fn rejects_invalid_images() {
+		let mut image = Image::new(2, 2, PixelFormat::Rgb8, vec![0u8; 12], Duration::ZERO).unwrap();
+		image.width = 4;
+		assert!(matches!(I420::from_image(&image), Err(Error::InvalidImage(_))));
+	}
+
+	#[test]
+	fn plane_layout() {
+		let frame = i420(6, 4, PixelFormat::Mono8, vec![0u8; 24]);
+		assert_eq!(frame.data().len(), 36);
+		assert_eq!((frame.y().len(), frame.u().len(), frame.v().len()), (24, 6, 6));
+		let planes = frame.planes();
+		assert_eq!((planes.width, planes.height), (6, 4));
+		assert_eq!((planes.y.1, planes.u.1, planes.v.1), (6, 3, 3));
+	}
+
+	#[test]
+	fn yuv_to_rgb_reference_colors_and_clamping() {
+		let rgb = |y: u8, u: u8, v: u8| {
+			yuv_to_rgb8(&Planes {
+				width: 1,
+				height: 1,
+				y: (&[y], 1),
+				u: (&[u], 1),
+				v: (&[v], 1),
+			})
+		};
+		assert_eq!(rgb(16, 128, 128), [0, 0, 0]);
+		assert_eq!(rgb(235, 128, 128), [255, 255, 255]);
+		assert_eq!(rgb(0, 128, 128), [0, 0, 0]);
+		assert_eq!(rgb(255, 128, 128), [255, 255, 255]);
+		assert!(max_diff(&rgb(82, 90, 240), &[255, 0, 0]) <= 1);
+	}
+
+	/// Decoders hand out planes with padded strides and, for odd sizes, rounded-up chroma.
+	#[test]
+	fn yuv_to_rgb_honors_strides_and_odd_sizes() {
+		let (width, height) = (3, 3);
+		let tight = I420 {
+			width: 4,
+			height: 4,
+			data: (0..24).map(|i| 16 + i * 8).collect(),
+		};
+		let pad = |plane: &[u8], width: usize, stride: usize| -> Vec<u8> {
+			plane
+				.chunks(width)
+				.flat_map(|row| [row, &vec![0xEE; stride - width]].concat())
+				.collect()
+		};
+		let y = pad(tight.y(), 4, 7);
+		let u = pad(tight.u(), 2, 5);
+		let v = pad(tight.v(), 2, 5);
+		let padded = yuv_to_rgb8(&Planes {
+			width,
+			height,
+			y: (&y, 7),
+			u: (&u, 5),
+			v: (&v, 5),
+		});
+		let full = yuv_to_rgb8(&tight.planes());
+		assert_eq!(padded.len(), width * height * 3);
+		for row in 0..height {
+			assert_eq!(padded[row * 9..row * 9 + 9], full[row * 12..row * 12 + 9], "row {row}");
+		}
+	}
 }

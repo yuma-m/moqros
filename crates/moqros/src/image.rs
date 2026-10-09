@@ -188,4 +188,63 @@ mod tests {
 		assert!(Image::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48], Duration::ZERO).is_ok());
 		assert!(Image::with_step(4, 4, PixelFormat::Rgb8, 11, vec![0u8; 64], Duration::ZERO).is_err());
 	}
+
+	#[test]
+	fn parses_encoding_aliases() {
+		for (encoding, format) in [
+			("8UC1", PixelFormat::Mono8),
+			("8UC3", PixelFormat::Rgb8),
+			("8UC4", PixelFormat::Rgba8),
+			("uyvy", PixelFormat::Uyvy),
+			("yuyv", PixelFormat::Yuyv),
+		] {
+			assert_eq!(encoding.parse::<PixelFormat>().unwrap(), format, "{encoding}");
+		}
+		assert!(matches!("RGB8".parse::<PixelFormat>(), Err(Error::UnsupportedEncoding(e)) if e == "RGB8"));
+	}
+
+	#[test]
+	fn displays_ros_encoding() {
+		assert_eq!(PixelFormat::Uyvy.to_string(), "yuv422");
+		assert_eq!(PixelFormat::Yuyv.to_string(), "yuv422_yuy2");
+	}
+
+	#[test]
+	fn new_packs_rows_tightly() {
+		for (format, step) in [
+			(PixelFormat::Mono8, 5),
+			(PixelFormat::Yuyv, 10),
+			(PixelFormat::Bgr8, 15),
+			(PixelFormat::Rgba8, 20),
+		] {
+			let image = Image::new(5, 2, format, vec![0u8; step * 2], Duration::ZERO).unwrap();
+			assert_eq!(image.step as usize, step, "{format}");
+		}
+	}
+
+	#[test]
+	fn accepts_longer_buffers_and_padded_rows() {
+		assert!(Image::new(2, 2, PixelFormat::Mono8, vec![0u8; 5], Duration::ZERO).is_ok());
+		let image = Image::with_step(2, 2, PixelFormat::Rgb8, 8, (0..16).collect::<Vec<u8>>(), Duration::ZERO).unwrap();
+		assert_eq!(image.row(0), &[0, 1, 2, 3, 4, 5]);
+		assert_eq!(image.row(1), &[8, 9, 10, 11, 12, 13]);
+	}
+
+	#[test]
+	fn validate_rechecks_public_fields() {
+		let mut image = Image::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48], Duration::ZERO).unwrap();
+		image.height = 5;
+		assert!(matches!(image.validate(), Err(Error::InvalidImage(_))));
+		image.height = 4;
+		image.step = 11;
+		assert!(image.validate().is_err());
+	}
+
+	#[test]
+	fn debug_omits_pixel_data() {
+		let image = Image::new(2, 2, PixelFormat::Mono8, vec![7u8; 4], Duration::from_millis(5)).unwrap();
+		let debug = format!("{image:?}");
+		assert!(debug.contains("4 bytes"), "{debug}");
+		assert!(!debug.contains("[7"), "{debug}");
+	}
 }

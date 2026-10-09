@@ -392,6 +392,92 @@ pub(crate) mod tests {
 		assert_eq!((frame.width, frame.height), (48, 32));
 	}
 
+	/// Every input pixel format encodes; odd sizes are cropped to even ones.
+	pub(crate) fn pixel_formats(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			..Default::default()
+		})
+		.unwrap();
+		let mut decoder = Decoder::new(codec).unwrap();
+		for (t, format) in [
+			PixelFormat::Rgb8,
+			PixelFormat::Bgr8,
+			PixelFormat::Rgba8,
+			PixelFormat::Bgra8,
+			PixelFormat::Mono8,
+			PixelFormat::Uyvy,
+			PixelFormat::Yuyv,
+		]
+		.into_iter()
+		.enumerate()
+		{
+			let (width, height) = (33, 25);
+			let data = vec![128u8; width * height * format.bytes_per_pixel()];
+			let timestamp = Duration::from_millis(t as u64 * 33);
+			let image = Image::new(width as u32, height as u32, format, data, timestamp).unwrap();
+			encoder.force_keyframe();
+			let frame = encoder
+				.encode(&image)
+				.unwrap()
+				.expect("forced keyframes aren't dropped");
+			assert!(frame.keyframe, "{codec} {format}");
+			assert_eq!((frame.width, frame.height), (32, 24), "{codec} {format}");
+			let out = decoder
+				.decode(&frame.data, timestamp)
+				.unwrap()
+				.expect("keyframe decodes");
+			assert_eq!((out.width, out.height, out.format), (32, 24, PixelFormat::Rgb8));
+		}
+	}
+
+	/// Repeated or backwards capture times still encode, and keep their timestamps.
+	pub(crate) fn irregular_timestamps(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			..Default::default()
+		})
+		.unwrap();
+		for millis in [1000, 1000, 500, 1033] {
+			let mut image = test_pattern(32, 32, 0);
+			image.timestamp = Duration::from_millis(millis);
+			if let Some(frame) = encoder.encode(&image).unwrap() {
+				assert_eq!(frame.timestamp, image.timestamp);
+			}
+		}
+	}
+
+	pub(crate) fn forced_keyframe(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			keyframe_interval: Duration::from_secs(60),
+			..Default::default()
+		})
+		.unwrap();
+		let mut keyframes = Vec::new();
+		for t in 0..4 {
+			if t == 2 {
+				encoder.force_keyframe();
+			}
+			if let Some(frame) = encoder.encode(&test_pattern(32, 32, t)).unwrap() {
+				keyframes.push((t, frame.keyframe));
+			}
+		}
+		assert_eq!(keyframes, [(0, true), (1, false), (2, true), (3, false)]);
+	}
+
+	pub(crate) fn rejects_invalid_images(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			..Default::default()
+		})
+		.unwrap();
+		let tiny = Image::new(1, 1, PixelFormat::Rgb8, vec![0u8; 3], Duration::ZERO).unwrap();
+		assert!(matches!(encoder.encode(&tiny), Err(Error::InvalidImage(_))));
+		// The encoder is still usable afterwards.
+		assert!(encoder.encode(&test_pattern(32, 32, 0)).unwrap().unwrap().keyframe);
+	}
+
 	#[test]
 	fn nal_splitter_handles_3_and_4_byte_start_codes() {
 		let data = [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 4];
@@ -406,5 +492,84 @@ pub(crate) mod tests {
 		assert!("av1".parse::<Codec>().is_err());
 		assert!(Codec::Vp8.is_keyframe(&[0x10, 0x02, 0x00]));
 		assert!(!Codec::Vp8.is_keyframe(&[0x11, 0x02, 0x00]));
+	}
+
+	#[test]
+	fn nal_splitter_ignores_leading_bytes_and_streams_without_start_codes() {
+		assert_eq!(annexb_nals(&[]).count(), 0);
+		assert_eq!(annexb_nals(&[1, 2, 3, 0, 0]).count(), 0);
+		let nals: Vec<&[u8]> = annexb_nals(&[9, 9, 0, 0, 1, 0x41, 5]).collect();
+		assert_eq!(nals, vec![&[0x41, 5][..]]);
+	}
+
+	#[test]
+	fn codec_names_round_trip() {
+		for codec in [Codec::Vp8, Codec::H264] {
+			assert_eq!(codec.to_string().parse::<Codec>().unwrap(), codec);
+		}
+		assert_eq!("AVC".parse::<Codec>().unwrap(), Codec::H264);
+		assert!(matches!("".parse::<Codec>(), Err(Error::CodecUnavailable(_))));
+	}
+
+	#[test]
+	fn codecs_from_catalog() {
+		assert_eq!(Codec::from_catalog(&VideoCodec::VP8), Some(Codec::Vp8));
+		let avc: VideoCodec = "avc3.42001f".parse().unwrap();
+		assert_eq!(Codec::from_catalog(&avc), Some(Codec::H264));
+		assert_eq!(Codec::from_catalog(&VideoCodec::Unknown("av01.0.04M.08".into())), None);
+	}
+
+	#[test]
+	fn detects_h264_keyframes_by_idr_nal() {
+		let sps_pps_idr = [0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65, 3];
+		assert!(Codec::H264.is_keyframe(&sps_pps_idr));
+		assert!(!Codec::H264.is_keyframe(&[0, 0, 0, 1, 0x41, 3]));
+		assert!(!Codec::H264.is_keyframe(&[0, 0, 0, 1, 0x67, 1]));
+		assert!(!Codec::H264.is_keyframe(&[]));
+		assert!(!Codec::Vp8.is_keyframe(&[]));
+	}
+
+	#[test]
+	fn default_codec_is_compiled_in() {
+		if !Codec::available().is_empty() {
+			assert!(Codec::default().is_available());
+			assert_eq!(Codec::default(), Codec::available()[0]);
+		}
+	}
+
+	#[test]
+	fn missing_codecs_are_reported() {
+		for codec in [Codec::Vp8, Codec::H264] {
+			if !codec.is_available() {
+				let settings = EncoderSettings {
+					codec,
+					..Default::default()
+				};
+				assert!(matches!(Encoder::new(settings), Err(Error::CodecUnavailable(_))));
+				assert!(matches!(Decoder::new(codec), Err(Error::CodecUnavailable(_))));
+			}
+		}
+	}
+
+	#[test]
+	fn encoder_settings_derived_values() {
+		let settings = EncoderSettings::default();
+		assert_eq!(settings.gop_frames(), 120);
+		assert!((1..=4).contains(&settings.threads()));
+
+		let settings = EncoderSettings {
+			max_fps: 29.97,
+			keyframe_interval: Duration::from_secs(1),
+			threads: 8,
+			..Default::default()
+		};
+		assert_eq!(settings.gop_frames(), 60);
+		assert_eq!(settings.threads(), 8);
+
+		let settings = EncoderSettings {
+			keyframe_interval: Duration::ZERO,
+			..Default::default()
+		};
+		assert_eq!(settings.gop_frames(), 1);
 	}
 }

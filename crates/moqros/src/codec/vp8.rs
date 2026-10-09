@@ -252,4 +252,30 @@ mod tests {
 	fn keyframes() {
 		tests::keyframes(Codec::Vp8);
 	}
+
+	#[test]
+	fn pixel_formats() {
+		tests::pixel_formats(Codec::Vp8);
+	}
+
+	#[test]
+	fn irregular_timestamps() {
+		tests::irregular_timestamps(Codec::Vp8);
+	}
+
+	#[test]
+	fn forced_keyframe() {
+		tests::forced_keyframe(Codec::Vp8);
+	}
+
+	#[test]
+	fn rejects_invalid_images() {
+		tests::rejects_invalid_images(Codec::Vp8);
+	}
+
+	#[test]
+	fn decoder_rejects_garbage() {
+		let mut decoder = super::super::Decoder::new(Codec::Vp8).unwrap();
+		assert!(decoder.decode(&[0xff; 32], std::time::Duration::ZERO).is_err());
+	}
 }
