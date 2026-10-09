@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MOQ_RELAY_VERSION: 0.17.2
+
+jobs:
+  # ROS-independent core: fmt, clippy, tests (incl. H.264 and the relay round trip).
+  core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p moqros --all-targets --features h264 -- -D warnings
+      - name: Install moq-relay
+        run: |
+          if ! command -v moq-relay >/dev/null; then
+            cargo install moq-relay --version "$MOQ_RELAY_VERSION" --locked --no-default-features --features noq,websocket
+          fi
+      - name: Test
+        run: |
+          OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)
+          MOQROS_RELAY_BIN=$(command -v moq-relay)
+          export OPENH264_LIBRARY MOQROS_RELAY_BIN
+          cargo test -p moqros --features h264
+
+  # Same build docs.rs does: no ROS environment, r2r's `doc-only` bindings.
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
+      - run: cargo doc -p moqros -p moqros-cli --no-deps --features moqros/h264,moqros/doc-only
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  # Full workspace against a real ROS 2 install, plus the colcon (ament_cargo) package.
+  ros:
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [humble, jazzy]
+    runs-on: ubuntu-24.04
+    container: ros:${{ matrix.distro }}-ros-base
+    env:
+      IDL_PACKAGE_FILTER: std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates clang libclang-dev pkg-config python3-pip
+      - uses: actions/checkout@v5
+        with:
+          path: src/moqros
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/moqros
+          key: ${{ matrix.distro }}
+      - name: rosdep install
+        run: |
+          rosdep update --rosdistro "$ROS_DISTRO"
+          rosdep install --from-paths src -iy --rosdistro "$ROS_DISTRO"
+      - name: Clippy (workspace)
+        working-directory: src/moqros
+        run: |
+          # shellcheck disable=SC1090
+          source "/opt/ros/$ROS_DISTRO/setup.bash"
+          cargo clippy --workspace --all-targets --features moqros/h264 --locked -- -D warnings
+      - name: Install colcon-ros-cargo
+        run: |
+          pip3 install colcon-cargo colcon-ros-cargo
+          cargo install cargo-ament-build --locked
+      - name: colcon build
+        run: |
+          # shellcheck disable=SC1090
+          source "/opt/ros/$ROS_DISTRO/setup.bash"
+          colcon build --event-handlers console_cohesion+
+      - name: Smoke test
+        run: |
+          # shellcheck disable=SC1091
+          source install/setup.bash
+          ros2 run moqros-cli moqros-pub --help
+          ros2 run moqros-cli moqros-sub --help
