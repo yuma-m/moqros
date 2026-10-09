@@ -1,17 +1,15 @@
-# moqros
+# MoQROS
 
-Stream ROS 2 `sensor_msgs/Image` topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust.
+Stream ROS 2 image topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust.
 
-moqros converts each image to I420, encodes it to **VP8** with [libvpx](https://chromium.googlesource.com/webm/libvpx)
-(royalty-free; the default), and publishes it to a MoQ relay as a [hang](https://docs.rs/hang) broadcast.
-That's the WebCodecs-friendly format played by the official
+moqros converts each image to I420, encodes it (VP8 or H.264), and publishes it to a MoQ relay as a
+[hang](https://docs.rs/hang) broadcast. That's the WebCodecs-friendly format played by the official
 [`@moq/watch`](https://www.npmjs.com/package/@moq/watch) web component. It can also go the other way:
-subscribe to a broadcast, decode it, and republish it as a ROS topic. Optional **H.264** support
-(`h264` feature) loads Cisco's prebuilt OpenH264 binary at runtime.
+subscribe to a broadcast, decode it, and republish it as a ROS topic.
 
 ```
  ROS 2 topic ──► moqros-pub ──► moq-relay ──► browser (<moq-watch>)
- sensor_msgs/Image   VP8/hang       QUIC/WebTransport    └──► moqros-sub ──► ROS 2 topic
+ sensor_msgs/Image     hang         QUIC/WebTransport    └──► moqros-sub ──► ROS 2 topic
 ```
 
 ## Layout
@@ -138,15 +136,14 @@ while let Some(image) = images.next_image().await? {
 
 | Codec | Feature | Backend | Notes |
 | --- | --- | --- | --- |
-| VP8 | `vp8` (default) | system libvpx, real-time CBR | Royalty-free. |
-| H.264 | `h264` | Cisco's OpenH264 binary, loaded at runtime | Constrained Baseline, `avc3`. Never compiled from source (see below). |
+| VP8 | `vp8` (default) | system libvpx, real-time CBR | |
+| H.264 | `h264` | Cisco's OpenH264 binary, loaded at runtime | Constrained Baseline, `avc3`. |
 
 Pick the codec with `EncoderSettings::codec` (`moqros-pub --codec vp8|h264`). The subscriber picks the best
 rendition in the catalog that this build can decode.
 
-**H.264 and patents.** Cisco pays the H.264 patent royalties for OpenH264 only for **binaries downloaded from
-Cisco**. A library built from source isn't covered. So the `h264` feature never compiles OpenH264. It loads
-Cisco's binary at runtime instead and checks its SHA-256 against known Cisco releases:
+The `h264` feature loads Cisco's prebuilt OpenH264 binary at runtime and checks its SHA-256 against known
+Cisco releases:
 
 ```sh
 export OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)   # downloads from ciscobinary.openh264.org
@@ -178,12 +175,15 @@ The core library builds and tests natively on any OS. ROS isn't required for it,
 feature needs libvpx, pkg-config, and libclang (bindgen generates the libvpx bindings):
 
 ```sh
-brew install libvpx pkgconf            # macOS (libclang comes with the Xcode CLI tools)
-sudo apt install libvpx-dev pkg-config libclang-dev   # Debian/Ubuntu
+# Debian/Ubuntu
+sudo apt install libvpx-dev pkg-config libclang-dev
+# or macOS (libclang comes with the Xcode CLI tools)
+# brew install libvpx pkgconf
 
 cargo test -p moqros
 # H.264 tests (skipped unless OPENH264_LIBRARY is set):
-OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh) cargo test -p moqros --features h264
+# OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh) cargo test -p moqros --features h264
+
 # Integration test through a real relay:
 cargo install moq-relay
 MOQROS_RELAY_BIN=$(which moq-relay) cargo test -p moqros --test relay
@@ -196,22 +196,6 @@ because r2r generates its bindings at build time. Use the Docker `build` stage, 
 source /opt/ros/jazzy/setup.bash
 IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs" cargo build --workspace
 ```
-
-### CI and releasing
-
-`.github/workflows/ci.yml` runs fmt, clippy, and tests for the core (including H.264 and the relay round
-trip), builds the docs the way docs.rs does, and builds the workspace and the colcon package on ROS 2 Humble
-and Jazzy.
-
-To release, bump the version in `Cargo.toml` and `crates/moqros-cli/package.xml`, then push a matching tag:
-
-```sh
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-`.github/workflows/release.yml` checks that the versions match the tag and runs `cargo publish --workspace`
-inside a ROS 2 container. It needs a `CARGO_REGISTRY_TOKEN` secret in the `crates-io` environment.
-To publish by hand instead, source ROS 2, set `IDL_PACKAGE_FILTER`, and run `cargo publish --workspace`.
 
 ## License
 
