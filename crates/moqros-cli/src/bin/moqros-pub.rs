@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use moqros::ros::{r2r, spawn_ros_to_moq};
+use moqros::ros::spawn_ros_to_moq;
 use moqros_cli::{QosArgs, RelayArgs, init_logging, spawn_spinner};
 
 #[derive(Debug, Parser)]
@@ -45,14 +45,11 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	init_logging();
-	let cli = Cli::parse();
+	let (cli, mut node) = moqros_cli::init::<Cli>("moqros_pub")?;
 	let broadcast = cli
 		.broadcast
 		.clone()
 		.unwrap_or_else(|| moqros::broadcast_name_for_topic(&cli.topic));
-
-	let ctx = r2r::Context::create().context("failed to create ROS context")?;
-	let mut node = r2r::Node::create(ctx, "moqros_pub", "").context("failed to create ROS node")?;
 
 	let publisher = moqros::Publisher::connect(&cli.relay.config())?;
 	let settings = moqros::EncoderSettings {

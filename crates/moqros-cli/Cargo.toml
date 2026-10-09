@@ -36,3 +36,7 @@ moqros = { workspace = true, features = ["ros"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Installed by cargo-ament-build (colcon) into share/moqros-cli.
+[package.metadata.ros]
+install_to_share = ["launch", "config"]
