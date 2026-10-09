@@ -1,4 +1,4 @@
-//! Subscribe to moqros (or any hang H.264) broadcasts and decode them back into images.
+//! Subscribe to moqros (or any hang VP8/H.264) broadcasts and decode them back into images.
 
 use std::time::Duration;
 

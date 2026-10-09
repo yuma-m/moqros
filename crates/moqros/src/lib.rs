@@ -26,6 +26,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod client;
+mod clock;
 mod codec;
 mod convert;
 mod error;
