@@ -1,10 +1,9 @@
-//! Publish images to a MoQ relay as hang (WebCodecs-compatible) H.264 broadcasts.
-
-use std::time::Duration;
+//! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8 or H.264 broadcasts.
 
 use hang::catalog::{Catalog, Container, PRIORITY, VideoCodec, VideoConfig};
 use hang::moq_net;
 
+use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
 use crate::{ClientConfig, Error, Image, Result};
 
@@ -168,51 +167,5 @@ impl Drop for ImagePublisher {
 			let _ = group.finish();
 		}
 		self.broadcast.close();
-	}
-}
-
-/// Maps capture timestamps onto a strictly increasing microsecond timeline
-/// starting at zero, tolerating clock jumps and duplicate stamps.
-#[derive(Default)]
-struct StreamClock {
-	origin: Option<Duration>,
-	last: Option<u64>,
-}
-
-impl StreamClock {
-	fn micros(&mut self, capture: Duration) -> u64 {
-		let origin = *self.origin.get_or_insert(capture);
-		let mut micros = capture.saturating_sub(origin).as_micros() as u64;
-		if let Some(last) = self.last
-			&& micros <= last
-		{
-			micros = last + 1;
-		}
-		self.last = Some(micros);
-		micros
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn stream_clock_is_monotonic() {
-		let mut clock = StreamClock::default();
-		assert_eq!(clock.micros(Duration::from_secs(100)), 0);
-		assert_eq!(clock.micros(Duration::from_millis(100_033)), 33_000);
-		assert_eq!(clock.micros(Duration::from_millis(100_033)), 33_001);
-		assert_eq!(clock.micros(Duration::from_secs(99)), 33_002);
-	}
-
-	#[test]
-	fn stream_clock_resumes_after_a_backwards_jump() {
-		let mut clock = StreamClock::default();
-		assert_eq!(clock.micros(Duration::from_secs(10)), 0);
-		assert_eq!(clock.micros(Duration::from_secs(5)), 1);
-		assert_eq!(clock.micros(Duration::from_secs(5)), 2);
-		// Time keeps counting from the first stamp, not from the jump.
-		assert_eq!(clock.micros(Duration::from_secs(11)), 1_000_000);
 	}
 }

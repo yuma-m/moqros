@@ -100,7 +100,9 @@ impl Image {
 		data: impl Into<Bytes>,
 		timestamp: Duration,
 	) -> Result<Self, Error> {
-		let step = width * format.bytes_per_pixel() as u32;
+		let step = width
+			.checked_mul(format.bytes_per_pixel() as u32)
+			.ok_or_else(|| Error::InvalidImage(format!("{width}px wide {format} rows overflow u32")))?;
 		Self::with_step(width, height, format, step, data, timestamp)
 	}
 
@@ -127,9 +129,15 @@ impl Image {
 
 	/// Check that `step` and `data` are large enough for the declared geometry.
 	pub fn validate(&self) -> Result<(), Error> {
-		let row = self.width as usize * self.format.bytes_per_pixel();
+		let row = (self.width as usize).checked_mul(self.format.bytes_per_pixel());
 		let step = self.step as usize;
-		let needed = step * self.height as usize;
+		let needed = step.checked_mul(self.height as usize);
+		let (Some(row), Some(needed)) = (row, needed) else {
+			return Err(Error::InvalidImage(format!(
+				"{}x{} {} with step {step} overflows usize",
+				self.width, self.height, self.format
+			)));
+		};
 		if step < row || self.data.len() < needed {
 			return Err(Error::InvalidImage(format!(
 				"{}x{} {} needs step >= {row} and {needed} bytes, got step {step} and {} bytes",
@@ -187,6 +195,12 @@ mod tests {
 		assert!(Image::new(4, 4, PixelFormat::Rgb8, vec![0u8; 47], Duration::ZERO).is_err());
 		assert!(Image::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48], Duration::ZERO).is_ok());
 		assert!(Image::with_step(4, 4, PixelFormat::Rgb8, 11, vec![0u8; 64], Duration::ZERO).is_err());
+	}
+
+	#[test]
+	fn rejects_widths_whose_rows_overflow() {
+		let image = Image::new(u32::MAX / 2, 1, PixelFormat::Rgba8, vec![0u8; 4], Duration::ZERO);
+		assert!(matches!(image, Err(Error::InvalidImage(_))));
 	}
 
 	#[test]

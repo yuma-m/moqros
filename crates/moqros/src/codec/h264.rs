@@ -105,9 +105,11 @@ impl EncoderBackend for H264Encoder {
 			self.inner.force_intra_frame();
 		}
 		let bitstream = self.inner.encode(&Source(frame)).map_err(codec_error)?;
+		// Only an IDR resets decoder state, so only it may start a MoQ group; a plain
+		// I frame can still be referenced across by later frames.
 		let keyframe = match bitstream.frame_type() {
-			FrameType::IDR | FrameType::I => true,
-			FrameType::P | FrameType::IPMixed => false,
+			FrameType::IDR => true,
+			FrameType::I | FrameType::P | FrameType::IPMixed => false,
 			FrameType::Skip | FrameType::Invalid => return Ok(None),
 		};
 		let data = bitstream.to_vec();
@@ -226,6 +228,13 @@ mod tests {
 	fn rejects_invalid_images() {
 		if available() {
 			tests::rejects_invalid_images(Codec::H264);
+		}
+	}
+
+	#[test]
+	fn keyframe_after_clock_jump() {
+		if available() {
+			tests::keyframe_after_clock_jump(Codec::H264);
 		}
 	}
 }

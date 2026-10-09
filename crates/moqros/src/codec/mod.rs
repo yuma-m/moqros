@@ -11,6 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::VideoCodec;
 
+use crate::clock::StreamClock;
 use crate::convert::I420;
 use crate::{Error, Image, PixelFormat, Result};
 
@@ -170,9 +171,11 @@ pub(crate) trait DecoderBackend: Send {
 pub struct Encoder {
 	settings: EncoderSettings,
 	inner: Option<(Box<dyn EncoderBackend>, (usize, usize))>,
-	last_keyframe: Option<Duration>,
-	origin: Option<Duration>,
-	last_pts: Option<u64>,
+	/// Stream time (pts) of the last keyframe.
+	last_keyframe: Option<u64>,
+	/// Catalog codec of the last keyframe, reused for the delta frames that follow it.
+	codec: Option<VideoCodec>,
+	clock: StreamClock,
 }
 
 impl Encoder {
@@ -185,8 +188,8 @@ impl Encoder {
 			settings,
 			inner: None,
 			last_keyframe: None,
-			origin: None,
-			last_pts: None,
+			codec: None,
+			clock: StreamClock::default(),
 		})
 	}
 
@@ -208,31 +211,28 @@ impl Encoder {
 			tracing::debug!(codec = %self.settings.codec, width = dims.0, height = dims.1, "creating encoder");
 			self.inner = Some((create_encoder(&self.settings, dims)?, dims));
 			self.last_keyframe = None;
+			self.codec = None;
 		}
 		let (backend, _) = self.inner.as_mut().expect("encoder initialized above");
 
-		let force = match self.last_keyframe {
-			None => true,
-			Some(last) => image.timestamp.saturating_sub(last) >= self.settings.keyframe_interval,
-		};
-
-		// Codecs want strictly increasing presentation times.
-		let origin = *self.origin.get_or_insert(image.timestamp);
-		let mut pts = image.timestamp.saturating_sub(origin).as_micros() as u64;
-		if let Some(last) = self.last_pts
-			&& pts <= last
-		{
-			pts = last + 1;
-		}
-		self.last_pts = Some(pts);
+		// Codecs want strictly increasing presentation times. Keyframes are scheduled on
+		// the same timeline, so capture clock jumps can't stall or flood them.
+		let pts = self.clock.micros(image.timestamp);
+		let interval = self.settings.keyframe_interval.as_micros() as u64;
+		let force = self
+			.last_keyframe
+			.is_none_or(|last| pts.saturating_sub(last) >= interval);
 
 		let Some((data, keyframe)) = backend.encode(&yuv, pts, force)? else {
 			return Ok(None);
 		};
 		if keyframe {
-			self.last_keyframe = Some(image.timestamp);
+			self.last_keyframe = Some(pts);
 		}
-		let codec = backend.catalog_codec(&data);
+		let codec = match &self.codec {
+			Some(codec) if !keyframe => codec.clone(),
+			_ => self.codec.insert(backend.catalog_codec(&data)).clone(),
+		};
 
 		Ok(Some(EncodedFrame {
 			data,
@@ -347,12 +347,16 @@ pub(crate) mod tests {
 		let mut decoder = Decoder::new(codec).unwrap();
 
 		let mut decoded = 0;
+		let mut keyframe_codec = None;
 		for t in 0..10 {
 			let image = test_pattern(64, 48, t);
 			let Some(frame) = encoder.encode(&image).unwrap() else {
 				continue;
 			};
 			assert_eq!(Codec::from_catalog(&frame.codec), Some(codec));
+			// Delta frames carry the description of the keyframe they depend on.
+			let keyframe_codec = keyframe_codec.get_or_insert_with(|| frame.codec.clone());
+			assert_eq!(&frame.codec, keyframe_codec);
 			assert_eq!(codec.is_keyframe(&frame.data), frame.keyframe);
 			if t == 0 {
 				assert!(frame.keyframe, "first frame must be a keyframe");
@@ -483,6 +487,29 @@ pub(crate) mod tests {
 			assert!(!frame.keyframe);
 			assert_eq!((frame.width, frame.height), (32, 32));
 		}
+	}
+
+	/// Keyframes keep their interval when the capture clock jumps backwards (e.g. a
+	/// looping rosbag) or jitters.
+	pub(crate) fn keyframe_after_clock_jump(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			keyframe_interval: Duration::from_secs(1),
+			..Default::default()
+		})
+		.unwrap();
+		let mut encode = |millis: u64| {
+			let mut image = test_pattern(32, 32, 0);
+			image.timestamp = Duration::from_millis(millis);
+			encoder.encode(&image).unwrap()
+		};
+		assert!(encode(100_000).expect("first frame is a keyframe").keyframe);
+		// Neither a small step back nor a restarted clock is due for a keyframe yet.
+		for millis in [100_033, 100_032, 0, 500] {
+			assert!(encode(millis).is_none_or(|frame| !frame.keyframe), "{millis}ms");
+		}
+		let frame = encode(1_000).expect("forced keyframes aren't dropped");
+		assert!(frame.keyframe, "a second passed since the first keyframe");
 	}
 
 	#[test]

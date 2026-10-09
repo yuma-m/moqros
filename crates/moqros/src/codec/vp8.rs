@@ -274,6 +274,11 @@ mod tests {
 	}
 
 	#[test]
+	fn keyframe_after_clock_jump() {
+		tests::keyframe_after_clock_jump(Codec::Vp8);
+	}
+
+	#[test]
 	fn decoder_rejects_garbage() {
 		let mut decoder = super::super::Decoder::new(Codec::Vp8).unwrap();
 		assert!(decoder.decode(&[0xff; 32], std::time::Duration::ZERO).is_err());
