@@ -1,5 +1,9 @@
 # MoQROS
 
+[![crates.io](https://img.shields.io/crates/v/moqros.svg)](https://crates.io/crates/moqros)
+[![docs.rs](https://img.shields.io/docsrs/moqros)](https://docs.rs/moqros)
+[![crates.io (moqros-cli)](https://img.shields.io/crates/v/moqros-cli.svg?label=moqros-cli)](https://crates.io/crates/moqros-cli)
+
 Stream ROS 2 image topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust.
 
 moqros converts each image to I420, encodes it (VP8 or H.264), and publishes it to a MoQ relay as a
@@ -16,8 +20,8 @@ subscribe to a broadcast, decode it, and republish it as a ROS topic.
 
 | Path | What |
 | --- | --- |
-| `crates/moqros` | The library. The core (conversion, codec, MoQ publish/subscribe) is ROS-independent; the `ros` feature adds r2r bridges. |
-| `crates/moqros-cli` | Bridge nodes: `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). Also a colcon (`ament_cargo`) package. |
+| `crates/moqros` | The library ([crates.io](https://crates.io/crates/moqros), [docs.rs](https://docs.rs/moqros)). The core (conversion, codec, MoQ publish/subscribe) is ROS-independent; the `ros` feature adds r2r bridges. |
+| `crates/moqros-cli` | Bridge nodes ([crates.io](https://crates.io/crates/moqros-cli)): `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). Also a colcon (`ament_cargo`) package. |
 | `examples/image_source` | Sample node that plays a video file (via ffmpeg) or a PNG/JPEG directory as an Image topic. |
 | `examples/web` | Static browser viewer built on `@moq/watch`. |
 | `docker/` | Dockerfile (ROS 2 Jazzy + Rust, moq-relay) and the end-to-end `compose.yml`. |
@@ -69,7 +73,7 @@ If UDP port forwarding doesn't work in your Docker setup, run the relay on the h
 `moqros-pub` and `moqros-sub` need a ROS 2 environment, libvpx, pkg-config, and libclang at build time
 (see [Development](#development)).
 
-With cargo:
+With cargo, from [crates.io](https://crates.io/crates/moqros-cli):
 
 ```sh
 source /opt/ros/jazzy/setup.bash
@@ -92,6 +96,9 @@ ros2 run moqros-cli moqros-pub --help
 ```
 
 ## Library usage
+
+The library is published on [crates.io](https://crates.io/crates/moqros) as `moqros`; API docs are on
+[docs.rs](https://docs.rs/moqros).
 
 ```toml
 [dependencies]
