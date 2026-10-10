@@ -4,14 +4,14 @@ members = ["crates/moqros", "crates/moqros-cli", "examples/image_source"]
 default-members = ["crates/moqros", "crates/moqros-cli", "examples/image_source"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yuma-m/moqros"
 rust-version = "1.91"
 
 [workspace.dependencies]
-moqros = { path = "crates/moqros", version = "0.1.0" }
+moqros = { path = "crates/moqros", version = "0.2.0" }
 anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
