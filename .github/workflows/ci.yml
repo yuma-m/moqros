@@ -27,7 +27,7 @@ jobs:
   core:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -52,7 +52,7 @@ jobs:
   docs:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -80,7 +80,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates clang libclang-dev pkg-config python3-pip
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: src/moqros
       - uses: dtolnay/rust-toolchain@stable
