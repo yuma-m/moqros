@@ -1,0 +1,96 @@
+name: Bump version
+
+# Open a PR that bumps the workspace version. Merging it triggers release.yml,
+# which tags the merge commit, publishes to crates.io and creates a GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: Explicit version (e.g. 0.2.0); overrides `bump` when set
+        type: string
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      # To dispatch ci.yml on the PR branch.
+      actions: write
+    steps:
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run this workflow from main (got $GITHUB_REF)"
+          exit 1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compute version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -n "$EXPLICIT" ]; then
+            next="${EXPLICIT#v}"
+          else
+            IFS=. read -r major minor patch <<<"$current"
+            case "$BUMP" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="$major.$((minor + 1)).0" ;;
+              patch) next="$major.$minor.$((patch + 1))" ;;
+            esac
+          fi
+          if ! [[ "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version: $next"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$next" >/dev/null; then
+            echo "::error::Tag v$next already exists"
+            exit 1
+          fi
+          echo "$current -> $next"
+          echo "current=$current" >>"$GITHUB_OUTPUT"
+          echo "next=$next" >>"$GITHUB_OUTPUT"
+      - name: Update version files
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          sed -i "s/^version = \"$CURRENT\"/version = \"$NEXT\"/" Cargo.toml
+          sed -i "s|^moqros = { path = \"crates/moqros\", version = \"$CURRENT\" }|moqros = { path = \"crates/moqros\", version = \"$NEXT\" }|" Cargo.toml
+          sed -i "s|<version>$CURRENT</version>|<version>$NEXT</version>|" crates/moqros-cli/package.xml
+          cargo update --workspace
+          git diff
+          # Every bumped file must have changed, and nothing else.
+          [ "$(git diff --name-only | sort | tr '\n' ' ')" = "Cargo.lock Cargo.toml crates/moqros-cli/package.xml " ]
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          branch="release/v$NEXT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "Bump version to $NEXT"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "Bump version to $NEXT" \
+            --body "Merging this PR tags \`v$NEXT\`, publishes moqros and moqros-cli to crates.io and creates a GitHub release."
+          # Pushes and PRs made with GITHUB_TOKEN don't trigger CI, so dispatch it
+          # to report the required status checks on the PR's head commit.
+          gh workflow run ci.yml --ref "$branch"
