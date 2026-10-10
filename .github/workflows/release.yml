@@ -24,7 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       release: ${{ steps.version.outputs.release }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Read version
         id: version
         run: |
@@ -51,7 +51,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Create tag
         env:
           TAG: ${{ needs.check.outputs.tag }}
@@ -79,7 +79,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates clang libclang-dev pkg-config libvpx-dev
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish
         env:
