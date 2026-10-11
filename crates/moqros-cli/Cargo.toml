@@ -1,6 +1,6 @@
 [package]
 name = "moqros-cli"
-description = "ROS 2 <-> Media over QUIC image bridge nodes"
+description = "ROS 2 <-> Media over QUIC bridge nodes for images and other messages"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -32,6 +32,7 @@ path = "src/bin/moqros-sub.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+futures.workspace = true
 moqros = { workspace = true, features = ["ros"] }
 tokio.workspace = true
 tracing.workspace = true

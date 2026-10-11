@@ -1,6 +1,6 @@
 [package]
 name = "moqros"
-description = "Stream ROS 2 sensor_msgs/Image topics over Media over QUIC"
+description = "Stream ROS 2 topics (images as video, any message as data) over Media over QUIC"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -35,6 +35,7 @@ moq-tokio.workspace = true
 openh264 = { workspace = true, optional = true }
 env-libvpx-sys = { workspace = true, optional = true }
 r2r = { workspace = true, optional = true }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

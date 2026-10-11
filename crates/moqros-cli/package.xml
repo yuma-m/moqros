@@ -3,7 +3,7 @@
 <package format="3">
   <name>moqros-cli</name>
   <version>0.2.0</version>
-  <description>ROS 2 &lt;-&gt; Media over QUIC image bridge nodes (moqros-pub, moqros-sub)</description>
+  <description>ROS 2 &lt;-&gt; Media over QUIC bridge nodes for images and other messages (moqros-pub, moqros-sub)</description>
   <maintainer email="yuma-m@users.noreply.github.com">Yuma.M</maintainer>
   <license>MIT</license>
   <license>Apache-2.0</license>
@@ -23,6 +23,7 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>rosgraph_msgs</depend>
 
   <!-- launch/moqros.launch.py -->

@@ -1,5 +1,6 @@
 # End-to-end sample:
-#   image_source (/sample/image_raw) -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image)
+#   image_source (/sample/image_raw, video) + ros2 topic pub (/chatter, JSON data)
+#     -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image, /moqros/chatter)
 #
 #   docker compose -f docker/compose.yml up --build
 #
@@ -56,17 +57,29 @@ services:
 
   moqros-pub:
     <<: *ros
-    command: ["moqros-pub", "--topic", "/sample/image_raw", "--url", "http://relay:4443/anon", "--reliable"]
+    command: ["moqros-pub", "--topic", "/sample/image_raw", "--topic", "/chatter,format=json",
+              "--url", "http://relay:4443/anon", "--reliable"]
+    network_mode: service:source
+    ipc: service:source
+    depends_on: [relay, source, chatter]
+
+  moqros-sub:
+    <<: *ros
+    command: ["moqros-sub", "--broadcast", "sample/image_raw,topic=/moqros/image", "--broadcast", "chatter",
+              "--url", "http://relay:4443/anon"]
     network_mode: service:source
     ipc: service:source
     depends_on: [relay, source]
 
-  moqros-sub:
+  # Any message type can go out as data; moqros-pub streams this topic as JSON. `now` stamps
+  # each message with the publish time; only every 100th (one per 10 s) is logged.
+  chatter:
     <<: *ros
-    command: ["moqros-sub", "--broadcast", "sample/image_raw", "--topic", "/moqros/image", "--url", "http://relay:4443/anon"]
+    command: ["ros2", "topic", "pub", "-r", "10", "-p", "100", "/chatter", "std_msgs/msg/Header",
+              "{stamp: now, frame_id: chatter}"]
     network_mode: service:source
     ipc: service:source
-    depends_on: [relay, source]
+    depends_on: [source]
 
   web:
     image: nginx:1.27-alpine

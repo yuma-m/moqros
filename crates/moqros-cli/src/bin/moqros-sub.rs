@@ -1,23 +1,35 @@
-//! Subscribe to a MoQ image broadcast, decode it and republish it as a ROS 2 topic.
+//! Subscribe to MoQ broadcasts and republish each as a ROS 2 topic: video decoded into
+//! images, or data tracks as the message type they carry.
 
+use anyhow::{Context, bail};
 use clap::Parser;
-use moqros::ros::spawn_moq_to_ros;
-use moqros_cli::{QosArgs, RelayArgs, init_logging};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use moqros::ros::MoqToRos;
+use moqros_cli::{BroadcastSpec, QosArgs, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
-	/// Broadcast name to subscribe to.
+	/// Broadcast to subscribe to; repeat for several. Options after the name override
+	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam`.
 	#[arg(long, default_value = "image_raw")]
-	broadcast: String,
+	broadcast: Vec<BroadcastSpec>,
 
-	/// Topic to publish decoded `rgb8` images on.
-	#[arg(long, default_value = "/moqros/image")]
-	topic: String,
+	/// Topic to publish on: decoded `rgb8` images for video, or the data track's messages.
+	/// Single broadcast only; defaults to `/moqros/image` for one broadcast, and to
+	/// `/moqros/<broadcast>` for each of several.
+	#[arg(long)]
+	topic: Option<String>,
 
 	/// `header.frame_id` of the republished images.
 	#[arg(long, default_value = "camera")]
 	frame_id: String,
+
+	/// Message type to republish a data track as; defaults to the type its catalog names.
+	/// Single broadcast only.
+	#[arg(id = "type", long = "type")]
+	ros_type: Option<String>,
 
 	#[command(flatten)]
 	relay: RelayArgs,
@@ -30,25 +42,60 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
 	init_logging();
 	let (cli, mut node) = moqros_cli::init::<Cli>("moqros_sub")?;
+	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id)?;
 
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
-	let bridge = spawn_moq_to_ros(
-		&mut node,
-		&cli.topic,
-		cli.qos.profile(),
-		&cli.frame_id,
-		subscriber,
-		&cli.broadcast,
-	)?;
+	tracing::info!(url = %cli.relay.url, broadcasts = broadcasts.len(), "connecting to the relay");
+
+	// A topic's type depends on what its broadcast carries, so wait for each broadcast
+	// (all at once) before creating its publisher.
+	let mut subscribing: FuturesUnordered<_> = broadcasts
+		.into_iter()
+		.map(|broadcast| {
+			let subscriber = subscriber.clone();
+			async move { (MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast) }
+		})
+		.collect();
+	let mut bridges = FuturesUnordered::new();
+	// Created once, so a signal arriving while the loop body runs isn't missed.
+	let ctrl_c = tokio::signal::ctrl_c();
+	tokio::pin!(ctrl_c);
+
 	// The node only publishes, so it never needs spinning (spin_once would busy-loop
-	// with nothing to wait on); keep it alive for the publisher's sake.
-	let _node = node;
-
-	tracing::info!(broadcast = cli.broadcast, topic = cli.topic, url = %cli.relay.url, "bridging MoQ -> ROS");
-
-	tokio::select! {
-		res = bridge => res??,
-		_ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
+	// with nothing to wait on).
+	loop {
+		tokio::select! {
+			Some((ready, broadcast)) = subscribing.next() => {
+				let bridge = ready.spawn(
+					&mut node,
+					&broadcast.topic,
+					cli.qos.profile(),
+					&broadcast.frame_id,
+					broadcast.ros_type.as_deref(),
+				);
+				match bridge {
+					Ok(bridge) => {
+						tracing::info!(broadcast = broadcast.broadcast, topic = broadcast.topic, "bridging MoQ -> ROS");
+						bridges.push(async move { (broadcast.broadcast, bridge.await) });
+					}
+					// E.g. a message type this build has no bindings for: the other
+					// broadcasts can still go on.
+					Err(err) => {
+						tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
+						if subscribing.is_empty() && bridges.is_empty() {
+							bail!("no broadcast could be republished");
+						}
+					}
+				}
+			}
+			Some((broadcast, res)) = bridges.next() => {
+				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
+				return Ok(());
+			}
+			_ = &mut ctrl_c => {
+				tracing::info!("interrupted");
+				return Ok(());
+			}
+		}
 	}
-	Ok(())
 }

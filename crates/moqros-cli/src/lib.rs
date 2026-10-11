@@ -1,16 +1,18 @@
 //! Shared plumbing for the moqros bridge binaries.
 
 use std::any::TypeId;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use clap::builder::BoolishValueParser;
 use clap::error::ErrorKind;
-use clap::{ArgAction, Args, Command, Parser};
+use clap::{ArgAction, Args, Command, Parser, ValueEnum};
 use moqros::ros::r2r::ParameterValue;
-use moqros::ros::{QosProfile, r2r};
+use moqros::ros::{QosProfile, ROS_IMAGE_TYPE, r2r};
 use tokio::task::JoinHandle;
 
 /// Relay connection flags.
@@ -33,6 +35,233 @@ impl RelayArgs {
 			insecure: self.insecure,
 		}
 	}
+}
+
+/// What `moqros-pub` sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+	/// Encode `sensor_msgs/msg/Image` messages as video.
+	Video,
+	/// Any message type, as one JSON document per message.
+	Json,
+	/// Any message type, in its ROS serialization (CDR).
+	Cdr,
+}
+
+impl Format {
+	/// The data track format, or `None` for video.
+	pub fn data(self) -> Option<moqros::DataFormat> {
+		match self {
+			Self::Video => None,
+			Self::Json => Some(moqros::DataFormat::Json),
+			Self::Cdr => Some(moqros::DataFormat::Cdr),
+		}
+	}
+}
+
+/// `NAME[,key=value...]` split into the name and its options.
+type Spec<'a> = (&'a str, Vec<(&'a str, &'a str)>);
+
+/// Split `NAME[,key=value...]` into the name and its options, rejecting keys not in `keys`.
+fn split_spec<'a>(spec: &'a str, keys: &[&str]) -> Result<Spec<'a>, String> {
+	let mut parts = spec.split(',');
+	let name = parts.next().unwrap_or_default().trim();
+	if name.is_empty() {
+		return Err(format!("{spec:?} doesn't start with a name"));
+	}
+	let mut options: Vec<(&str, &str)> = Vec::new();
+	for part in parts {
+		let (key, value) = part
+			.split_once('=')
+			.ok_or_else(|| format!("expected key=value, got {part:?}"))?;
+		let (key, value) = (key.trim(), value.trim());
+		if !keys.contains(&key) {
+			return Err(format!("unknown option {key:?} (expected one of: {})", keys.join(", ")));
+		}
+		if options.iter().any(|(k, _)| *k == key) {
+			return Err(format!("option {key:?} given twice"));
+		}
+		options.push((key, value));
+	}
+	Ok((name, options))
+}
+
+/// A topic for `moqros-pub`: `TOPIC[,format=…][,type=…][,mode=…][,broadcast=…]`.
+///
+/// Options left out fall back to the matching command-line flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicSpec {
+	pub topic: String,
+	pub format: Option<Format>,
+	pub ros_type: Option<String>,
+	pub mode: Option<moqros::DataMode>,
+	pub broadcast: Option<String>,
+}
+
+impl FromStr for TopicSpec {
+	type Err = String;
+
+	fn from_str(spec: &str) -> Result<Self, String> {
+		let (topic, options) = split_spec(spec, &["format", "type", "mode", "broadcast"])?;
+		let mut parsed = Self {
+			topic: topic.to_string(),
+			format: None,
+			ros_type: None,
+			mode: None,
+			broadcast: None,
+		};
+		for (key, value) in options {
+			match key {
+				"format" => parsed.format = Some(Format::from_str(value, true)?),
+				"type" => parsed.ros_type = Some(value.to_string()),
+				"mode" => parsed.mode = Some(value.parse().map_err(|err| format!("{err}"))?),
+				_ => parsed.broadcast = Some(value.to_string()),
+			}
+		}
+		Ok(parsed)
+	}
+}
+
+/// What `moqros-pub` does with one topic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubTopic {
+	pub topic: String,
+	pub broadcast: String,
+	pub format: Format,
+	pub mode: moqros::DataMode,
+	/// Looked up in the ROS graph when `None` (unless the format is video).
+	pub ros_type: Option<String>,
+}
+
+/// Fill in each topic's options from the flags: `format` and `mode` apply to every topic,
+/// while `ros_type` and `broadcast` name one topic, so they need exactly one.
+pub fn pub_topics(
+	specs: Vec<TopicSpec>,
+	format: Format,
+	mode: moqros::DataMode,
+	ros_type: Option<String>,
+	broadcast: Option<String>,
+) -> anyhow::Result<Vec<PubTopic>> {
+	ensure!(!specs.is_empty(), "no topic to publish");
+	ensure!(
+		specs.len() == 1 || (ros_type.is_none() && broadcast.is_none()),
+		"--type and --broadcast need a single --topic; give several topics `type=` and `broadcast=` options instead"
+	);
+	let mut broadcasts = HashSet::new();
+	specs
+		.into_iter()
+		.map(|spec| {
+			let topic = PubTopic {
+				broadcast: spec
+					.broadcast
+					.or(broadcast.clone())
+					.unwrap_or_else(|| moqros::broadcast_name_for_topic(&spec.topic)),
+				format: spec.format.unwrap_or(format),
+				mode: spec.mode.unwrap_or(mode),
+				ros_type: spec.ros_type.or(ros_type.clone()),
+				topic: spec.topic,
+			};
+			if topic.format == Format::Video
+				&& let Some(ros_type) = topic.ros_type.as_deref().filter(|t| *t != ROS_IMAGE_TYPE)
+			{
+				bail!(
+					"{}: video needs {ROS_IMAGE_TYPE} messages, not {ros_type}; use format=json or cdr",
+					topic.topic
+				);
+			}
+			ensure!(
+				broadcasts.insert(topic.broadcast.clone()),
+				"several topics publish the broadcast {:?}",
+				topic.broadcast
+			);
+			Ok(topic)
+		})
+		.collect()
+}
+
+/// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…]`.
+///
+/// Options left out fall back to the matching command-line flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadcastSpec {
+	pub broadcast: String,
+	pub topic: Option<String>,
+	pub ros_type: Option<String>,
+	pub frame_id: Option<String>,
+}
+
+impl FromStr for BroadcastSpec {
+	type Err = String;
+
+	fn from_str(spec: &str) -> Result<Self, String> {
+		let (broadcast, options) = split_spec(spec, &["topic", "type", "frame_id"])?;
+		let mut parsed = Self {
+			broadcast: broadcast.to_string(),
+			topic: None,
+			ros_type: None,
+			frame_id: None,
+		};
+		for (key, value) in options {
+			let value = Some(value.to_string());
+			match key {
+				"topic" => parsed.topic = value,
+				"type" => parsed.ros_type = value,
+				_ => parsed.frame_id = value,
+			}
+		}
+		Ok(parsed)
+	}
+}
+
+/// What `moqros-sub` does with one broadcast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubBroadcast {
+	pub broadcast: String,
+	pub topic: String,
+	/// Taken from the catalog when `None`.
+	pub ros_type: Option<String>,
+	pub frame_id: String,
+}
+
+/// Topic of a lone broadcast that neither `topic=` nor `--topic` names.
+pub const DEFAULT_SUB_TOPIC: &str = "/moqros/image";
+
+/// Fill in each broadcast's options from the flags. `topic` and `ros_type` name one
+/// broadcast, so they need exactly one. Without either `topic=` or `--topic`, a lone
+/// broadcast goes to [`DEFAULT_SUB_TOPIC`], and each of several to `/moqros/<broadcast>`.
+pub fn sub_broadcasts(
+	specs: Vec<BroadcastSpec>,
+	topic: Option<String>,
+	ros_type: Option<String>,
+	frame_id: &str,
+) -> anyhow::Result<Vec<SubBroadcast>> {
+	ensure!(!specs.is_empty(), "no broadcast to subscribe to");
+	let single = specs.len() == 1;
+	ensure!(
+		single || (topic.is_none() && ros_type.is_none()),
+		"--topic and --type need a single --broadcast; give several broadcasts `topic=` and `type=` options instead"
+	);
+	let mut topics = HashSet::new();
+	specs
+		.into_iter()
+		.map(|spec| {
+			let broadcast = SubBroadcast {
+				topic: spec.topic.or(topic.clone()).unwrap_or_else(|| match single {
+					true => DEFAULT_SUB_TOPIC.to_string(),
+					false => format!("/moqros/{}", spec.broadcast.trim_matches('/')),
+				}),
+				ros_type: spec.ros_type.or(ros_type.clone()),
+				frame_id: spec.frame_id.unwrap_or_else(|| frame_id.to_string()),
+				broadcast: spec.broadcast,
+			};
+			ensure!(
+				topics.insert(broadcast.topic.clone()),
+				"several broadcasts publish on {}",
+				broadcast.topic
+			);
+			Ok(broadcast)
+		})
+		.collect()
 }
 
 /// ROS QoS flags.
@@ -128,8 +357,21 @@ enum ParseError {
 ///
 /// The parameter flags go right after the program name. With `args_override_self` a
 /// later occurrence of a flag wins, so the command line overrides them, while
-/// environment variables and defaults only apply to flags given neither way.
+/// environment variables and defaults only apply to flags given neither way. Repeatable
+/// flags collect every occurrence instead, so parameter flags that the command line
+/// gives again are dropped up front.
 fn parse_args<T: Parser>(args: Vec<String>, param_flags: Vec<String>) -> Result<T, ParseError> {
+	let flag = |arg: &str| arg.split_once('=').map_or(arg, |(flag, _)| flag).to_string();
+	let given: HashSet<String> = args
+		.iter()
+		.skip(1)
+		.filter(|arg| arg.starts_with("--"))
+		.map(|arg| flag(arg))
+		.collect();
+	let param_flags: Vec<String> = param_flags
+		.into_iter()
+		.filter(|param| !given.contains(&flag(param)))
+		.collect();
 	let parse = |param_flags: Vec<String>| {
 		let mut args = args.iter().cloned();
 		let args = args.next().into_iter().chain(param_flags).chain(args);
@@ -173,6 +415,11 @@ fn param_flags<'a>(
 			}
 			ParameterValue::Double(value) => value.to_string(),
 			ParameterValue::String(value) => value.clone(),
+			// A list fills a repeatable flag, one occurrence per element.
+			ParameterValue::StringArray(values) if matches!(arg.get_action(), ArgAction::Append) => {
+				flags.extend(values.iter().map(|value| format!("--{long}={value}")));
+				continue;
+			}
 			value => bail!("ROS parameter `{name}` has unsupported type: {value:?}"),
 		};
 		// One token, so values starting with `-` aren't taken for flags.
@@ -190,16 +437,46 @@ pub fn init_logging() {
 		.init();
 }
 
+/// A node shared between [`spawn_spinner`] and code that adds subscriptions while it spins.
+pub struct SharedNode {
+	node: Mutex<r2r::Node>,
+	/// Set while [`SharedNode::with`] waits, so the spinner lets go of the lock. A mutex
+	/// isn't fair: a spinner relocking it right away could starve the waiter.
+	waiting: AtomicBool,
+}
+
+impl SharedNode {
+	pub fn new(node: r2r::Node) -> Arc<Self> {
+		Arc::new(Self {
+			node: Mutex::new(node),
+			waiting: AtomicBool::new(false),
+		})
+	}
+
+	/// Run `f` on the node, between two spins.
+	pub fn with<R>(&self, f: impl FnOnce(&mut r2r::Node) -> R) -> R {
+		self.waiting.store(true, Ordering::Relaxed);
+		let mut node = self.node.lock().unwrap_or_else(|err| err.into_inner());
+		self.waiting.store(false, Ordering::Relaxed);
+		f(&mut node)
+	}
+}
+
 /// Spin `node` on a blocking thread until the returned guard is dropped.
 ///
 /// The tokio runtime waits for blocking tasks on shutdown, so a spinner that never
 /// stops would keep the process alive after `main` returns.
-pub fn spawn_spinner(mut node: r2r::Node) -> Spinner {
+pub fn spawn_spinner(node: Arc<SharedNode>) -> Spinner {
 	let stop = Arc::new(AtomicBool::new(false));
 	let stopped = stop.clone();
 	let task = tokio::task::spawn_blocking(move || {
 		while !stopped.load(Ordering::Relaxed) {
-			node.spin_once(Duration::from_millis(50));
+			if node.waiting.load(Ordering::Relaxed) {
+				std::thread::yield_now();
+				continue;
+			}
+			let mut guard = node.node.lock().unwrap_or_else(|err| err.into_inner());
+			guard.spin_once(Duration::from_millis(50));
 		}
 	});
 	Spinner { stop, task: Some(task) }
@@ -258,11 +535,26 @@ mod tests {
 		#[arg(long, default_value_t = 2000)]
 		keyframe_interval_ms: u64,
 
+		#[arg(long, value_enum, default_value_t = Format::Video)]
+		format: Format,
+
+		#[arg(id = "type", long = "type")]
+		ros_type: Option<String>,
+
+		#[arg(long, default_value_t = moqros::DataMode::default())]
+		mode: moqros::DataMode,
+
 		#[command(flatten)]
 		relay: RelayArgs,
 
 		#[command(flatten)]
 		qos: QosArgs,
+	}
+
+	#[derive(Debug, Parser)]
+	struct MultiCli {
+		#[arg(long, default_value = "/image_raw")]
+		topic: Vec<TopicSpec>,
 	}
 
 	/// Only parsed by `params_override_env`, in a child process of its own.
@@ -341,6 +633,37 @@ mod tests {
 		assert_eq!(cli.relay.url.as_str(), "http://relay:4443/anon");
 		assert!(!cli.relay.insecure);
 		assert_eq!(cli.broadcast, None);
+	}
+
+	#[test]
+	fn data_params_fill_flags() {
+		let cli: TestCli = parse(&[], &[]).unwrap();
+		assert_eq!(
+			(cli.format, cli.ros_type, cli.mode),
+			(Format::Video, None, moqros::DataMode::Snapshot)
+		);
+
+		let cli: TestCli = parse(
+			&[],
+			&[
+				("format", string("json")),
+				("type", string("sensor_msgs/msg/Imu")),
+				("mode", string("stream")),
+			],
+		)
+		.unwrap();
+		assert_eq!(cli.format, Format::Json);
+		assert_eq!(cli.format.data(), Some(moqros::DataFormat::Json));
+		assert_eq!(cli.ros_type.as_deref(), Some("sensor_msgs/msg/Imu"));
+		assert_eq!(cli.mode, moqros::DataMode::Stream);
+
+		let cli: TestCli = parse(&["--format", "cdr", "--type", "std_msgs/msg/String"], &[]).unwrap();
+		assert_eq!(cli.format.data(), Some(moqros::DataFormat::Cdr));
+		assert_eq!(cli.ros_type.as_deref(), Some("std_msgs/msg/String"));
+		assert!(matches!(
+			parse::<TestCli>(&[], &[("format", string("xml"))]),
+			Err(ParseError::Param(_))
+		));
 	}
 
 	#[test]
@@ -434,6 +757,184 @@ mod tests {
 			("version", string("2")),
 		];
 		assert!(flags::<TestCli>(&params).unwrap().is_empty());
+	}
+
+	#[test]
+	fn arrays_fill_repeatable_flags() {
+		let topics = |cli: MultiCli| cli.topic.into_iter().map(|spec| spec.topic).collect::<Vec<_>>();
+		assert_eq!(topics(parse(&[], &[]).unwrap()), ["/image_raw"]);
+		let params = [(
+			"topic",
+			ParameterValue::StringArray(vec!["/a".into(), "/b,format=json".into()]),
+		)];
+		let cli: MultiCli = parse(&[], &params).unwrap();
+		assert_eq!(cli.topic[1].format, Some(Format::Json));
+		assert_eq!(topics(cli), ["/a", "/b"]);
+		// A single string still works, and the command line replaces the whole list.
+		assert_eq!(topics(parse(&[], &[("topic", string("/c"))]).unwrap()), ["/c"]);
+		assert_eq!(topics(parse(&["--topic", "/d"], &params).unwrap()), ["/d"]);
+	}
+
+	#[test]
+	fn parses_topic_specs() {
+		let spec: TopicSpec = "/scan, format=cdr ,type=sensor_msgs/msg/LaserScan,mode=stream,broadcast=lidar"
+			.parse()
+			.unwrap();
+		assert_eq!(
+			spec,
+			TopicSpec {
+				topic: "/scan".into(),
+				format: Some(Format::Cdr),
+				ros_type: Some("sensor_msgs/msg/LaserScan".into()),
+				mode: Some(moqros::DataMode::Stream),
+				broadcast: Some("lidar".into()),
+			}
+		);
+		assert_eq!("/image_raw".parse::<TopicSpec>().unwrap().format, None);
+		for bad in [
+			"",
+			",format=json",
+			"/a,json",
+			"/a,codec=vp8",
+			"/a,format=xml",
+			"/a,mode=x",
+			"/a,type=x,type=y",
+		] {
+			assert!(bad.parse::<TopicSpec>().is_err(), "{bad:?}");
+		}
+
+		let spec: BroadcastSpec = "camera/image_raw,topic=/out,frame_id=cam,type=sensor_msgs/msg/Image"
+			.parse()
+			.unwrap();
+		assert_eq!(
+			(spec.broadcast.as_str(), spec.topic.as_deref(), spec.frame_id.as_deref()),
+			("camera/image_raw", Some("/out"), Some("cam"))
+		);
+		assert!("chatter,format=json".parse::<BroadcastSpec>().is_err());
+	}
+
+	#[test]
+	fn resolves_pub_topics() {
+		let specs = |specs: &[&str]| {
+			specs
+				.iter()
+				.map(|s| s.parse::<TopicSpec>().unwrap())
+				.collect::<Vec<_>>()
+		};
+		let snapshot = moqros::DataMode::Snapshot;
+
+		let topics = pub_topics(
+			specs(&[
+				"/camera/image_raw",
+				"/chatter,format=json",
+				"/log,mode=stream,broadcast=logs",
+			]),
+			Format::Video,
+			snapshot,
+			None,
+			None,
+		)
+		.unwrap();
+		let summary: Vec<_> = topics
+			.iter()
+			.map(|t| (t.broadcast.as_str(), t.format, t.mode))
+			.collect();
+		assert_eq!(
+			summary,
+			[
+				("camera/image_raw", Format::Video, snapshot),
+				("chatter", Format::Json, snapshot),
+				("logs", Format::Video, moqros::DataMode::Stream),
+			]
+		);
+
+		// Flags that name one topic.
+		let one = pub_topics(
+			specs(&["/a"]),
+			Format::Cdr,
+			snapshot,
+			Some("t/msg/T".into()),
+			Some("b".into()),
+		)
+		.unwrap();
+		assert_eq!(
+			(one[0].broadcast.as_str(), one[0].ros_type.as_deref()),
+			("b", Some("t/msg/T"))
+		);
+		assert!(
+			pub_topics(
+				specs(&["/a", "/b"]),
+				Format::Json,
+				snapshot,
+				Some("t/msg/T".into()),
+				None
+			)
+			.is_err()
+		);
+		assert!(pub_topics(specs(&["/a", "/b"]), Format::Json, snapshot, None, Some("b".into())).is_err());
+
+		assert!(pub_topics(specs(&["/a", "a,format=json"]), Format::Video, snapshot, None, None).is_err());
+		assert!(
+			pub_topics(
+				specs(&["/a,type=std_msgs/msg/String"]),
+				Format::Video,
+				snapshot,
+				None,
+				None
+			)
+			.is_err()
+		);
+		assert!(
+			pub_topics(
+				specs(&["/a,type=sensor_msgs/msg/Image"]),
+				Format::Video,
+				snapshot,
+				None,
+				None
+			)
+			.is_ok()
+		);
+		assert!(pub_topics(Vec::new(), Format::Video, snapshot, None, None).is_err());
+	}
+
+	#[test]
+	fn resolves_sub_broadcasts() {
+		let specs = |specs: &[&str]| {
+			specs
+				.iter()
+				.map(|s| s.parse::<BroadcastSpec>().unwrap())
+				.collect::<Vec<_>>()
+		};
+		let topics = |broadcasts: Vec<SubBroadcast>| broadcasts.into_iter().map(|b| b.topic).collect::<Vec<_>>();
+
+		assert_eq!(
+			topics(sub_broadcasts(specs(&["image_raw"]), None, None, "camera").unwrap()),
+			[DEFAULT_SUB_TOPIC]
+		);
+		assert_eq!(
+			topics(sub_broadcasts(specs(&["image_raw"]), Some("/x".into()), None, "camera").unwrap()),
+			["/x"]
+		);
+		let broadcasts = sub_broadcasts(
+			specs(&[
+				"sample/image_raw,topic=/moqros/image",
+				"chatter",
+				"/front/imu/,frame_id=imu",
+			]),
+			None,
+			None,
+			"camera",
+		)
+		.unwrap();
+		assert_eq!(broadcasts[2].frame_id, "imu");
+		assert_eq!(
+			topics(broadcasts),
+			["/moqros/image", "/moqros/chatter", "/moqros/front/imu"]
+		);
+
+		assert!(sub_broadcasts(specs(&["a", "b"]), Some("/x".into()), None, "camera").is_err());
+		assert!(sub_broadcasts(specs(&["a", "b"]), None, Some("t/msg/T".into()), "camera").is_err());
+		assert!(sub_broadcasts(specs(&["a,topic=/x", "b,topic=/x"]), None, None, "camera").is_err());
 	}
 
 	#[test]
