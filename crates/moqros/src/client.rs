@@ -1,5 +1,8 @@
 //! Relay connection settings shared by publishers and subscribers.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use url::Url;
 
 use crate::Result;
@@ -14,11 +17,27 @@ pub struct ClientConfig {
 	pub url: Url,
 	/// Skip TLS verification entirely. Development only.
 	pub insecure: bool,
+	/// PEM client certificate chain for mTLS. Set it together with `tls_key`.
+	pub tls_cert: Option<PathBuf>,
+	/// PEM private key of `tls_cert`.
+	pub tls_key: Option<PathBuf>,
 }
 
 impl ClientConfig {
 	pub fn new(url: Url) -> Self {
-		Self { url, insecure: false }
+		Self {
+			url,
+			insecure: false,
+			tls_cert: None,
+			tls_key: None,
+		}
+	}
+
+	/// Present a client certificate to the relay (mTLS).
+	pub fn with_client_cert(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+		self.tls_cert = Some(cert.into());
+		self.tls_key = Some(key.into());
+		self
 	}
 
 	pub(crate) fn client(&self) -> Result<moq_tokio::Client> {
@@ -26,7 +45,29 @@ impl ClientConfig {
 		if self.insecure {
 			connect.tls.insecure = Some(true);
 		}
+		connect.tls.cert = self.tls_cert.clone();
+		connect.tls.key = self.tls_key.clone();
 		Ok(connect.init(Default::default())?)
+	}
+}
+
+/// How long [`established`] waits for the relay to refuse a session it just accepted.
+const REFUSAL_WINDOW: Duration = Duration::from_millis(500);
+
+/// Wait until a session with the relay is up and the relay hasn't refused it.
+///
+/// A relay accepts the transport before it asks its auth server about the session, so
+/// a refusal (e.g. `Unauthorized`) closes a session that already looked established.
+/// Watch the connection for a moment longer so that refusal is returned here.
+pub(crate) async fn established(connection: &moq_tokio::Connection) -> Result<()> {
+	// The returned handle is a clone; the caller's handle keeps the dial alive.
+	let _ = connection.clone().established().await?;
+	tokio::select! {
+		res = connection.closed() => {
+			res?;
+			Err(moq_tokio::Error::Reconnect("the connection closed right after it was established".into()).into())
+		}
+		_ = tokio::time::sleep(REFUSAL_WINDOW) => Ok(()),
 	}
 }
 
@@ -57,5 +98,12 @@ mod tests {
 		let config = ClientConfig::new("https://relay.example/anon".parse().unwrap());
 		assert!(!config.insecure);
 		assert_eq!(config.url.path(), "/anon");
+	}
+
+	#[test]
+	fn client_cert_needs_a_key() {
+		let mut config = ClientConfig::new("https://relay.example/anon".parse().unwrap());
+		config.tls_cert = Some("client.pem".into());
+		assert!(config.client().is_err());
 	}
 }

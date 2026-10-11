@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 	)?;
 
 	let publisher = moqros::Publisher::connect(&cli.relay.config())?;
-	tracing::info!(url = %cli.relay.url, topics = pending.len(), "connecting to the relay");
+	tracing::info!(url = %cli.relay.redacted_url(), topics = pending.len(), "connecting to the relay");
 	let node = SharedNode::new(node);
 	let mut spinner = spawn_spinner(node.clone());
 	let mut bridges = FuturesUnordered::new();

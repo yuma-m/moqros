@@ -32,10 +32,10 @@ impl Publisher {
 	}
 
 	/// Wait until the first session with the relay is established.
+	///
+	/// Fails if the relay refuses the session, e.g. for missing credentials.
 	pub async fn established(&self) -> Result<()> {
-		// The returned handle is a clone; `self` keeps the dial alive.
-		let _ = self.connection.clone().established().await?;
-		Ok(())
+		crate::client::established(&self.connection).await
 	}
 
 	/// Resolves when the connection gives up for good.

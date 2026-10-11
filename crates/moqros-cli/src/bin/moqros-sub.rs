@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id)?;
 
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
-	tracing::info!(url = %cli.relay.url, broadcasts = broadcasts.len(), "connecting to the relay");
+	tracing::info!(url = %cli.relay.redacted_url(), broadcasts = broadcasts.len(), "connecting to the relay");
 
 	// A topic's type depends on what its broadcast carries, so wait for each broadcast
 	// (all at once) before creating its publisher.
@@ -92,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
 				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
 				return Ok(());
 			}
+			// E.g. the relay refused the session: no broadcast would ever be announced.
+			res = subscriber.closed() => return res.context("relay connection closed"),
 			_ = &mut ctrl_c => {
 				tracing::info!("interrupted");
 				return Ok(());
