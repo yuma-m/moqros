@@ -62,6 +62,9 @@ The compose file runs these services:
 
 To play the PNG sequence instead of the video, run `SAMPLE=frames docker compose -f docker/compose.yml up`.
 
+The relay allows anyone who can reach it to watch and publish. Read [Security](#security) before you run the
+sample on a machine others can reach.
+
 The ROS services share one network and IPC namespace, as processes on one robot would. This lets Fast DDS
 use shared memory for the 2.7 MB frames. The source publishes with reliable QoS, and `moqros-pub` runs with
 `--reliable`. With best-effort QoS, large images are split into many UDP fragments, and losing any one of them
@@ -133,7 +136,9 @@ ros2 launch moqros-cli moqros.launch.py url:=http://localhost:4443/anon namespac
 ```
 
 The launch file uses `$MOQROS_URL` when `url` isn't given, and publishes the broadcast
-`<namespace>/image_raw` (`namespace:=/front` gives `front/image_raw`).
+`<namespace>/image_raw` (`namespace:=/front` gives `front/image_raw`). For a client certificate (see
+[Authentication](#authentication)), add `tls_cert:=… tls_key:=…`, or set `$MOQROS_TLS_CERT` and
+`$MOQROS_TLS_KEY`.
 
 ### Several topics
 
@@ -302,6 +307,57 @@ You can also set the path in code with `moqros::set_openh264_library`.
 - **Data broadcasts:** the catalog lists one track named `data`, in its `json` section (JSON) or its
   `binary` section (CDR, MIME type `application/x-ros2-cdr`), with the mode and the ROS type (`rosType`).
   Each MoQ frame is one message payload, without a container.
+
+## Security
+
+The Docker sample is meant for one machine. Before you expose a relay beyond localhost, keep these in mind:
+
+- **Anyone who reaches the relay can watch, and publish.** `docker/relay.toml` grants anonymous publish *and*
+  subscribe under `anon/` (`[auth] public = "anon/**"`). With port 4443 reachable, anyone who knows the
+  address can watch every broadcast, and can publish broadcasts of their own. Broadcast names aren't secret:
+  subscribers can list what's announced under a path.
+- **Published broadcasts can reach ROS.** `moqros-sub` republishes whatever arrives on its broadcasts as ROS
+  messages. On an open relay, someone else can publish under the same name and inject messages into your
+  ROS graph, e.g. `geometry_msgs/msg/Twist` on a command topic.
+- **The compose file listens on all interfaces.** Its `ports:` entries bind 4443 (relay) and 8080 (viewer)
+  on every host interface, and on Linux Docker's port publishing bypasses firewalls such as ufw. To keep the
+  sample local, bind to loopback (`"127.0.0.1:4443:4443/udp"`, `"127.0.0.1:4443:4443/tcp"`,
+  `"127.0.0.1:8080:80"`).
+- **`http://` relay URLs trust the network.** QUIC always encrypts the stream, but with an `http://` URL the
+  client fetches the certificate fingerprint it trusts over plain HTTP, so anyone on the path can swap it
+  and read or alter the stream. `--insecure` skips verification entirely. Outside development, give the relay
+  a real certificate (`[listen] tls.cert`/`tls.key`) and use `https://` URLs.
+
+### Authentication
+
+Replace `public` in the relay's `[auth]` section with `url`, pointing at an auth server: the relay asks it
+about every session. `moq auth serve` from the [moq](https://github.com/moq-dev/moq) project is the reference
+one. It admits a session by a client certificate (mTLS) or a JWT, and grants publish and subscribe patterns.
+See the upstream [authentication documentation](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/auth.md)
+for its flags. Give each client only what it needs: the robot publishes, viewers subscribe.
+
+**Bridges: client certificates.** For a device that runs unattended, issue it a certificate from your own CA.
+Point the relay's `[listen] tls.root` at the CA, and pass the certificate and its key to the bridge:
+
+```sh
+moqros-pub --url https://relay.example.com/robot --tls-cert robot.pem --tls-key robot.key --topic /camera/image_raw
+```
+
+`--tls-cert` and `--tls-key` also come from `MOQROS_TLS_CERT` and `MOQROS_TLS_KEY`, or the `tls_cert` and
+`tls_key` ROS parameters; in the library, use `ClientConfig::with_client_cert`. Nothing secret goes into the
+URL, and you revoke a device by its certificate. `moq auth serve` grants every certificate its CA signed the
+same patterns. To scope each device to its own path, run an auth server of your own that decides by the
+certificate's name or fingerprint, which the relay passes along with each session.
+
+**Viewers: JWTs.** Browsers present a JWT in the `jwt` query parameter of the relay URL. Issue it from your
+own backend once the viewer has signed in, signed with the key `moq auth serve` verifies, and add it to the
+viewer's relay URL (the Relay URL field or the `url` query parameter of `examples/web`). A token's `root` is
+the path it's valid under, and its publish and subscribe patterns say what it may do there.
+
+The bridges accept a token too (`--url "https://relay.example.com/robot?jwt=…"`), but prefer certificates:
+a URL ends up in shell history and process lists, and the bridges reuse it on every reconnect without asking
+for a new token, so once it expires they can't reconnect. They do hide the token (`jwt=REDACTED`) when they
+log the URL.
 
 ## Development
 

@@ -2,6 +2,7 @@
 
 use std::any::TypeId;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,14 @@ pub struct RelayArgs {
 	#[arg(long, env = "MOQROS_INSECURE", action = ArgAction::Set, value_parser = BoolishValueParser::new(),
 		num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true")]
 	pub insecure: bool,
+
+	/// PEM client certificate chain to present to the relay (mTLS).
+	#[arg(long, env = "MOQROS_TLS_CERT", requires = "tls_key")]
+	pub tls_cert: Option<PathBuf>,
+
+	/// PEM private key of `--tls-cert`.
+	#[arg(long, env = "MOQROS_TLS_KEY", requires = "tls_cert")]
+	pub tls_key: Option<PathBuf>,
 }
 
 impl RelayArgs {
@@ -33,8 +42,38 @@ impl RelayArgs {
 		moqros::ClientConfig {
 			url: self.url.clone(),
 			insecure: self.insecure,
+			tls_cert: self.tls_cert.clone(),
+			tls_key: self.tls_key.clone(),
 		}
 	}
+
+	/// The relay URL with its `jwt` token and password hidden, for logging.
+	pub fn redacted_url(&self) -> moqros::Url {
+		redact_url(&self.url)
+	}
+}
+
+fn redact_url(url: &moqros::Url) -> moqros::Url {
+	const REDACTED: &str = "REDACTED";
+	let mut url = url.clone();
+	if url.password().is_some() {
+		let _ = url.set_password(Some(REDACTED));
+	}
+	if url.query_pairs().any(|(key, _)| key == "jwt") {
+		let pairs: Vec<(String, String)> = url
+			.query_pairs()
+			.map(|(key, value)| {
+				let value = if key == "jwt" {
+					REDACTED.into()
+				} else {
+					value.into_owned()
+				};
+				(key.into_owned(), value)
+			})
+			.collect();
+		url.query_pairs_mut().clear().extend_pairs(pairs);
+	}
+	url
 }
 
 /// What `moqros-pub` sends.
@@ -636,6 +675,26 @@ mod tests {
 	}
 
 	#[test]
+	fn client_cert_flags_come_in_pairs() {
+		let cli: TestCli = parse(
+			&["--tls-cert", "/certs/robot.pem"],
+			&[("tls_key", string("/certs/robot.key"))],
+		)
+		.unwrap();
+		let config = cli.relay.config();
+		assert_eq!(
+			config.tls_cert.as_deref(),
+			Some(std::path::Path::new("/certs/robot.pem"))
+		);
+		assert_eq!(
+			config.tls_key.as_deref(),
+			Some(std::path::Path::new("/certs/robot.key"))
+		);
+		assert!(parse::<TestCli>(&["--tls-cert", "/certs/robot.pem"], &[]).is_err());
+		assert!(parse::<TestCli>(&["--tls-key", "/certs/robot.key"], &[]).is_err());
+	}
+
+	#[test]
 	fn data_params_fill_flags() {
 		let cli: TestCli = parse(&[], &[]).unwrap();
 		assert_eq!(
@@ -974,5 +1033,22 @@ mod tests {
 		assert_eq!(kind(&["-h", "--fps=fast"]), Some(ErrorKind::DisplayHelp));
 		assert_eq!(kind(&["--topic", "/a"]), None);
 		assert_eq!(kind(&["--fps=fast"]), None);
+	}
+
+	#[test]
+	fn redacts_relay_url_secrets() {
+		let redact = |url: &str| redact_url(&url.parse().unwrap()).to_string();
+		assert_eq!(
+			redact("https://relay.example/robot?jwt=eyJ.secret&a=1"),
+			"https://relay.example/robot?jwt=REDACTED&a=1"
+		);
+		assert_eq!(
+			redact("https://user:pass@relay.example/robot"),
+			"https://user:REDACTED@relay.example/robot"
+		);
+		// URLs without secrets come back unchanged.
+		for url in ["http://localhost:4443/anon", "https://relay.example/robot?a=1"] {
+			assert_eq!(redact(url), url);
+		}
 	}
 }
