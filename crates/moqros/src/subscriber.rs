@@ -56,15 +56,13 @@ impl Subscriber {
 	}
 
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
-	/// if it has any, otherwise its data track.
+	/// if this build can decode it, otherwise its data track.
 	pub async fn subscribe(&self, name: &str) -> Result<Subscription> {
 		let (broadcast, catalog) = self.catalog(name).await?;
-		if !catalog.video.renditions.is_empty() {
-			Ok(Subscription::Images(images(name, broadcast, &catalog).await?))
-		} else if DataSettings::from_catalog(&catalog).is_some() {
-			Ok(Subscription::Data(data(name, broadcast, &catalog).await?))
-		} else {
-			Err(Error::NoTracks(name.to_string()))
+		match Kind::of(&catalog) {
+			Kind::Images => Ok(Subscription::Images(images(name, broadcast, &catalog).await?)),
+			Kind::Data => Ok(Subscription::Data(data(name, broadcast, &catalog).await?)),
+			Kind::None => Err(Error::NoTracks(name.to_string())),
 		}
 	}
 
@@ -132,6 +130,33 @@ async fn data(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &Cat
 	);
 	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot).await?;
 	Ok(DataSubscriber::new(broadcast, reader, settings))
+}
+
+/// Which track [`Subscriber::subscribe`] reads from a catalog.
+#[derive(Debug, PartialEq, Eq)]
+enum Kind {
+	Images,
+	Data,
+	None,
+}
+
+impl Kind {
+	fn of(catalog: &Catalog) -> Self {
+		let decodable = catalog
+			.video
+			.ranked()
+			.any(|(_, config)| Codec::from_catalog(&config.codec).is_some_and(Codec::is_available));
+		if decodable {
+			Self::Images
+		} else if DataSettings::from_catalog(catalog).is_some() {
+			Self::Data
+		} else if !catalog.video.renditions.is_empty() {
+			// Subscribing fails, but says which codecs the broadcast offers.
+			Self::Images
+		} else {
+			Self::None
+		}
+	}
 }
 
 /// What [`Subscriber::subscribe`] found in a broadcast.
@@ -248,5 +273,46 @@ impl ImageSubscriber {
 			}
 		}
 		Ok(None)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn catalog(json: serde_json::Value) -> Catalog {
+		serde_json::from_value(json).unwrap()
+	}
+
+	#[test]
+	fn picks_what_this_build_can_read() {
+		let video = |codec: &str| serde_json::json!({ "renditions": { "video": { "codec": codec } } });
+		let data = serde_json::json!({ "tracks": { "data": { "mode": "snapshot" } } });
+
+		assert_eq!(Kind::of(&catalog(serde_json::json!({}))), Kind::None);
+		assert_eq!(Kind::of(&catalog(serde_json::json!({ "json": data }))), Kind::Data);
+		// Video nobody can decode still subscribes, to report the codecs on offer...
+		assert_eq!(
+			Kind::of(&catalog(serde_json::json!({ "video": video("av01.0.04M.08") }))),
+			Kind::Images
+		);
+		// ...unless there's data to read instead.
+		assert_eq!(
+			Kind::of(&catalog(
+				serde_json::json!({ "video": video("av01.0.04M.08"), "json": data })
+			)),
+			Kind::Data
+		);
+		for codec in Codec::available() {
+			let codec = match codec {
+				Codec::Vp8 => "vp8",
+				Codec::H264 => "avc3.42001f",
+			};
+			assert_eq!(
+				Kind::of(&catalog(serde_json::json!({ "video": video(codec), "json": data }))),
+				Kind::Images,
+				"{codec}"
+			);
+		}
 	}
 }

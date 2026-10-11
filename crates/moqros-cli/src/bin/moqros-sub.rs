@@ -1,7 +1,7 @@
 //! Subscribe to MoQ broadcasts and republish each as a ROS 2 topic: video decoded into
 //! images, or data tracks as the message type they carry.
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use clap::Parser;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -57,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
 		})
 		.collect();
 	let mut bridges = FuturesUnordered::new();
+	// Created once, so a signal arriving while the loop body runs isn't missed.
+	let ctrl_c = tokio::signal::ctrl_c();
+	tokio::pin!(ctrl_c);
 
 	// The node only publishes, so it never needs spinning (spin_once would busy-loop
 	// with nothing to wait on).
@@ -69,15 +72,27 @@ async fn main() -> anyhow::Result<()> {
 					cli.qos.profile(),
 					&broadcast.frame_id,
 					broadcast.ros_type.as_deref(),
-				)?;
-				tracing::info!(broadcast = broadcast.broadcast, topic = broadcast.topic, "bridging MoQ -> ROS");
-				bridges.push(async move { (broadcast.broadcast, bridge.await) });
+				);
+				match bridge {
+					Ok(bridge) => {
+						tracing::info!(broadcast = broadcast.broadcast, topic = broadcast.topic, "bridging MoQ -> ROS");
+						bridges.push(async move { (broadcast.broadcast, bridge.await) });
+					}
+					// E.g. a message type this build has no bindings for: the other
+					// broadcasts can still go on.
+					Err(err) => {
+						tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
+						if subscribing.is_empty() && bridges.is_empty() {
+							bail!("no broadcast could be republished");
+						}
+					}
+				}
 			}
 			Some((broadcast, res)) = bridges.next() => {
 				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
 				return Ok(());
 			}
-			_ = tokio::signal::ctrl_c() => {
+			_ = &mut ctrl_c => {
 				tracing::info!("interrupted");
 				return Ok(());
 			}

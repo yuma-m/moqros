@@ -153,8 +153,9 @@ moqros-sub --broadcast camera/image_raw,topic=/remote/image --broadcast imu --br
 Each topic becomes a broadcast of its own. `--type` and `--broadcast` of `moqros-pub`, and `--topic` and
 `--type` of `moqros-sub`, name a single topic, so they only work with one `--topic` or `--broadcast`. Video
 topics start at once. A data topic without a `type` starts when it appears in the ROS graph. `moqros-sub`
-waits for all its broadcasts at once, and starts each one when it's announced. Each bridge exits when any
-of its topics fails.
+waits for all its broadcasts at once, and starts each one when it's announced. It skips a broadcast whose
+topic it can't create (e.g. a message type this build has no bindings for), and goes on with the rest.
+Otherwise, each bridge exits when any of its topics fails.
 
 ### Other message types
 
@@ -175,7 +176,9 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
 - **`--mode snapshot`** (default): each message is a MoQ group of its own, and subscribers skip to the
   newest one when they fall behind. Suits sensor data and state.
 - **`--mode stream`**: all messages go into one group and are delivered in order, none skipped. Suits
-  logs and commands. The relay may replay what it still caches to a subscriber that joins late.
+  logs and commands. The group never closes, so the publisher and the relay keep its messages for as long
+  as the broadcast runs, and a subscriber that joins late gets them all from the start. Avoid it for
+  long-running, high-rate topics; use `snapshot` there.
 - **Type:** without `--type`, `moqros-pub` waits for the topic to appear and asks the ROS graph for its type.
   Relative topic names resolve against the node's namespace, but remappings aren't applied. The type goes
   into the catalog, so `moqros-sub` republishes with the same type (`--type` overrides it).
@@ -230,7 +233,7 @@ let broadcast = publisher.create_data_broadcast("imu", settings)?;
 let bridge = spawn_ros_to_moq_data(&mut node, "/imu", QosProfile::sensor_data(), broadcast)?;
 ```
 
-`spawn_moq_to_ros_any` goes the other way for both kinds of broadcast.
+`spawn_moq_to_ros` goes the other way for both kinds of broadcast.
 
 ### Without ROS
 

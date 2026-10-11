@@ -3,7 +3,7 @@
 //! The bridges only register subscriptions/publishers on a node you own.
 //! [`spawn_ros_to_moq`] and [`spawn_ros_to_moq_data`] need that node to be spun (e.g.
 //! `node.spin_once(..)` in a blocking task) for messages to flow; [`spawn_moq_to_ros`]
-//! and [`spawn_moq_to_ros_any`] only publish, which r2r does without spinning.
+//! only publishes, which r2r does without spinning.
 //!
 //! Data bridges handle message types at runtime through r2r's untyped API, so they
 //! support the message types r2r generated bindings for when it was built.
@@ -19,8 +19,8 @@ use r2r::std_msgs::msg::Header;
 use tokio::task::JoinHandle;
 
 use crate::{
-	DataFormat, DataPublisher, DataSubscriber, Error, Image, ImagePublisher, ImageSubscriber, Result, Subscriber,
-	Subscription,
+	DataFormat, DataPublisher, DataSettings, DataSubscriber, Error, Image, ImagePublisher, ImageSubscriber, Result,
+	Subscriber, Subscription,
 };
 
 pub use r2r;
@@ -183,7 +183,7 @@ impl<T> Drop for CloseOnDrop<T> {
 
 /// Forward a ROS topic of any message type into a MoQ data broadcast.
 ///
-/// The broadcast's [`DataSettings`](crate::DataSettings) pick the serialization and
+/// The broadcast's [`DataSettings`] pick the serialization and
 /// must name the ROS type (see [`wait_for_topic_type`]). Messages are forwarded as
 /// they arrive. The returned task resolves when the topic stream ends.
 pub fn spawn_ros_to_moq_data(
@@ -278,37 +278,21 @@ fn resolve_topic(namespace: &str, node_name: &str, topic: &str) -> String {
 	}
 }
 
-/// Republish a decoded MoQ image broadcast onto a ROS topic as `rgb8`.
-///
-/// Waits for `broadcast` to be announced and resubscribes whenever it ends, so the
-/// publisher side may restart freely. The header stamp is the local receive time,
-/// since MoQ timestamps are relative to the start of the broadcast.
-pub fn spawn_moq_to_ros(
-	node: &mut r2r::Node,
-	topic: &str,
-	qos: QosProfile,
-	frame_id: &str,
-	subscriber: Subscriber,
-	broadcast: &str,
-) -> Result<JoinHandle<Result<()>>> {
-	let output = RosOutput::Images {
-		publisher: node.create_publisher::<RosImage>(topic, qos).map_err(ros_error)?,
-		frame_id: frame_id.to_string(),
-	};
-	Ok(tokio::spawn(republish(subscriber, broadcast.to_string(), None, output)))
-}
-
-/// Republish a MoQ broadcast onto a ROS topic, whatever it carries: decoded `rgb8`
-/// images for video (see [`spawn_moq_to_ros`]), or the messages of a data track.
+/// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
+/// `rgb8` images, or the messages of a data track.
 ///
 /// Waits for the first subscription to learn what to publish, so this resolves once
 /// `broadcast` is announced. A data track's ROS type comes from its catalog, or from
-/// `ros_type` when given. If the broadcast later returns carrying something else, the
-/// returned task fails.
+/// `ros_type` when given. The task resubscribes whenever the broadcast ends, so the
+/// publisher side may restart freely, but fails if it comes back carrying something
+/// else (video instead of data, or another format or message type).
+///
+/// Images are stamped with the local receive time, since MoQ timestamps are relative
+/// to the start of the broadcast.
 ///
 /// To wait for several broadcasts at once, use [`MoqToRos::subscribe`] and then
 /// [`MoqToRos::spawn`]: only the latter needs the node.
-pub async fn spawn_moq_to_ros_any(
+pub async fn spawn_moq_to_ros(
 	node: &mut r2r::Node,
 	topic: &str,
 	qos: QosProfile,
@@ -353,7 +337,7 @@ impl MoqToRos {
 		}
 	}
 
-	/// Create the ROS publisher on `topic` and start republishing; see [`spawn_moq_to_ros_any`].
+	/// Create the ROS publisher on `topic` and start republishing; see [`spawn_moq_to_ros`].
 	pub fn spawn(
 		self,
 		node: &mut r2r::Node,
@@ -377,15 +361,14 @@ impl MoqToRos {
 					publisher: node
 						.create_publisher_untyped(topic, &ros_type, qos)
 						.map_err(ros_error)?,
-					format: settings.format,
-					ros_type,
+					catalog: settings.clone(),
 				}
 			}
 		};
 		Ok(tokio::spawn(republish(
 			self.subscriber,
 			self.broadcast,
-			Some(self.first),
+			self.first,
 			output,
 		)))
 	}
@@ -415,19 +398,20 @@ enum RosOutput {
 	},
 	Data {
 		publisher: r2r::PublisherUntyped,
-		format: DataFormat,
-		ros_type: String,
+		/// What the first catalog announced; the publisher's type may override its `ros_type`.
+		catalog: DataSettings,
 	},
 }
 
-/// Feed `output` from `broadcast` forever, starting with `first` if given and
-/// resubscribing whenever the broadcast ends.
+/// Feed `output` from `broadcast` forever, starting with `first` and resubscribing
+/// whenever the broadcast ends.
 async fn republish(
 	subscriber: Subscriber,
 	broadcast: String,
-	mut first: Option<Subscription>,
+	first: Subscription,
 	mut output: RosOutput,
 ) -> Result<()> {
+	let mut first = Some(first);
 	loop {
 		let subscription = match first.take() {
 			Some(subscription) => subscription,
@@ -439,23 +423,11 @@ async fn republish(
 			(Subscription::Images(images), RosOutput::Images { publisher, frame_id }) => {
 				republish_images(images, publisher, frame_id, &mut count).await?
 			}
-			(
-				Subscription::Data(data),
-				RosOutput::Data {
-					publisher,
-					format,
-					ros_type,
-				},
-			) => {
-				let settings = data.settings();
-				if settings.format != *format || settings.ros_type.as_ref().is_some_and(|t| t != ros_type) {
-					return Err(Error::Ros(format!(
-						"broadcast {broadcast} changed to {} {}, but the topic publishes {format} {ros_type}",
-						settings.format,
-						settings.ros_type.as_deref().unwrap_or("(untyped)")
-					)));
+			(Subscription::Data(data), RosOutput::Data { publisher, catalog }) => {
+				if let Some(changed) = data_changed(catalog, data.settings()) {
+					return Err(Error::Ros(format!("broadcast {broadcast} changed {changed}")));
 				}
-				republish_data(data, publisher, *format, &mut count).await
+				republish_data(data, publisher, catalog.format, &mut count).await
 			}
 			(Subscription::Images(_), RosOutput::Data { .. }) => {
 				return Err(Error::Ros(format!("broadcast {broadcast} changed from data to video")));
@@ -470,6 +442,20 @@ async fn republish(
 			Some(err) => tracing::warn!(%err, broadcast, count, "subscription failed, resubscribing"),
 		}
 	}
+}
+
+/// How a resubscribed data track differs from the `first` one in ways the topic can't
+/// follow, if it does. The mode doesn't matter for republishing.
+fn data_changed(first: &DataSettings, now: &DataSettings) -> Option<String> {
+	let name = |settings: &DataSettings| {
+		format!(
+			"{} {}",
+			settings.format,
+			settings.ros_type.as_deref().unwrap_or("(untyped)")
+		)
+	};
+	(first.format != now.format || first.ros_type != now.ros_type)
+		.then(|| format!("from {} to {}", name(first), name(now)))
 }
 
 /// Publish decoded images until the subscription ends, returning why it did.
@@ -636,6 +622,27 @@ mod tests {
 			image_from_ros(ros_image("rgb8", 4, 2, 8)),
 			Err(Error::InvalidImage(_))
 		));
+	}
+
+	#[test]
+	fn detects_data_track_changes() {
+		let settings = |format, mode, ros_type: &str| DataSettings {
+			format,
+			mode,
+			ros_type: Some(ros_type.into()),
+		};
+		let first = settings(DataFormat::Json, crate::DataMode::Snapshot, "std_msgs/msg/Header");
+		assert_eq!(data_changed(&first, &first), None);
+		// The mode doesn't change what the topic publishes.
+		let stream = settings(DataFormat::Json, crate::DataMode::Stream, "std_msgs/msg/Header");
+		assert_eq!(data_changed(&first, &stream), None);
+		let cdr = settings(DataFormat::Cdr, crate::DataMode::Snapshot, "std_msgs/msg/Header");
+		assert_eq!(
+			data_changed(&first, &cdr).as_deref(),
+			Some("from json std_msgs/msg/Header to cdr std_msgs/msg/Header")
+		);
+		let string = settings(DataFormat::Json, crate::DataMode::Snapshot, "std_msgs/msg/String");
+		assert!(data_changed(&first, &string).is_some());
 	}
 
 	#[test]
