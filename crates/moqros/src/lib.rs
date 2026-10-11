@@ -1,11 +1,14 @@
 //! # moqros
 //!
-//! Stream ROS 2 `sensor_msgs/Image` topics over [Media over QUIC](https://moq.dev).
+//! Stream ROS 2 topics over [Media over QUIC](https://moq.dev).
 //!
 //! Images are converted to I420, encoded (VP8 via libvpx by default, or H.264 via
 //! Cisco's OpenH264 binary with the `h264` feature) and published as
 //! [hang](https://docs.rs/hang) broadcasts, the format played by the `@moq/watch`
 //! web component. The reverse direction (MoQ -> decoded images) is also provided.
+//!
+//! Messages of any other type travel as JSON or CDR payloads in a hang data track
+//! ([`Publisher::create_data_broadcast`], [`Subscriber::subscribe_data`]).
 //!
 //! The core API is ROS-independent:
 //!
@@ -29,6 +32,7 @@ mod client;
 mod clock;
 mod codec;
 mod convert;
+mod data;
 mod error;
 mod image;
 mod publisher;
@@ -42,10 +46,11 @@ pub use client::{ClientConfig, broadcast_name_for_topic};
 pub use codec::set_openh264_library;
 pub use codec::{Codec, Decoder, EncodedFrame, Encoder, EncoderSettings};
 pub use convert::{I420, Planes, yuv_to_rgb8};
+pub use data::{CDR_MIME, DATA_TRACK, DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
 pub use publisher::{ImagePublisher, Publisher, VIDEO_TRACK};
-pub use subscriber::{ImageSubscriber, Subscriber, VideoFrame};
+pub use subscriber::{ImageSubscriber, Subscriber, Subscription, VideoFrame};
 
 /// Re-exported so applications can name hang/moq types without version skew.
 pub use hang;

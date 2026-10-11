@@ -10,7 +10,10 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use moqros::{ClientConfig, EncoderSettings, Image, PixelFormat, Publisher, Subscriber};
+use moqros::{
+	ClientConfig, DataFormat, DataMode, DataSettings, EncoderSettings, Image, PixelFormat, Publisher, Subscriber,
+	Subscription,
+};
 
 struct Relay(Child);
 
@@ -25,7 +28,7 @@ fn start_relay(bin: &str, port: u16) -> Relay {
 	let config = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docker/relay.toml");
 	let child = Command::new(bin)
 		.arg(config)
-		.env("MOQ_LISTEN_BIND", format!("127.0.0.1:{port}"))
+		.env("MOQ_LISTEN", format!("127.0.0.1:{port}"))
 		.env("MOQ_WEB_HTTP_LISTEN", format!("127.0.0.1:{port}"))
 		.stdout(Stdio::null())
 		.stderr(Stdio::null())
@@ -105,5 +108,75 @@ async fn publish_and_subscribe_through_relay() -> anyhow::Result<()> {
 
 	stop_tx.send(()).ok();
 	pub_task.await??;
+	Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_and_subscribe_data_through_relay() -> anyhow::Result<()> {
+	let Ok(bin) = std::env::var("MOQROS_RELAY_BIN") else {
+		eprintln!("MOQROS_RELAY_BIN not set; skipping relay test");
+		return Ok(());
+	};
+	let _ = tracing_subscriber::fmt().with_env_filter("moqros=debug").try_init();
+
+	let port = 14444;
+	let _relay = start_relay(&bin, port);
+	tokio::time::sleep(Duration::from_millis(500)).await;
+
+	let config = ClientConfig::new(format!("http://127.0.0.1:{port}/anon").parse()?);
+	let publisher = Publisher::connect(&config)?;
+	tokio::time::timeout(Duration::from_secs(10), publisher.established()).await??;
+	let subscriber = Subscriber::connect(&config)?;
+	tokio::time::timeout(Duration::from_secs(10), subscriber.established()).await??;
+
+	for (format, mode) in [
+		(DataFormat::Json, DataMode::Snapshot),
+		(DataFormat::Cdr, DataMode::Stream),
+	] {
+		let name = format!("test/{format}");
+		let settings = DataSettings {
+			format,
+			mode,
+			ros_type: Some("std_msgs/msg/String".into()),
+		};
+		let mut broadcast = publisher.create_data_broadcast(&name, settings.clone())?;
+
+		// Publish continuously until stopped, so the subscriber can join at any point.
+		let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+		let pub_task: tokio::task::JoinHandle<moqros::Result<()>> = tokio::spawn(async move {
+			for n in 0u32.. {
+				if stop_rx.try_recv().is_ok() {
+					break;
+				}
+				broadcast.publish(n.to_string())?;
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+			Ok(())
+		});
+
+		let subscription = tokio::time::timeout(Duration::from_secs(10), subscriber.subscribe(&name)).await??;
+		let Subscription::Data(mut messages) = subscription else {
+			panic!("{name}: expected a data subscription");
+		};
+		assert_eq!(messages.settings(), &settings);
+
+		let mut received = Vec::new();
+		while received.len() < 10 {
+			let message = tokio::time::timeout(Duration::from_secs(5), messages.next_message())
+				.await??
+				.expect("broadcast ended early");
+			received.push(std::str::from_utf8(&message.payload)?.parse::<u32>()?);
+		}
+		assert!(received.windows(2).all(|w| w[0] < w[1]), "{name}: {received:?}");
+		if mode == DataMode::Stream {
+			assert!(
+				received.windows(2).all(|w| w[1] == w[0] + 1),
+				"{name} is lossless: {received:?}"
+			);
+		}
+
+		stop_tx.send(()).ok();
+		pub_task.await??;
+	}
 	Ok(())
 }

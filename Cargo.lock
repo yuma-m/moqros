@@ -1886,6 +1886,7 @@ dependencies = [
  "moq-tokio",
  "openh264",
  "r2r",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1899,6 +1900,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "moqros",
  "tokio",
  "tracing",

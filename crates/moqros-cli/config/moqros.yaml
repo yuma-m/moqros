@@ -8,8 +8,16 @@
 # name (e.g. `/front/moqros_pub`), not the bare name below.
 moqros_pub:
   ros__parameters:
+    # One topic, or a list: options after the name override the flags below.
+    #   topic: [/camera/image_raw, "/imu,format=json", "/scan,format=cdr,mode=stream"]
     topic: /camera/image_raw
     url: http://localhost:4443/anon
+    # video (sensor_msgs/msg/Image only), json or cdr.
+    format: video
+    # Message type for json/cdr (single topic only); looked up in the ROS graph when unset.
+    type:
+    # json/cdr: snapshot (skip to the newest message) or stream (every message, in order).
+    mode: snapshot
     codec: vp8
     bitrate: 2000000
     fps: 30.0
@@ -18,7 +26,12 @@ moqros_pub:
 
 moqros_sub:
   ros__parameters:
+    # One broadcast, or a list: options after the name override the flags below.
+    #   broadcast: ["camera/image_raw,topic=/moqros/image", imu]
     broadcast: camera/image_raw
+    # Only for a single broadcast.
     topic: /moqros/image
     url: http://localhost:4443/anon
     frame_id: camera
+    # Message type to republish a data track as (single broadcast only); taken from its catalog when unset.
+    type:

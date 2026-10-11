@@ -1,19 +1,23 @@
-//! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8 or H.264 broadcasts.
+//! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8 or H.264 broadcasts,
+//! and other messages as hang data broadcasts.
 
 use hang::catalog::{Catalog, Container, PRIORITY, VideoCodec, VideoConfig};
 use hang::moq_net;
 
 use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
+use crate::data::{DataPublisher, DataSettings};
 use crate::{ClientConfig, Error, Image, Result};
 
 /// Name of the single video track inside every moqros broadcast.
 pub const VIDEO_TRACK: &str = "video";
 
-/// A connection to a relay that can carry any number of image broadcasts.
+/// A connection to a relay that can carry any number of image and data broadcasts.
 ///
 /// The connection redials in the background if it drops; broadcasts created
-/// here are re-announced automatically once it is back.
+/// here are re-announced automatically once it is back. Clones share the
+/// connection, which stays up while any clone is alive.
+#[derive(Clone)]
 pub struct Publisher {
 	origin: moq_net::origin::Producer,
 	connection: moq_tokio::Connection,
@@ -61,6 +65,11 @@ impl Publisher {
 			rendition: None,
 			clock: StreamClock::default(),
 		})
+	}
+
+	/// Create and announce a broadcast named `name` that carries messages in a data track.
+	pub fn create_data_broadcast(&self, name: &str, settings: DataSettings) -> Result<DataPublisher> {
+		DataPublisher::new(&self.origin, name, settings)
 	}
 }
 

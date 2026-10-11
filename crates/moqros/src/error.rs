@@ -8,6 +8,9 @@ pub enum Error {
 	#[error("invalid image: {0}")]
 	InvalidImage(String),
 
+	#[error("invalid settings: {0}")]
+	InvalidSettings(String),
+
 	#[error("codec error: {0}")]
 	Codec(String),
 
@@ -31,6 +34,18 @@ pub enum Error {
 
 	#[error("no decodable video rendition; broadcast offers: {0}")]
 	UnsupportedCodec(String),
+
+	#[error("broadcast {0:?} has no data track moqros can read in its catalog")]
+	NoData(String),
+
+	#[error("broadcast {0:?} has neither decodable video nor a data track")]
+	NoTracks(String),
+
+	#[error("data track of broadcast {0:?} doesn't name its ROS message type")]
+	MissingRosType(String),
+
+	#[error("json error: {0}")]
+	Json(String),
 
 	#[error("origin closed before broadcast {0:?} was announced")]
 	NotAnnounced(String),
