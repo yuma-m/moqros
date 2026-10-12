@@ -5,6 +5,44 @@
 //! `node.spin_once(..)` in a blocking task) for messages to flow; [`spawn_moq_to_ros`]
 //! only publishes, which r2r does without spinning.
 //!
+//! ```no_run
+//! use moqros::ros::{QosProfile, r2r, spawn_ros_to_moq};
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = r2r::Context::create()?;
+//! let mut node = r2r::Node::create(ctx, "camera_streamer", "")?;
+//!
+//! let publisher = moqros::Publisher::connect(&moqros::ClientConfig::new(
+//!     "http://localhost:4443/anon".parse()?,
+//! ))?;
+//! let broadcast = publisher.create_image_broadcast("camera", moqros::EncoderSettings::default())?;
+//! let bridge = spawn_ros_to_moq(&mut node, "/camera/image_raw", QosProfile::sensor_data(), broadcast)?;
+//!
+//! tokio::task::spawn_blocking(move || loop {
+//!     node.spin_once(std::time::Duration::from_millis(50));
+//! });
+//! bridge.await??;
+//! # Ok(()) }
+//! ```
+//!
+//! Any other message type goes through a data broadcast:
+//!
+//! ```no_run
+//! use moqros::ros::{QosProfile, spawn_ros_to_moq_data, wait_for_topic_type};
+//!
+//! # async fn run(mut node: moqros::ros::r2r::Node, publisher: moqros::Publisher) -> moqros::Result<()> {
+//! let settings = moqros::DataSettings {
+//!     format: moqros::DataFormat::Json,
+//!     mode: moqros::DataMode::Snapshot,
+//!     ros_type: Some(wait_for_topic_type(&node, "/imu").await?),
+//! };
+//! let broadcast = publisher.create_data_broadcast("imu", settings)?;
+//! let bridge = spawn_ros_to_moq_data(&mut node, "/imu", QosProfile::sensor_data(), broadcast)?;
+//! # Ok(()) }
+//! ```
+//!
+//! [`spawn_moq_to_ros`] goes the other way for both kinds of broadcast.
+//!
 //! Data bridges handle message types at runtime through r2r's untyped API, so they
 //! support the message types r2r generated bindings for when it was built.
 

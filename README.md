@@ -40,36 +40,19 @@ docker compose -f docker/compose.yml up --build
 
 On first start, the one-shot `samples` service generates a test video (`samples/sample.mp4`) and a PNG
 sequence (`samples/frames/`) with ffmpeg inside the container. Files that already exist are kept. To stream
-your own footage, put a video file or a directory of PNG/JPEG frames in `samples/` and pass `SAMPLE=<name>`.
+your own footage, put a video file or a directory of PNG/JPEG frames in `samples/` and pass `SAMPLE=<name>`
+(`SAMPLE=frames` plays the PNG sequence instead of the video).
 
 Open <http://localhost:8080> in a Chromium-based browser or Firefox. Both support WebTransport. The page
 connects to `http://localhost:4443/anon` and shows a panel for every broadcast the relay announces: the two
 videos `sample/image_raw` and `sample/frames/image_raw`, and the latest messages of the data broadcasts
-`chatter` and `sample/pose`. See [Web viewer](#web-viewer) for picking broadcasts.
-
-The same viewer is hosted at <https://yuma-m.github.io/moqros/>. It also connects to
-`http://localhost:4443/anon`, so it works with the sample without the `web` service.
+`chatter` and `sample/pose`. The [hosted viewer](#web-viewer) connects there too, so it works with the
+sample without the `web` service.
 
 ![The web viewer showing the two cameras and the two data topics of the Docker sample](https://github.com/yuma-m/moqros/raw/main/images/viewer.jpg)
 
-The compose file runs these services:
-
-- `samples`: creates the sample inputs if they're missing, then exits.
-- `relay`: `moq-relay` with a self-signed certificate. It allows anonymous access under `anon/`.
-- `source`: `image_source` publishes `/sample/image_raw` at 30 fps as `bgr8` (1280x720; set `WIDTH=640` to scale down).
-- `source-frames`: a second `image_source` publishes the PNG sequence (640x480) on `/sample/frames/image_raw`
-  at 15 fps.
-- `chatter`: `ros2 topic pub` publishes a `std_msgs/msg/Header` stamped with the publish time on `/chatter`
-  at 10 Hz. It logs every 100th message.
-- `pose`: `ros2 topic pub` publishes a stamped `geometry_msgs/msg/PoseStamped` on `/sample/pose` at 5 Hz.
-- `moqros-pub`: publishes both image topics as the video broadcasts `sample/image_raw` and
-  `sample/frames/image_raw`, and `/chatter` and `/sample/pose` as the JSON data broadcasts `chatter` and
-  `sample/pose`.
-- `moqros-sub`: subscribes to all four broadcasts. It republishes decoded `rgb8` images on `/moqros/image` and
-  `/moqros/frames`, and the data on `/moqros/chatter` and `/moqros/pose`.
-- `web`: the viewer in `examples/web`, built with Node and served by nginx.
-
-To play the PNG sequence instead of the video, run `SAMPLE=frames docker compose -f docker/compose.yml up`.
+`docker/compose.yml` describes each service. Besides the viewer, `moqros-sub` republishes the four
+broadcasts on `/moqros/image`, `/moqros/frames`, `/moqros/chatter`, and `/moqros/pose`.
 
 The relay allows anyone who can reach it to watch and publish. Read [Security](#security) before you run the
 sample on a machine others can reach.
@@ -116,6 +99,21 @@ colcon build
 source install/setup.bash
 ros2 run moqros-cli moqros-pub --help
 ```
+
+### Bridge behavior
+
+- **QoS:** both bridges default to the best-effort `sensor_data` profile. Pass `--reliable` to match a
+  reliable publisher, which is recommended for large uncompressed images.
+- **Latency:** if the encoder falls behind, `moqros-pub` drops all but the newest pending image, and
+  `moqros-sub` always jumps to the newest group.
+- **Reconnects:** the relay connection redials automatically, and `moqros-sub` resubscribes when a broadcast
+  comes back. It stamps republished images with the local receive time.
+- **Codec:** `moqros-pub --codec vp8|h264`. H.264 needs the `h264` feature and Cisco's OpenH264 binary:
+
+  ```sh
+  export OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)   # downloads from ciscobinary.openh264.org
+  cargo run -p moqros-cli --features h264 --bin moqros-pub -- --codec h264 ...
+  ```
 
 ### ROS arguments and parameters
 
@@ -206,158 +204,34 @@ message type. It fails if a broadcast comes back carrying something different fr
 ## Web viewer
 
 `examples/web` is a React and TypeScript app built on [`@moq/watch`](https://www.npmjs.com/package/@moq/watch).
-It opens one connection to the relay and shows any number of broadcasts side by side: a video panel for each
-image broadcast, and a data panel with the latest message for each data broadcast. It tells them apart by the
-broadcast's catalog.
+It shows every broadcast the relay announces side by side: a video panel for each image broadcast, and the
+latest message of each data broadcast. Its view is kept in the URL, so it can be bookmarked or shared. See
+[its README](examples/web/README.md) for the query parameters, custom data renderers, and development.
 
-- **Picking broadcasts:** the sidebar lists every broadcast the relay announces. With *Show all announced* on
-  (the default), each one gets a panel; the filter narrows that to names containing some text, and unticking
-  a broadcast hides it. *Add* shows a broadcast by name, even one the relay doesn't announce, as `auto`
-  (decided by the catalog), `video`, or `data`.
-- **Query parameters:** the view is kept in the URL, so it can be bookmarked or shared: `url` (relay URL),
-  `auto=0`, `filter`, `show`, `video` and `data` (comma-separated broadcasts to always show, by catalog or as
-  that kind), and `hide`. The `name` parameter of the old viewer still works as `video`.
-- **Data renderers:** JSON messages show as a tree or as text, and CDR messages as their size and a hex dump
-  (the browser can't decode CDR). Messages with a header (`std_msgs/msg/Header` and `*Stamped` types) can
-  also show their stamp and age on arrival. Add a view for a message type of your own by registering a React
-  component in `src/panels/renderers/index.ts`:
-
-  ```tsx
-  register({ rosType: "sensor_msgs/msg/Imu", format: "json", label: "IMU", component: ImuView });
-  ```
-
-  The component gets the broadcast name, the track (ROS type, format, mode), the raw payload, and the parsed
-  JSON message. Each panel lets you switch between the renderers that match its type.
-
-**Hosted viewer:** <https://yuma-m.github.io/moqros/> serves the viewer from `main`. It connects to
-`http://localhost:4443/anon` by default; set the Relay URL field or the `url` parameter for another relay.
-Since the page is served over HTTPS, the browser only lets it reach an `http://` relay on `localhost`. For a
-relay on another machine, give the relay a real certificate and use an `https://` URL. Some browsers ask
-before a public site may reach a local address. A `jwt` in the relay URL stays in the address bar and the
-browser history, so don't share such links. `VITE_RELAY_URL` sets the default relay URL at build time.
-
-To develop it, run the relay and the bridges (e.g. the Docker sample, without its `web` service), then:
-
-```sh
-cd examples/web
-npm install
-npm run dev     # http://localhost:8080 with hot reload
-npm run build   # type-check and build into dist/
-```
+The hosted copy at <https://yuma-m.github.io/moqros/> connects to `http://localhost:4443/anon` by default;
+set the Relay URL field or the `url` parameter for another relay. Since it's served over HTTPS, it can only
+reach an `http://` relay on `localhost`. Elsewhere, give the relay a real certificate and use `https://`.
 
 ## Library usage
 
-The library is published on [crates.io](https://crates.io/crates/moqros) as `moqros`; API docs are on
-[docs.rs](https://docs.rs/moqros).
+The library is published on [crates.io](https://crates.io/crates/moqros) as `moqros`:
 
 ```toml
 [dependencies]
-moqros = { version = "0.1", features = ["ros"] }   # omit `ros` for the ROS-independent core
+moqros = { version = "0.4", features = ["ros"] }   # omit `ros` for the ROS-independent core
 ```
 
-### ROS → MoQ
-
 ```rust
-use moqros::ros::{QosProfile, r2r, spawn_ros_to_moq};
+use moqros::ros::{QosProfile, spawn_ros_to_moq};
 
-let ctx = r2r::Context::create()?;
-let mut node = r2r::Node::create(ctx, "camera_streamer", "")?;
-
-let publisher = moqros::Publisher::connect(&moqros::ClientConfig::new(
-    "http://localhost:4443/anon".parse()?,
-))?;
-let broadcast = publisher.create_image_broadcast("camera", moqros::EncoderSettings::default())?;
+// `node` is an r2r node that you spin.
+let publisher = moqros::Publisher::connect(&moqros::ClientConfig::new("http://localhost:4443/anon".parse()?))?;
+let broadcast = publisher.create_image_broadcast("camera", Default::default())?;
 let bridge = spawn_ros_to_moq(&mut node, "/camera/image_raw", QosProfile::sensor_data(), broadcast)?;
-
-tokio::task::spawn_blocking(move || loop {
-    node.spin_once(std::time::Duration::from_millis(50));
-});
-bridge.await??;
 ```
 
-Any other message type goes through a data broadcast:
-
-```rust
-use moqros::ros::{spawn_ros_to_moq_data, wait_for_topic_type};
-
-let settings = moqros::DataSettings {
-    format: moqros::DataFormat::Json,
-    mode: moqros::DataMode::Snapshot,
-    ros_type: Some(wait_for_topic_type(&node, "/imu").await?),
-};
-let broadcast = publisher.create_data_broadcast("imu", settings)?;
-let bridge = spawn_ros_to_moq_data(&mut node, "/imu", QosProfile::sensor_data(), broadcast)?;
-```
-
-`spawn_moq_to_ros` goes the other way for both kinds of broadcast.
-
-### Without ROS
-
-```rust
-let publisher = moqros::Publisher::connect(&config)?;
-let mut camera = publisher.create_image_broadcast("camera", Default::default())?;
-camera.publish(&moqros::Image::new(640, 480, moqros::PixelFormat::Rgb8, rgb_bytes, capture_time)?)?;
-
-let subscriber = moqros::Subscriber::connect(&config)?;
-let mut images = subscriber.subscribe_images("camera").await?;
-while let Some(image) = images.next_image().await? {
-    // image is rgb8
-}
-```
-
-Data broadcasts carry opaque payloads:
-
-```rust
-let mut status = publisher.create_data_broadcast("status", moqros::DataSettings::new(moqros::DataFormat::Json))?;
-status.publish(r#"{"battery": 0.82}"#)?;
-
-let mut messages = subscriber.subscribe_data("status").await?;
-while let Some(message) = messages.next_message().await? {
-    // message.payload is one JSON document
-}
-```
-
-`Subscriber::subscribe` returns either kind, depending on what the broadcast's catalog offers.
-
-### Codecs
-
-| Codec | Feature | Backend | Notes |
-| --- | --- | --- | --- |
-| VP8 | `vp8` (default) | system libvpx, real-time CBR | |
-| H.264 | `h264` | Cisco's OpenH264 binary, loaded at runtime | Constrained Baseline, `avc3`. |
-
-Pick the codec with `EncoderSettings::codec` (`moqros-pub --codec vp8|h264`). The subscriber picks the best
-rendition in the catalog that this build can decode.
-
-The `h264` feature loads Cisco's prebuilt OpenH264 binary at runtime and checks its SHA-256 against known
-Cisco releases:
-
-```sh
-export OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)   # downloads from ciscobinary.openh264.org
-cargo run -p moqros-cli --features h264 --bin moqros-pub -- --codec h264 ...
-```
-
-You can also set the path in code with `moqros::set_openh264_library`.
-
-### Behavior
-
-- **Encodings:** `rgb8`, `bgr8`, `rgba8`, `bgra8`, `mono8`, `yuv422` (UYVY), and `yuv422_yuy2` (YUYV). An odd
-  trailing row or column is cropped, because 4:2:0 video needs even dimensions.
-- **Format on the wire:** each frame goes in the hang "legacy" container (a timestamp plus the codec payload). The catalog
-  (`catalog.json`) has one video track named `video`. It's republished whenever the resolution changes.
-- **Groups:** each keyframe starts a new MoQ group. The keyframe interval (default 2 s) bounds how long
-  a new viewer waits for the first picture.
-- **Latency:** if the encoder falls behind, the bridge drops all but the newest pending image. The subscriber
-  always jumps to the newest group.
-- **Timestamps:** `header.stamp` becomes a µs timeline that starts at 0 for each broadcast.
-  `moqros-sub` stamps the republished images with the local receive time.
-- **Reconnects:** the relay connection redials automatically. `moqros-sub` resubscribes when the broadcast
-  comes back.
-- **QoS:** both bridges default to the best-effort `sensor_data` profile. Pass `--reliable` to match a
-  reliable publisher, which is recommended for large uncompressed images.
-- **Data broadcasts:** the catalog lists one track named `data`, in its `json` section (JSON) or its
-  `binary` section (CDR, MIME type `application/x-ros2-cdr`), with the mode and the ROS type (`rosType`).
-  Each MoQ frame is one message payload, without a container.
+See [docs.rs](https://docs.rs/moqros) for the API, data broadcasts, use without ROS, the codec features
+(VP8 by default, H.264 through Cisco's OpenH264 binary), and the format on the wire.
 
 ## Security
 
@@ -435,7 +309,7 @@ because r2r generates its bindings at build time. Use the Docker `build` stage, 
 
 ```sh
 source /opt/ros/jazzy/setup.bash
-IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs" cargo build --workspace
+IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs" cargo build --workspace
 ```
 
 ## License
