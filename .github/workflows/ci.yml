@@ -6,7 +6,7 @@ on:
     paths-ignore: &docs-only
       - "**.md"
       - "LICENSE-*"
-      - "logo.png"
+      - "images/**"
       - ".dockerignore"
       - "docker/**"
       - "examples/web/**"

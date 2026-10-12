@@ -1,0 +1,27 @@
+{
+	"name": "moqros-web",
+	"private": true,
+	"version": "0.0.0",
+	"description": "Browser viewer for moqros broadcasts: several videos and ROS data topics over MoQ",
+	"license": "MIT OR Apache-2.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc && vite build",
+		"typecheck": "tsc",
+		"preview": "vite preview"
+	},
+	"dependencies": {
+		"@moq/signals": "^0.2.5",
+		"@moq/watch": "^0.6.2",
+		"react": "^19.3.0",
+		"react-dom": "^19.3.0"
+	},
+	"devDependencies": {
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.1.2",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.4"
+	}
+}

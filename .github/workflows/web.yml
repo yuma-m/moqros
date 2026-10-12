@@ -1,0 +1,35 @@
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths: &web
+      - "examples/web/**"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths: *web
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Type-check and build the viewer in examples/web.
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: examples/web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/web/package-lock.json
+      - run: npm ci
+      - run: npm run build

@@ -1,6 +1,7 @@
 # End-to-end sample:
-#   image_source (/sample/image_raw, video) + ros2 topic pub (/chatter, JSON data)
-#     -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image, /moqros/chatter)
+#   two image_source nodes (/sample/image_raw, /sample/frames/image_raw: video)
+#   + ros2 topic pub (/chatter, /sample/pose: JSON data)
+#     -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image, /moqros/frames, /moqros/chatter, /moqros/pose)
 #
 #   docker compose -f docker/compose.yml up --build
 #
@@ -55,18 +56,35 @@ services:
     # large best-effort images over UDP between containers drop many frames.
     ipc: shareable
 
+  # A second camera: the PNG sequence (640x480) at 15 fps.
+  source-frames:
+    <<: *ros
+    command: ["image_source", "/samples/frames", "--topic", "/sample/frames/image_raw", "--fps", "15",
+              "--frame-id", "frames"]
+    volumes:
+      - ../samples:/samples:ro
+    network_mode: service:source
+    ipc: service:source
+    depends_on:
+      samples:
+        condition: service_completed_successfully
+      source:
+        condition: service_started
+
   moqros-pub:
     <<: *ros
-    command: ["moqros-pub", "--topic", "/sample/image_raw", "--topic", "/chatter,format=json",
+    command: ["moqros-pub", "--topic", "/sample/image_raw", "--topic", "/sample/frames/image_raw",
+              "--topic", "/chatter,format=json", "--topic", "/sample/pose,format=json",
               "--url", "http://relay:4443/anon", "--reliable"]
     network_mode: service:source
     ipc: service:source
-    depends_on: [relay, source, chatter]
+    depends_on: [relay, source, source-frames, chatter, pose]
 
   moqros-sub:
     <<: *ros
-    command: ["moqros-sub", "--broadcast", "sample/image_raw,topic=/moqros/image", "--broadcast", "chatter",
-              "--url", "http://relay:4443/anon"]
+    command: ["moqros-sub", "--broadcast", "sample/image_raw,topic=/moqros/image",
+              "--broadcast", "sample/frames/image_raw,topic=/moqros/frames", "--broadcast", "chatter",
+              "--broadcast", "sample/pose,topic=/moqros/pose", "--url", "http://relay:4443/anon"]
     network_mode: service:source
     ipc: service:source
     depends_on: [relay, source]
@@ -81,9 +99,20 @@ services:
     ipc: service:source
     depends_on: [source]
 
+  # A second data topic of another type: a fixed robot pose, stamped like /chatter. The viewer
+  # shows both with its "Stamp" renderer (std_msgs/msg/Header and any *Stamped type).
+  pose:
+    <<: *ros
+    command: ["ros2", "topic", "pub", "-r", "5", "-p", "50", "/sample/pose", "geometry_msgs/msg/PoseStamped",
+              "{header: {stamp: now, frame_id: map}, pose: {position: {x: 1.0, y: 0.5}, orientation: {w: 1.0}}}"]
+    network_mode: service:source
+    ipc: service:source
+    depends_on: [source]
+
+  # The viewer (examples/web), built with Node and served by nginx.
   web:
-    image: nginx:1.27-alpine
+    build:
+      context: ../examples/web
+    image: moqros/web:latest
     ports:
       - "8080:80"
-    volumes:
-      - ../examples/web:/usr/share/nginx/html:ro

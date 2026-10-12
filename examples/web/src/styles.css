@@ -1,0 +1,247 @@
+:root {
+	color-scheme: light dark;
+	font-family: system-ui, sans-serif;
+	--muted: rgb(127 127 127 / 0.12);
+	--border: rgb(127 127 127 / 0.3);
+}
+
+body {
+	margin: 0;
+}
+
+.app {
+	margin: 0 auto;
+	max-width: 1600px;
+	padding: 16px;
+}
+
+h1 {
+	font-size: 20px;
+	margin: 0 0 8px;
+}
+
+.settings,
+.settings form {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 16px;
+	align-items: end;
+}
+
+.settings form {
+	gap: 8px;
+}
+
+label {
+	display: flex;
+	flex-direction: column;
+	font-size: 12px;
+	gap: 2px;
+}
+
+label.inline {
+	flex-direction: row;
+	align-items: center;
+	font-size: 13px;
+	gap: 6px;
+	word-break: break-all;
+}
+
+input,
+select,
+button {
+	font: inherit;
+	padding: 4px 8px;
+}
+
+input:not([type="checkbox"]) {
+	min-width: 14rem;
+}
+
+.connection {
+	font-size: 13px;
+	padding: 4px 0;
+	opacity: 0.8;
+}
+
+.connection-connected::before {
+	color: #2a2;
+	content: "● ";
+}
+
+.connection-connecting::before,
+.connection-disconnected::before,
+.connection-invalid::before {
+	color: #c60;
+	content: "● ";
+}
+
+.layout {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: 220px 1fr;
+	margin-top: 16px;
+}
+
+@media (max-width: 720px) {
+	.layout {
+		grid-template-columns: 1fr;
+	}
+}
+
+.broadcasts ul {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0;
+}
+
+.broadcasts li {
+	padding: 3px 0;
+}
+
+.broadcasts-head {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.broadcasts .filter {
+	min-width: 0;
+}
+
+.panels {
+	align-content: start;
+	align-items: start;
+	display: grid;
+	gap: 16px;
+	grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
+}
+
+.panel {
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	padding: 10px 12px;
+}
+
+.panel header {
+	align-items: center;
+	display: flex;
+	gap: 8px;
+	justify-content: space-between;
+}
+
+.panel h2 {
+	font-size: 15px;
+	margin: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.panel .tools {
+	display: flex;
+	flex-shrink: 0;
+	gap: 4px;
+}
+
+.panel .tools button,
+.panel .tools select {
+	font-size: 12px;
+	padding: 2px 8px;
+}
+
+.panel .status {
+	font-size: 12px;
+	margin: 4px 0 8px;
+	opacity: 0.8;
+}
+
+canvas {
+	aspect-ratio: 16 / 9;
+	background: #000;
+	border-radius: 6px;
+	object-fit: contain;
+	width: 100%;
+}
+
+.data-body {
+	background: var(--muted);
+	border-radius: 6px;
+	font-family: ui-monospace, monospace;
+	font-size: 12px;
+	max-height: 28rem;
+	min-height: 3rem;
+	overflow: auto;
+	padding: 10px;
+}
+
+.data-body pre {
+	margin: 0;
+}
+
+.json-node {
+	margin-left: 1em;
+}
+
+.json-tree > .json-node {
+	margin-left: 0;
+}
+
+.json-node > .json-leaf,
+.json-node > .json-node {
+	margin-left: 1.2em;
+}
+
+.json-summary {
+	opacity: 0.6;
+}
+
+.json-key {
+	color: #6a8;
+}
+
+.json-number {
+	color: #48c;
+}
+
+.json-string {
+	color: #c74;
+}
+
+.json-boolean,
+.json-null {
+	color: #a5c;
+}
+
+.stamped {
+	display: grid;
+	gap: 4px 12px;
+	grid-template-columns: max-content 1fr;
+	margin: 0;
+}
+
+.stamped dt {
+	opacity: 0.7;
+}
+
+.stamped dd {
+	margin: 0;
+}
+
+.hint {
+	font-size: 13px;
+	opacity: 0.7;
+}
+
+button.icon {
+	line-height: 1;
+}
+
+footer {
+	font-size: 12px;
+	margin-top: 24px;
+	opacity: 0.7;
+}
