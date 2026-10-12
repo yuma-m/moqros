@@ -1,6 +1,6 @@
 // The viewer state that lives in the query string, so a view can be bookmarked and shared.
 //
-//   url     relay URL (default: http://<page host>:4443/anon)
+//   url     relay URL (default: VITE_RELAY_URL at build time, else http://<page host>:4443/anon)
 //   auto    0 to stop showing every announced broadcast (default: 1)
 //   filter  only auto-show announced broadcasts whose name contains this text
 //   show    comma-separated broadcasts always shown, as video or data depending on the catalog
@@ -34,6 +34,9 @@ function list(value: string | null): string[] {
 }
 
 export function defaultUrl(): string {
+	// The GitHub Pages build sets this to the local relay; the page host there is github.io.
+	const configured = import.meta.env.VITE_RELAY_URL;
+	if (configured) return configured;
 	return `http://${location.hostname || "localhost"}:4443/anon`;
 }
 

@@ -47,6 +47,9 @@ connects to `http://localhost:4443/anon` and shows a panel for every broadcast t
 videos `sample/image_raw` and `sample/frames/image_raw`, and the latest messages of the data broadcasts
 `chatter` and `sample/pose`. See [Web viewer](#web-viewer) for picking broadcasts.
 
+The same viewer is hosted at <https://yuma-m.github.io/moqros/>. It also connects to
+`http://localhost:4443/anon`, so it works with the sample without the `web` service.
+
 ![The web viewer showing the two cameras and the two data topics of the Docker sample](https://github.com/yuma-m/moqros/raw/main/images/viewer.jpg)
 
 The compose file runs these services:
@@ -225,6 +228,13 @@ broadcast's catalog.
 
   The component gets the broadcast name, the track (ROS type, format, mode), the raw payload, and the parsed
   JSON message. Each panel lets you switch between the renderers that match its type.
+
+**Hosted viewer:** <https://yuma-m.github.io/moqros/> serves the viewer from `main`. It connects to
+`http://localhost:4443/anon` by default; set the Relay URL field or the `url` parameter for another relay.
+Since the page is served over HTTPS, the browser only lets it reach an `http://` relay on `localhost`. For a
+relay on another machine, give the relay a real certificate and use an `https://` URL. Some browsers ask
+before a public site may reach a local address. A `jwt` in the relay URL stays in the address bar and the
+browser history, so don't share such links. `VITE_RELAY_URL` sets the default relay URL at build time.
 
 To develop it, run the relay and the bridges (e.g. the Docker sample, without its `web` service), then:
 
