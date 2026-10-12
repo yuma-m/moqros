@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/moqros)](https://docs.rs/moqros)
 [![crates.io (moqros-cli)](https://img.shields.io/crates/v/moqros-cli.svg?label=moqros-cli)](https://crates.io/crates/moqros-cli)
 
-![MoQROS Logo](https://github.com/yuma-m/moqros/raw/main/logo.png)
+![MoQROS Logo](https://github.com/yuma-m/moqros/raw/main/images/logo.png)
 
 Stream ROS 2 topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust: images as video, and any other
 message type as JSON or CDR data.
@@ -16,7 +16,7 @@ hang data track instead (see [Other message types](#other-message-types)). It ca
 subscribe to a broadcast, decode it, and republish it as a ROS topic.
 
 ```
- ROS 2 topic ──► moqros-pub ──► moq-relay ──► browser (<moq-watch>, data viewer)
+ ROS 2 topic ──► moqros-pub ──► moq-relay ──► browser (examples/web: videos + data)
  Image / any msg       hang         QUIC/WebTransport    └──► moqros-sub ──► ROS 2 topic
 ```
 
@@ -27,7 +27,7 @@ subscribe to a broadcast, decode it, and republish it as a ROS topic.
 | `crates/moqros` | The library ([crates.io](https://crates.io/crates/moqros), [docs.rs](https://docs.rs/moqros)). The core (conversion, codec, MoQ publish/subscribe) is ROS-independent; the `ros` feature adds r2r bridges. |
 | `crates/moqros-cli` | Bridge nodes ([crates.io](https://crates.io/crates/moqros-cli)): `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). Also a colcon (`ament_cargo`) package. |
 | `examples/image_source` | Sample node that plays a video file (via ffmpeg) or a PNG/JPEG directory as an Image topic. |
-| `examples/web` | Static browser viewer built on `@moq/watch`. |
+| `examples/web` | Browser viewer (React, TypeScript, `@moq/watch`) for several video and data broadcasts. See [Web viewer](#web-viewer). |
 | `docker/` | Dockerfile (ROS 2 Jazzy + Rust, moq-relay) and the end-to-end `compose.yml`. |
 
 ## End-to-end sample (Docker)
@@ -43,22 +43,28 @@ sequence (`samples/frames/`) with ffmpeg inside the container. Files that alread
 your own footage, put a video file or a directory of PNG/JPEG frames in `samples/` and pass `SAMPLE=<name>`.
 
 Open <http://localhost:8080> in a Chromium-based browser or Firefox. Both support WebTransport. The page
-connects to `http://localhost:4443/anon`, plays the video broadcast `sample/image_raw`, and shows the latest
-message of the data broadcast `chatter` below it. Pick other broadcasts in the form, or with the `name`
-(video) and `data` (comma-separated) query parameters.
+connects to `http://localhost:4443/anon` and shows a panel for every broadcast the relay announces: the two
+videos `sample/image_raw` and `sample/frames/image_raw`, and the latest messages of the data broadcasts
+`chatter` and `sample/pose`. See [Web viewer](#web-viewer) for picking broadcasts.
+
+![The web viewer showing the two cameras and the two data topics of the Docker sample](https://github.com/yuma-m/moqros/raw/main/images/viewer.jpg)
 
 The compose file runs these services:
 
 - `samples`: creates the sample inputs if they're missing, then exits.
 - `relay`: `moq-relay` with a self-signed certificate. It allows anonymous access under `anon/`.
 - `source`: `image_source` publishes `/sample/image_raw` at 30 fps as `bgr8` (1280x720; set `WIDTH=640` to scale down).
+- `source-frames`: a second `image_source` publishes the PNG sequence (640x480) on `/sample/frames/image_raw`
+  at 15 fps.
 - `chatter`: `ros2 topic pub` publishes a `std_msgs/msg/Header` stamped with the publish time on `/chatter`
   at 10 Hz. It logs every 100th message.
-- `moqros-pub`: publishes `/sample/image_raw` as the video broadcast `sample/image_raw`, and `/chatter` as
-  the JSON data broadcast `chatter`.
-- `moqros-sub`: subscribes to both broadcasts. It republishes decoded `rgb8` images on `/moqros/image`, and
-  the headers on `/moqros/chatter`.
-- `web`: nginx serving `examples/web`.
+- `pose`: `ros2 topic pub` publishes a stamped `geometry_msgs/msg/PoseStamped` on `/sample/pose` at 5 Hz.
+- `moqros-pub`: publishes both image topics as the video broadcasts `sample/image_raw` and
+  `sample/frames/image_raw`, and `/chatter` and `/sample/pose` as the JSON data broadcasts `chatter` and
+  `sample/pose`.
+- `moqros-sub`: subscribes to all four broadcasts. It republishes decoded `rgb8` images on `/moqros/image` and
+  `/moqros/frames`, and the data on `/moqros/chatter` and `/moqros/pose`.
+- `web`: the viewer in `examples/web`, built with Node and served by nginx.
 
 To play the PNG sequence instead of the video, run `SAMPLE=frames docker compose -f docker/compose.yml up`.
 
@@ -174,7 +180,7 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
 ```
 
 - **`json`**: each message is one JSON document, in r2r's mapping of the message fields. Any hang consumer can
-  read it, including a browser; the `examples/web` viewer shows the latest message. Large arrays (point
+  read it, including a browser; the [web viewer](#web-viewer) shows the latest message. Large arrays (point
   clouds, images) get big and slow as JSON, so use `cdr` for those.
 - **`cdr`**: each message is its ROS serialization, passed through untouched. It's compact and lossless,
   but only ROS-aware consumers can decode it. Images sent as `cdr` arrive uncompressed and bit-exact.
@@ -193,6 +199,41 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
 
 `moqros-sub` handles both kinds of broadcast: it republishes video as `rgb8` images, and data tracks as their
 message type. It fails if a broadcast comes back carrying something different from before.
+
+## Web viewer
+
+`examples/web` is a React and TypeScript app built on [`@moq/watch`](https://www.npmjs.com/package/@moq/watch).
+It opens one connection to the relay and shows any number of broadcasts side by side: a video panel for each
+image broadcast, and a data panel with the latest message for each data broadcast. It tells them apart by the
+broadcast's catalog.
+
+- **Picking broadcasts:** the sidebar lists every broadcast the relay announces. With *Show all announced* on
+  (the default), each one gets a panel; the filter narrows that to names containing some text, and unticking
+  a broadcast hides it. *Add* shows a broadcast by name, even one the relay doesn't announce, as `auto`
+  (decided by the catalog), `video`, or `data`.
+- **Query parameters:** the view is kept in the URL, so it can be bookmarked or shared: `url` (relay URL),
+  `auto=0`, `filter`, `show`, `video` and `data` (comma-separated broadcasts to always show, by catalog or as
+  that kind), and `hide`. The `name` parameter of the old viewer still works as `video`.
+- **Data renderers:** JSON messages show as a tree or as text, and CDR messages as their size and a hex dump
+  (the browser can't decode CDR). Messages with a header (`std_msgs/msg/Header` and `*Stamped` types) can
+  also show their stamp and age on arrival. Add a view for a message type of your own by registering a React
+  component in `src/panels/renderers/index.ts`:
+
+  ```tsx
+  register({ rosType: "sensor_msgs/msg/Imu", format: "json", label: "IMU", component: ImuView });
+  ```
+
+  The component gets the broadcast name, the track (ROS type, format, mode), the raw payload, and the parsed
+  JSON message. Each panel lets you switch between the renderers that match its type.
+
+To develop it, run the relay and the bridges (e.g. the Docker sample, without its `web` service), then:
+
+```sh
+cd examples/web
+npm install
+npm run dev     # http://localhost:8080 with hot reload
+npm run build   # type-check and build into dist/
+```
 
 ## Library usage
 
