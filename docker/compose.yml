@@ -17,6 +17,7 @@ x-ros: &ros
   restart: unless-stopped
 
 services:
+  # moq-relay with a self-signed certificate; anyone may publish and subscribe under anon/.
   relay:
     build:
       context: ..
@@ -37,6 +38,7 @@ services:
       - ../samples:/samples
     restart: "no"
 
+  # The first camera: the sample video (1280x720, set WIDTH=640 to scale down) at 30 fps as bgr8.
   source:
     <<: *ros
     # The ROS services share one image; build it once here.
@@ -71,6 +73,8 @@ services:
       source:
         condition: service_started
 
+  # Publishes both cameras as video broadcasts, and /chatter and /sample/pose as JSON data.
+  # --reliable matches the sources' reliable QoS.
   moqros-pub:
     <<: *ros
     command: ["moqros-pub", "--topic", "/sample/image_raw", "--topic", "/sample/frames/image_raw",
@@ -80,6 +84,8 @@ services:
     ipc: service:source
     depends_on: [relay, source, source-frames, chatter, pose]
 
+  # Republishes the four broadcasts: decoded rgb8 images on /moqros/image and /moqros/frames,
+  # and the data on /moqros/chatter and /moqros/pose.
   moqros-sub:
     <<: *ros
     command: ["moqros-sub", "--broadcast", "sample/image_raw,topic=/moqros/image",
