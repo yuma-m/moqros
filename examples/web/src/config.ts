@@ -9,6 +9,9 @@
 //   hide    comma-separated announced broadcasts not to auto-show
 //
 // `name` (one video broadcast) from the old static viewer is still read as `video`.
+//
+// Relay tokens stay out of the query string: the address bar gets the relay URL without them,
+// and the full URL is kept in this tab's session storage so a reload still connects.
 
 export type Kind = "video" | "data";
 
@@ -57,7 +60,7 @@ export function parseConfig(search: string): Config {
 
 export function serializeConfig(config: Config): string {
 	const params = new URLSearchParams();
-	if (config.url !== defaultUrl()) params.set("url", config.url);
+	if (config.url !== defaultUrl()) params.set("url", stripToken(config.url));
 	if (!config.auto) params.set("auto", "0");
 	if (config.filter) params.set("filter", config.filter);
 	const names = (kind?: Kind) => config.pinned.filter((pin) => pin.kind === kind).map((pin) => pin.name);
@@ -73,4 +76,52 @@ export function serializeConfig(config: Config): string {
 export function dedupe(pinned: Pinned[]): Pinned[] {
 	const seen = new Set<string>();
 	return pinned.filter((pin) => !seen.has(pin.name) && seen.add(pin.name));
+}
+
+/** Whether a path segment looks like a JWT: three base64url parts, the first a JSON header (`eyJ`). */
+function isJwt(segment: string): boolean {
+	return segment.startsWith("eyJ") && segment.split(".").length === 3 && /^[A-Za-z0-9_.-]+$/.test(segment);
+}
+
+/**
+ * The relay URL without its token: the `jwt` query parameter, or a JWT-shaped path segment
+ * (Cloudflare's relays take the token in the path). Other URLs are returned unchanged.
+ */
+export function stripToken(url: string): string {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return url;
+	}
+	const segments = parsed.pathname.split("/");
+	const kept = segments.filter((segment) => !isJwt(segment));
+	if (kept.length === segments.length && !parsed.searchParams.has("jwt")) return url;
+	parsed.searchParams.delete("jwt");
+	parsed.pathname = kept.join("/");
+	return parsed.toString();
+}
+
+const TOKEN_KEY = "moqros-relay-url";
+
+/** Keep a relay URL that carries a token in session storage, for {@link restoreToken}. */
+export function rememberToken(url: string) {
+	const stripped = stripToken(url);
+	try {
+		if (stripped === url) sessionStorage.removeItem(TOKEN_KEY);
+		else sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ stripped, url }));
+	} catch {
+		// Storage can be unavailable (e.g. blocked by the browser); a reload then needs the token again.
+	}
+}
+
+/** The remembered URL with its token, if `url` is that URL without it; else `url`. */
+export function restoreToken(url: string): string {
+	try {
+		const saved = JSON.parse(sessionStorage.getItem(TOKEN_KEY) ?? "null") as { stripped: string; url: string } | null;
+		if (saved?.stripped === url) return saved.url;
+	} catch {
+		// Unavailable storage or a malformed entry: nothing to restore.
+	}
+	return url;
 }

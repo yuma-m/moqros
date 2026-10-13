@@ -302,7 +302,8 @@ certificate's name or fingerprint, which the relay passes along with each sessio
 **Viewers: JWTs.** Browsers present a JWT in the `jwt` query parameter of the relay URL. Issue it from your
 own backend once the viewer has signed in, signed with the key `moq auth serve` verifies, and add it to the
 viewer's relay URL (the Relay URL field or the `url` query parameter of `examples/web`). A token's `root` is
-the path it's valid under, and its publish and subscribe patterns say what it may do there.
+the path it's valid under, and its publish and subscribe patterns say what it may do there. The viewer keeps the
+token out of its address bar, so links copied from it don't carry the token.
 
 The bridges accept a token too (`--url "https://relay.example.com/robot?jwt=…"`), but prefer certificates:
 a URL ends up in shell history and process lists, and the bridges reuse it on every reconnect without asking

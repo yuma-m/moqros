@@ -1,16 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 import { BroadcastList } from "./components/BroadcastList";
 import { SettingsBar } from "./components/SettingsBar";
-import { type Config, dedupe, type Kind, type Pinned, parseConfig, serializeConfig } from "./config";
+import {
+	type Config,
+	dedupe,
+	type Kind,
+	type Pinned,
+	parseConfig,
+	rememberToken,
+	restoreToken,
+	serializeConfig,
+} from "./config";
 import { ConnectionProvider } from "./moq/ConnectionContext";
 import { useBroadcasts } from "./moq/useBroadcasts";
 import { BroadcastPanel } from "./panels/BroadcastPanel";
 
 export function App() {
-	const [config, setConfig] = useState(() => parseConfig(location.search));
+	const [config, setConfig] = useState(() => {
+		const config = parseConfig(location.search);
+		return { ...config, url: restoreToken(config.url) };
+	});
 
-	// Mirror the view into the address bar so it can be bookmarked or shared.
+	// Mirror the view into the address bar so it can be bookmarked or shared. The relay token
+	// stays out of it, in session storage, so shared links and the history don't carry it.
 	useEffect(() => {
+		rememberToken(config.url);
 		const query = serializeConfig(config);
 		if (query !== location.search) history.replaceState(null, "", `${location.pathname}${query}${location.hash}`);
 	}, [config]);
