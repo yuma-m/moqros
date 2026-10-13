@@ -28,7 +28,10 @@ The view is kept in the URL, so it can be bookmarked or shared:
 
 The `name` parameter of the old viewer still works as `video`.
 
-A `jwt` in the relay URL stays in the address bar and the browser history, so don't share such links.
+The address bar never shows the relay's token: the viewer drops a `jwt` query parameter or a JWT-shaped path
+segment (as Cloudflare's relays use) from `url`, and keeps the full URL in the tab's session storage, so a
+reload still connects. A link opened elsewhere asks for the token again. When a link brings a token in `url`,
+the viewer takes it out of the address bar as soon as the page loads.
 
 ## Relays on other machines
 
