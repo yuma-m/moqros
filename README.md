@@ -108,6 +108,8 @@ ros2 run moqros-cli moqros-pub --help
   `moqros-sub` always jumps to the newest group.
 - **Reconnects:** the relay connection redials automatically, and `moqros-sub` resubscribes when a broadcast
   comes back. It stamps republished images with the local receive time.
+- **Shutdown:** on SIGINT or SIGTERM (`docker stop`, systemd), both bridges close the relay session before
+  exiting, so the relay ends their broadcasts right away and a restarted `moqros-pub` can announce them again.
 - **Codec:** `moqros-pub --codec vp8|h264`. H.264 needs the `h264` feature and Cisco's OpenH264 binary:
 
   ```sh

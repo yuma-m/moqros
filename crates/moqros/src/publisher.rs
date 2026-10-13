@@ -43,6 +43,15 @@ impl Publisher {
 		Ok(self.connection.closed().await?)
 	}
 
+	/// Close the connection for every clone, without redialing.
+	///
+	/// Data already queued is delivered first, for at most about a second. Call this before
+	/// exiting so the relay ends this session's broadcasts right away; otherwise it holds them
+	/// until the session times out.
+	pub async fn close(&self) -> Result<()> {
+		Ok(self.connection.clone().close().await?)
+	}
+
 	/// Create and announce a broadcast named `name` that carries encoded images.
 	///
 	/// Fails if `settings.codec` isn't compiled into this build.

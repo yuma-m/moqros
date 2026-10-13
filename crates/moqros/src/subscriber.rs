@@ -42,6 +42,15 @@ impl Subscriber {
 		Ok(self.connection.closed().await?)
 	}
 
+	/// Close the connection for every clone, without redialing.
+	///
+	/// Data already queued is delivered first, for at most about a second. Call this before
+	/// exiting so the relay ends this session's subscriptions right away; otherwise it holds them
+	/// until the session times out.
+	pub async fn close(&self) -> Result<()> {
+		Ok(self.connection.clone().close().await?)
+	}
+
 	/// Wait for `name` to be announced, then subscribe to its best video rendition
 	/// whose codec this build can decode.
 	pub async fn subscribe_images(&self, name: &str) -> Result<ImageSubscriber> {

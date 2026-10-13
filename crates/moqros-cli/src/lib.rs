@@ -521,6 +521,25 @@ impl SharedNode {
 	}
 }
 
+/// Resolves with the signal's name on the first SIGINT (Ctrl-C) or SIGTERM (`docker stop`,
+/// systemd), so the bridges can close their relay connection before exiting.
+pub async fn shutdown_signal() -> anyhow::Result<&'static str> {
+	#[cfg(unix)]
+	{
+		use tokio::signal::unix::{SignalKind, signal};
+		let mut term = signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?;
+		tokio::select! {
+			res = tokio::signal::ctrl_c() => res.map(|()| "SIGINT").context("failed to listen for SIGINT"),
+			_ = term.recv() => Ok("SIGTERM"),
+		}
+	}
+	#[cfg(not(unix))]
+	{
+		tokio::signal::ctrl_c().await.context("failed to listen for Ctrl-C")?;
+		Ok("Ctrl-C")
+	}
+}
+
 /// Spin `node` on a blocking thread until the returned guard is dropped.
 ///
 /// The tokio runtime waits for blocking tasks on shutdown, so a spinner that never
