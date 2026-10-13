@@ -195,7 +195,8 @@ moqros-sub --broadcast camera/image_raw,topic=/remote/image --broadcast imu --br
 | `moqros-pub --topic TOPIC,…` | `format`, `type`, `mode`, `broadcast` | `--format` and `--mode` for every topic. The broadcast name is the topic without its leading slash. |
 | `moqros-sub --broadcast NAME,…` | `topic`, `type`, `frame_id` | `--frame-id` for every broadcast. The topic is `/moqros/<broadcast>` (`/moqros/image` for a lone broadcast). |
 
-`moqros-bridge` does both in one node, e.g. for a robot that streams its camera and takes velocity commands.
+`moqros-bridge` does both in one node and over one relay connection, e.g. for a robot that streams its camera
+and takes velocity commands.
 It takes `--topic` like `moqros-pub` and `--broadcast` like `moqros-sub`, with the same options. The flags
 that name a single topic or broadcast (`--type`, and the other side's name) are left out; use the options instead:
 
@@ -289,7 +290,8 @@ let broadcast = publisher.create_image_broadcast("camera", Default::default())?;
 let bridge = spawn_ros_to_moq(&mut node, "/camera/image_raw", QosProfile::sensor_data(), broadcast)?;
 ```
 
-See [docs.rs](https://docs.rs/moqros) for the API, data broadcasts, use without ROS, the codec features
+To publish and subscribe over one connection, use `moqros::connect_both(&config)`, which returns a `Publisher`
+and a `Subscriber` sharing it. See [docs.rs](https://docs.rs/moqros) for the API, data broadcasts, use without ROS, the codec features
 (VP8 by default, H.264 through Cisco's OpenH264 binary), and the format on the wire.
 
 ## Security

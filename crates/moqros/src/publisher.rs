@@ -31,6 +31,10 @@ impl Publisher {
 		Ok(Self { origin, connection })
 	}
 
+	pub(crate) fn from_parts(origin: moq_net::origin::Producer, connection: moq_tokio::Connection) -> Self {
+		Self { origin, connection }
+	}
+
 	/// Wait until the first session with the relay is established.
 	///
 	/// Fails if the relay refuses the session, e.g. for missing credentials.
