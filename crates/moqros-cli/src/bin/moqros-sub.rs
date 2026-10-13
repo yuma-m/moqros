@@ -58,8 +58,8 @@ async fn main() -> anyhow::Result<()> {
 		.collect();
 	let mut bridges = FuturesUnordered::new();
 	// Created once, so a signal arriving while the loop body runs isn't missed.
-	let ctrl_c = tokio::signal::ctrl_c();
-	tokio::pin!(ctrl_c);
+	let shutdown = moqros_cli::shutdown_signal();
+	tokio::pin!(shutdown);
 
 	// The node only publishes, so it never needs spinning (spin_once would busy-loop
 	// with nothing to wait on).
@@ -94,8 +94,11 @@ async fn main() -> anyhow::Result<()> {
 			}
 			// E.g. the relay refused the session: no broadcast would ever be announced.
 			res = subscriber.closed() => return res.context("relay connection closed"),
-			_ = &mut ctrl_c => {
-				tracing::info!("interrupted");
+			res = &mut shutdown => {
+				tracing::info!(signal = res?, "shutting down");
+				if let Err(err) = subscriber.close().await {
+					tracing::warn!(%err, "the relay connection didn't close cleanly");
+				}
 				return Ok(());
 			}
 		}

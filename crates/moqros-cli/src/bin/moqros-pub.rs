@@ -128,8 +128,8 @@ async fn main() -> anyhow::Result<()> {
 	let mut bridges = FuturesUnordered::new();
 	let mut logged = false;
 	// Created once, so a signal arriving while the loop body runs isn't missed.
-	let ctrl_c = tokio::signal::ctrl_c();
-	tokio::pin!(ctrl_c);
+	let shutdown = moqros_cli::shutdown_signal();
+	tokio::pin!(shutdown);
 
 	loop {
 		// Start every topic whose type is known by now; data topics without a `type`
@@ -159,8 +159,11 @@ async fn main() -> anyhow::Result<()> {
 			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
 			res = publisher.closed() => return res.context("relay connection closed"),
 			err = spinner.failed() => return Err(err),
-			_ = &mut ctrl_c => {
-				tracing::info!("interrupted");
+			res = &mut shutdown => {
+				tracing::info!(signal = res?, "shutting down");
+				if let Err(err) = publisher.close().await {
+					tracing::warn!(%err, "the relay connection didn't close cleanly");
+				}
 				return Ok(());
 			}
 		}
