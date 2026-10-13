@@ -56,24 +56,7 @@ impl Publisher {
 	///
 	/// Fails if `settings.codec` isn't compiled into this build.
 	pub fn create_image_broadcast(&self, name: &str, settings: EncoderSettings) -> Result<ImagePublisher> {
-		let encoder = Encoder::new(settings)?;
-		let broadcast = self.origin.create_broadcast(name)?;
-		broadcast.announce(Default::default())?;
-
-		let catalog = broadcast.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())?;
-		let video = broadcast.create_track(VIDEO_TRACK, hang::container::track_info(PRIORITY.video))?;
-		tracing::info!(broadcast = name, codec = %encoder.settings().codec, "announced image broadcast");
-
-		Ok(ImagePublisher {
-			name: name.to_string(),
-			broadcast,
-			catalog,
-			video,
-			group: None,
-			encoder,
-			rendition: None,
-			clock: StreamClock::default(),
-		})
+		ImagePublisher::new(&self.origin, name, settings)
 	}
 
 	/// Create and announce a broadcast named `name` that carries messages in a data track.
@@ -95,12 +78,36 @@ pub struct ImagePublisher {
 	catalog: moq_net::track::Producer,
 	video: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
+	/// What [`Self::group`] has used of moq-net's per-group limits.
+	budget: GroupBudget,
 	encoder: Encoder,
 	rendition: Option<(u32, u32, VideoCodec)>,
 	clock: StreamClock,
 }
 
 impl ImagePublisher {
+	fn new(origin: &moq_net::origin::Producer, name: &str, settings: EncoderSettings) -> Result<Self> {
+		let encoder = Encoder::new(settings)?;
+		let broadcast = origin.create_broadcast(name)?;
+		broadcast.announce(Default::default())?;
+
+		let catalog = broadcast.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())?;
+		let video = broadcast.create_track(VIDEO_TRACK, hang::container::track_info(PRIORITY.video))?;
+		tracing::info!(broadcast = name, codec = %encoder.settings().codec, "announced image broadcast");
+
+		Ok(Self {
+			name: name.to_string(),
+			broadcast,
+			catalog,
+			video,
+			group: None,
+			budget: GroupBudget::default(),
+			encoder,
+			rendition: None,
+			clock: StreamClock::default(),
+		})
+	}
+
 	/// Broadcast name, relative to the relay URL.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -128,6 +135,17 @@ impl ImagePublisher {
 				group.finish()?;
 			}
 			self.group = Some(self.video.append_group()?);
+			self.budget = GroupBudget::default();
+		} else if self.group.is_some() && !self.budget.fits(frame.data.len()) {
+			// moq-net would abort the group on this write. Close it and drop frames
+			// until the next keyframe opens a new one.
+			tracing::warn!(
+				broadcast = %self.name,
+				"video group is full; raise the bitrate budget or shorten the keyframe interval"
+			);
+			if let Some(group) = self.group.take() {
+				group.finish()?;
+			}
 		}
 
 		// Nothing decodable can be sent until the first keyframe opens a group.
@@ -142,6 +160,11 @@ impl ImagePublisher {
 			payload: frame.data.clone(),
 		};
 		frame.write_to(group)?;
+		self.budget.add(frame.payload.len());
+		// Start the next group early, so a long keyframe interval doesn't fill this one.
+		if self.budget.nearly_full() {
+			self.encoder.force_keyframe();
+		}
 		Ok(())
 	}
 
@@ -179,11 +202,99 @@ impl ImagePublisher {
 	}
 }
 
+/// How much of moq-net's per-group limits a group has used, so writers can start a new
+/// group before a write would abort the current one.
+#[derive(Debug, Default)]
+pub(crate) struct GroupBudget {
+	frames: usize,
+	bytes: u64,
+}
+
+impl GroupBudget {
+	/// Bytes a frame may add on top of its payload (hang's timestamp varint).
+	const OVERHEAD: u64 = 8;
+
+	/// Whether a frame with `payload` bytes still fits into the group.
+	pub(crate) fn fits(&self, payload: usize) -> bool {
+		self.frames < moq_net::group::MAX_GROUP_FRAMES
+			&& self.bytes + payload as u64 + Self::OVERHEAD <= moq_net::group::MAX_CACHE_BYTES
+	}
+
+	/// Account for a frame with `payload` bytes.
+	pub(crate) fn add(&mut self, payload: usize) {
+		self.frames += 1;
+		self.bytes += payload as u64 + Self::OVERHEAD;
+	}
+
+	/// Whether the group has used three quarters of either limit.
+	fn nearly_full(&self) -> bool {
+		self.frames >= moq_net::group::MAX_GROUP_FRAMES / 4 * 3 || self.bytes >= moq_net::group::MAX_CACHE_BYTES / 4 * 3
+	}
+}
+
 impl Drop for ImagePublisher {
 	fn drop(&mut self) {
 		if let Some(group) = self.group.take() {
 			let _ = group.finish();
 		}
 		self.broadcast.close();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use bytes::Bytes;
+
+	use super::*;
+	use crate::codec::Codec;
+
+	fn publisher(settings: EncoderSettings) -> ImagePublisher {
+		ImagePublisher::new(&moq_tokio::origin::spawn(), "camera", settings).unwrap()
+	}
+
+	/// A keyframe interval too long for one group starts the next group early.
+	#[tokio::test]
+	async fn long_keyframe_interval_starts_groups_early() {
+		if Codec::available().is_empty() {
+			return;
+		}
+		let mut publisher = publisher(EncoderSettings {
+			keyframe_interval: Duration::from_secs(3600),
+			..Default::default()
+		});
+		let mut keyframes = 0;
+		for t in 0..moq_net::group::MAX_GROUP_FRAMES as u32 + 100 {
+			publisher
+				.publish(&crate::codec::tests::test_pattern(16, 16, t))
+				.unwrap();
+			keyframes += usize::from(publisher.budget.frames == 1);
+		}
+		assert_eq!(keyframes, 2);
+	}
+
+	/// Encoded frames that would overflow a group are dropped until the next keyframe.
+	#[tokio::test]
+	async fn full_group_waits_for_a_keyframe() {
+		if Codec::available().is_empty() {
+			return;
+		}
+		let mut publisher = publisher(EncoderSettings::default());
+		let frame = |n: u64, keyframe: bool| EncodedFrame {
+			data: Bytes::from_static(&[0; 16]),
+			keyframe,
+			width: 16,
+			height: 16,
+			timestamp: Duration::from_millis(n * 33),
+			codec: VideoCodec::VP8,
+		};
+		let limit = moq_net::group::MAX_GROUP_FRAMES as u64;
+		for n in 0..limit + 10 {
+			publisher.publish_encoded(&frame(n, n == 0)).unwrap();
+		}
+		assert!(publisher.group.is_none());
+		publisher.publish_encoded(&frame(limit + 10, true)).unwrap();
+		assert_eq!(publisher.budget.frames, 1);
 	}
 }

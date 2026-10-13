@@ -13,6 +13,7 @@ use bytes::Bytes;
 use hang::catalog::{BinaryConfig, Catalog, JsonConfig, Mode, PRIORITY};
 use hang::moq_net;
 
+use crate::publisher::GroupBudget;
 use crate::subscriber::GroupReader;
 use crate::{Error, Result};
 
@@ -62,7 +63,8 @@ pub enum DataMode {
 	/// skips to the newest one. Suits sensor data and state.
 	#[default]
 	Snapshot,
-	/// Lossless log: all messages go into one group and are delivered in order.
+	/// Lossless log: messages go into one group and are delivered in order. A group that
+	/// reaches moq-net's limits (8192 messages or 32 MB) is closed and the next one continues.
 	Stream,
 }
 
@@ -179,8 +181,10 @@ pub struct DataPublisher {
 	broadcast: moq_net::broadcast::Producer,
 	_catalog: moq_net::track::Producer,
 	track: moq_net::track::Producer,
-	/// The one open group of a [`DataMode::Stream`] track.
+	/// The open group of a [`DataMode::Stream`] track.
 	group: Option<moq_net::group::Producer>,
+	/// What [`Self::group`] has used of moq-net's per-group limits.
+	budget: GroupBudget,
 }
 
 impl DataPublisher {
@@ -211,6 +215,7 @@ impl DataPublisher {
 			_catalog: catalog_track,
 			track,
 			group: None,
+			budget: GroupBudget::default(),
 		})
 	}
 
@@ -234,11 +239,21 @@ impl DataPublisher {
 				group.finish()?;
 			}
 			DataMode::Stream => {
+				let size = payload.len();
+				if !self.budget.fits(size)
+					&& let Some(group) = self.group.take()
+				{
+					group.finish()?;
+				}
 				let group = match &mut self.group {
 					Some(group) => group,
-					None => self.group.insert(self.track.append_group()?),
+					None => {
+						self.budget = GroupBudget::default();
+						self.group.insert(self.track.append_group()?)
+					}
 				};
 				group.write_frame(timestamp, payload)?;
+				self.budget.add(size);
 			}
 		}
 		Ok(())
@@ -366,6 +381,47 @@ mod tests {
 				"rosType": "std_msgs/msg/String",
 			})
 		);
+	}
+
+	/// A stream track outgrowing moq-net's group limits continues in a new group.
+	#[tokio::test]
+	async fn stream_continues_past_a_full_group() {
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher =
+			DataPublisher::new(&origin, "log", settings(DataFormat::Json, DataMode::Stream, None)).unwrap();
+		let broadcast = origin.consume().request_broadcast("log").await.unwrap();
+		let mut track = broadcast
+			.track(DATA_TRACK)
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default())
+			.await
+			.unwrap()
+			.ordered();
+
+		// Hold the first group before the second exists, as a subscriber that keeps up does.
+		publisher.publish("0").unwrap();
+		let mut group = track.next_group().await.unwrap().unwrap();
+		let count = moq_net::group::MAX_GROUP_FRAMES + 100;
+		for i in 1..count {
+			publisher.publish(i.to_string()).unwrap();
+		}
+		drop(publisher);
+
+		let mut groups = 1;
+		let mut received = 0;
+		loop {
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				assert_eq!(frame.payload, received.to_string().as_bytes());
+				received += 1;
+			}
+			// Dropping the publisher ends the track with an error.
+			let Ok(Some(next)) = track.next_group().await else {
+				break;
+			};
+			group = next;
+			groups += 1;
+		}
+		assert_eq!((groups, received), (2, count));
 	}
 
 	#[test]
