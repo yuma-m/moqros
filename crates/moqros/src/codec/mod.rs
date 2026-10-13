@@ -102,7 +102,8 @@ pub struct EncoderSettings {
 	/// Upper bound on the input frame rate, used by rate control.
 	pub max_fps: f32,
 	/// Maximum time between keyframes. Each keyframe starts a new MoQ group,
-	/// so this bounds how long a late joiner waits for the first picture.
+	/// so this bounds how long a late joiner waits for the first picture. A group
+	/// nearing moq-net's limits (8192 frames or 32 MB) gets an earlier keyframe.
 	pub keyframe_interval: Duration,
 	/// Encoder worker threads; 0 picks a sensible default.
 	pub threads: u16,

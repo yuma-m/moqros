@@ -189,10 +189,11 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
   but only ROS-aware consumers can decode it. Images sent as `cdr` arrive uncompressed and bit-exact.
 - **`--mode snapshot`** (default): each message is a MoQ group of its own, and subscribers skip to the
   newest one when they fall behind. Suits sensor data and state.
-- **`--mode stream`**: all messages go into one group and are delivered in order, none skipped. Suits
-  logs and commands. The group never closes, so the publisher and the relay keep its messages for as long
-  as the broadcast runs, and a subscriber that joins late gets them all from the start. Avoid it for
-  long-running, high-rate topics; use `snapshot` there.
+- **`--mode stream`**: messages go into one group and are delivered in order, none skipped. Suits logs and
+  commands. The publisher and the relay keep the group's messages, and a subscriber that joins late gets
+  them all from the start of the group. A group holds at most 8192 messages or 32 MB (moq-net's limits);
+  the next message then starts a new group, and late joiners start there. For long-running, high-rate
+  topics use `snapshot`.
 - **Type:** without `--type`, `moqros-pub` waits for the topic to appear and asks the ROS graph for its type.
   Relative topic names resolve against the node's namespace, but remappings aren't applied. The type goes
   into the catalog, so `moqros-sub` republishes with the same type (`--type` overrides it).
