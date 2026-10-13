@@ -3,8 +3,15 @@ import type { Kind } from "../config";
 import { useConnection } from "../moq/ConnectionContext";
 import { useOptionalValue } from "../moq/useSignal";
 
+/** What the add form opens: a panel showing a broadcast, or the teleop pad publishing one. */
+export type AddKind = Kind | "teleop";
+
 /** Relay URL, connection status, and a form to add a broadcast by name. */
-export function SettingsBar(props: { url: string; onUrl: (url: string) => void; onAdd: (name: string, kind?: Kind) => void }) {
+export function SettingsBar(props: {
+	url: string;
+	onUrl: (url: string) => void;
+	onAdd: (name: string, kind?: AddKind) => void;
+}) {
 	const connection = useConnection();
 	const status = useOptionalValue(connection?.status);
 	const error = useOptionalValue(connection?.error);
@@ -13,7 +20,7 @@ export function SettingsBar(props: { url: string; onUrl: (url: string) => void; 
 	useEffect(() => setUrl(props.url), [props.url]);
 
 	const [name, setName] = useState("");
-	const [kind, setKind] = useState<Kind | "auto">("auto");
+	const [kind, setKind] = useState<AddKind | "auto">("auto");
 
 	const connect = (event: FormEvent) => {
 		event.preventDefault();
@@ -52,10 +59,11 @@ export function SettingsBar(props: { url: string; onUrl: (url: string) => void; 
 				</label>
 				<label>
 					As
-					<select value={kind} onChange={(event) => setKind(event.target.value as Kind | "auto")}>
+					<select value={kind} onChange={(event) => setKind(event.target.value as AddKind | "auto")}>
 						<option value="auto">auto</option>
 						<option value="video">video</option>
 						<option value="data">data</option>
+						<option value="teleop">teleop (publish)</option>
 					</select>
 				</label>
 				<button type="submit">Add</button>

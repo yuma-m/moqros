@@ -1,0 +1,59 @@
+# Teleop demo, both directions through one bridge node:
+#   teleop_sim (/camera/image_raw, /map/image_raw: video; /odom: JSON data)
+#     -> moqros-bridge -> relay -> browser
+#   browser teleop pad (robot/cmd_vel: JSON geometry_msgs/msg/Twist)
+#     -> relay -> moqros-bridge -> /cmd_vel -> teleop_sim
+#
+#   docker compose -f docker/teleop.compose.yml up --build
+#   open http://localhost:8080/?teleop=robot/cmd_vel
+#
+# Uses the same ports as compose.yml, so run one or the other.
+name: moqros-teleop
+
+x-ros: &ros
+  image: moqros/ros:latest
+  environment:
+    ROS_DOMAIN_ID: "42"
+    RUST_LOG: info
+  restart: unless-stopped
+
+services:
+  # moq-relay with a self-signed certificate; anyone may publish and subscribe under anon/,
+  # so anyone who can reach port 4443 can drive the robot.
+  relay:
+    extends:
+      file: compose.yml
+      service: relay
+
+  # The simulated robot: a differential drive in a small grid world. It stops when no
+  # /cmd_vel arrives for 0.5 s.
+  sim:
+    <<: *ros
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: ros
+    command: ["teleop_sim"]
+    # The bridge shares this container's network and IPC namespaces, like processes on one
+    # robot, so Fast DDS moves the images over shared memory.
+    ipc: shareable
+
+  # One node, both directions: the cameras as video and /odom as JSON data out, and the
+  # browser's robot/cmd_vel broadcast in, republished on /cmd_vel. --reliable matches the
+  # sim's reliable image QoS.
+  bridge:
+    <<: *ros
+    command: ["moqros-bridge", "--url", "http://relay:4443/anon", "--reliable", "--fps", "15",
+              "--topic", "/camera/image_raw,broadcast=robot/camera",
+              "--topic", "/map/image_raw,broadcast=robot/map",
+              "--topic", "/odom,format=json,broadcast=robot/odom",
+              "--broadcast", "robot/cmd_vel,topic=/cmd_vel"]
+    network_mode: service:sim
+    ipc: service:sim
+    depends_on: [relay, sim]
+
+  # The viewer (examples/web), built with Node and served by nginx.
+  web:
+    extends:
+      file: compose.yml
+      service: web

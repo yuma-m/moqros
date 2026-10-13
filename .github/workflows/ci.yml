@@ -151,6 +151,7 @@ jobs:
           source install/setup.bash
           ros2 run moqros-cli moqros-pub --help
           ros2 run moqros-cli moqros-sub --help
+          ros2 run moqros-cli moqros-bridge --help
 
   # The one required check: fails if any job above failed or was cancelled, and passes when they
   # passed or were skipped. A matrix job skipped as a whole reports as plain `ros`, not

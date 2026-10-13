@@ -13,6 +13,9 @@ export interface DataTrack {
 
 export type Classified = { kind: "video" } | ({ kind: "data" } & DataTrack) | { kind: "unknown" };
 
+/** Name of the single data track inside every moqros data broadcast. */
+export const DATA_TRACK = "data";
+
 /** MIME type of CDR payloads in the catalog's `binary` section. */
 export const CDR_MIME = "application/x-ros2-cdr";
 

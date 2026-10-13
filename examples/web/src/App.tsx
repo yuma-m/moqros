@@ -14,6 +14,7 @@ import {
 import { ConnectionProvider } from "./moq/ConnectionContext";
 import { useBroadcasts } from "./moq/useBroadcasts";
 import { BroadcastPanel } from "./panels/BroadcastPanel";
+import { TeleopPanel } from "./panels/TeleopPanel";
 
 export function App() {
 	const [config, setConfig] = useState(() => {
@@ -78,7 +79,9 @@ function Viewer({ config, setConfig }: { config: Config; setConfig: (update: (co
 				<SettingsBar
 					url={config.url}
 					onUrl={(url) => setConfig((config) => ({ ...config, url }))}
-					onAdd={(name, kind) => show(name, kind)}
+					onAdd={(name, kind) =>
+						kind === "teleop" ? setConfig((config) => ({ ...config, teleop: name })) : show(name, kind)
+					}
 				/>
 			</header>
 			<div className="layout">
@@ -92,6 +95,13 @@ function Viewer({ config, setConfig }: { config: Config; setConfig: (update: (co
 					onToggle={(name, on) => (on ? show(name) : hide(name))}
 				/>
 				<main className="panels">
+					{config.teleop && (
+						<TeleopPanel
+							key={`${config.url} ${config.teleop}`}
+							name={config.teleop}
+							onClose={() => setConfig((config) => ({ ...config, teleop: undefined }))}
+						/>
+					)}
 					{shown.length === 0 && <div className="hint">Nothing to show yet. Add a broadcast or wait for one to be announced.</div>}
 					{shown.map((panel) => (
 						<BroadcastPanel

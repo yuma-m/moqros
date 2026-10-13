@@ -368,6 +368,107 @@ impl QosArgs {
 	}
 }
 
+/// Video encoder flags.
+#[derive(Debug, Clone, Args)]
+pub struct EncoderArgs {
+	/// Video codec (`vp8`, or `h264` when built with the `h264` feature and
+	/// OPENH264_LIBRARY points at Cisco's OpenH264 binary).
+	#[arg(long, default_value_t = moqros::Codec::default())]
+	pub codec: moqros::Codec,
+
+	/// Target video bitrate in bits per second.
+	#[arg(long, default_value_t = 2_000_000)]
+	pub bitrate: u32,
+
+	/// Expected maximum input frame rate of the video.
+	#[arg(long, default_value_t = 30.0)]
+	pub fps: f32,
+
+	/// Maximum keyframe (MoQ group) interval of the video in milliseconds.
+	#[arg(long, default_value_t = 2000)]
+	pub keyframe_interval_ms: u64,
+}
+
+impl EncoderArgs {
+	pub fn settings(&self) -> moqros::EncoderSettings {
+		moqros::EncoderSettings {
+			codec: self.codec,
+			bitrate: self.bitrate,
+			max_fps: self.fps,
+			keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
+			..Default::default()
+		}
+	}
+}
+
+/// A running ROS -> MoQ bridge task.
+pub type PubBridge = JoinHandle<moqros::Result<moqros::ros::BridgeStats>>;
+
+/// Start bridging `topic` from ROS to MoQ once its type is known. Returns `None` while
+/// the topic hasn't appeared in the ROS graph yet.
+pub fn start_pub_topic(
+	node: &mut r2r::Node,
+	publisher: &moqros::Publisher,
+	topic: &PubTopic,
+	encoder: &EncoderArgs,
+	qos: QosProfile,
+) -> anyhow::Result<Option<PubBridge>> {
+	let bridge = match topic.format.data() {
+		None => {
+			let images = publisher.create_image_broadcast(&topic.broadcast, encoder.settings())?;
+			moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?
+		}
+		Some(format) => {
+			let ros_type = match &topic.ros_type {
+				Some(ros_type) => ros_type.clone(),
+				None => match moqros::ros::topic_type(node, &topic.topic)? {
+					Some(ros_type) => ros_type,
+					None => return Ok(None),
+				},
+			};
+			let settings = moqros::DataSettings {
+				format,
+				mode: topic.mode,
+				ros_type: Some(ros_type),
+			};
+			let data = publisher.create_data_broadcast(&topic.broadcast, settings)?;
+			moqros::ros::spawn_ros_to_moq_data(node, &topic.topic, qos, data)?
+		}
+	};
+	tracing::info!(
+		topic = topic.topic,
+		format = ?topic.format,
+		broadcast = topic.broadcast,
+		"bridging ROS -> MoQ"
+	);
+	Ok(Some(bridge))
+}
+
+/// A running MoQ -> ROS bridge task.
+pub type SubBridge = JoinHandle<moqros::Result<()>>;
+
+/// Create the ROS publisher for a subscribed broadcast and start republishing it.
+pub fn spawn_sub_broadcast(
+	ready: moqros::ros::MoqToRos,
+	node: &mut r2r::Node,
+	broadcast: &SubBroadcast,
+	qos: QosProfile,
+) -> moqros::Result<SubBridge> {
+	let bridge = ready.spawn(
+		node,
+		&broadcast.topic,
+		qos,
+		&broadcast.frame_id,
+		broadcast.ros_type.as_deref(),
+	)?;
+	tracing::info!(
+		broadcast = broadcast.broadcast,
+		topic = broadcast.topic,
+		"bridging MoQ -> ROS"
+	);
+	Ok(bridge)
+}
+
 /// Create the ROS node and parse `T` from the command line and the node's ROS parameters.
 ///
 /// Arguments between `--ros-args` and `--` are left to rcl, so the binaries accept

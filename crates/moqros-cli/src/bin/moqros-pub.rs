@@ -7,8 +7,7 @@ use anyhow::Context;
 use clap::Parser;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use moqros::ros::{spawn_ros_to_moq, spawn_ros_to_moq_data, topic_type};
-use moqros_cli::{Format, PubTopic, QosArgs, RelayArgs, SharedNode, TopicSpec, init_logging, spawn_spinner};
+use moqros_cli::{EncoderArgs, Format, QosArgs, RelayArgs, SharedNode, TopicSpec, init_logging, spawn_spinner};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -37,76 +36,14 @@ struct Cli {
 	#[arg(long, default_value_t = moqros::DataMode::default())]
 	mode: moqros::DataMode,
 
-	/// Video codec (`vp8`, or `h264` when built with the `h264` feature and
-	/// OPENH264_LIBRARY points at Cisco's OpenH264 binary).
-	#[arg(long, default_value_t = moqros::Codec::default())]
-	codec: moqros::Codec,
-
-	/// Target video bitrate in bits per second.
-	#[arg(long, default_value_t = 2_000_000)]
-	bitrate: u32,
-
-	/// Expected maximum input frame rate of the video.
-	#[arg(long, default_value_t = 30.0)]
-	fps: f32,
-
-	/// Maximum keyframe (MoQ group) interval of the video in milliseconds.
-	#[arg(long, default_value_t = 2000)]
-	keyframe_interval_ms: u64,
+	#[command(flatten)]
+	encoder: EncoderArgs,
 
 	#[command(flatten)]
 	relay: RelayArgs,
 
 	#[command(flatten)]
 	qos: QosArgs,
-}
-
-impl Cli {
-	/// Start bridging `topic` once its type is known. Returns `None` while the topic
-	/// hasn't appeared in the ROS graph yet.
-	fn start(
-		&self,
-		node: &mut moqros::ros::r2r::Node,
-		publisher: &moqros::Publisher,
-		topic: &PubTopic,
-	) -> anyhow::Result<Option<tokio::task::JoinHandle<moqros::Result<moqros::ros::BridgeStats>>>> {
-		let bridge = match topic.format.data() {
-			None => {
-				let settings = moqros::EncoderSettings {
-					codec: self.codec,
-					bitrate: self.bitrate,
-					max_fps: self.fps,
-					keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
-					..Default::default()
-				};
-				let images = publisher.create_image_broadcast(&topic.broadcast, settings)?;
-				spawn_ros_to_moq(node, &topic.topic, self.qos.profile(), images)?
-			}
-			Some(format) => {
-				let ros_type = match &topic.ros_type {
-					Some(ros_type) => ros_type.clone(),
-					None => match topic_type(node, &topic.topic)? {
-						Some(ros_type) => ros_type,
-						None => return Ok(None),
-					},
-				};
-				let settings = moqros::DataSettings {
-					format,
-					mode: topic.mode,
-					ros_type: Some(ros_type),
-				};
-				let data = publisher.create_data_broadcast(&topic.broadcast, settings)?;
-				spawn_ros_to_moq_data(node, &topic.topic, self.qos.profile(), data)?
-			}
-		};
-		tracing::info!(
-			topic = topic.topic,
-			format = ?topic.format,
-			broadcast = topic.broadcast,
-			"bridging ROS -> MoQ"
-		);
-		Ok(Some(bridge))
-	}
 }
 
 #[tokio::main]
@@ -138,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
 		let mut waiting = Vec::new();
 		for topic in std::mem::take(&mut pending) {
 			let topic_name = topic.topic.clone();
-			match node.with(|node| cli.start(node, &publisher, &topic))? {
+			let started = node
+				.with(|node| moqros_cli::start_pub_topic(node, &publisher, &topic, &cli.encoder, cli.qos.profile()))?;
+			match started {
 				Some(bridge) => bridges.push(async move { (topic_name, bridge.await) }),
 				None => {
 					waiting.push(topic.topic.clone());

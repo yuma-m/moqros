@@ -36,9 +36,13 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
     . /opt/ros/${ROS_DISTRO}/setup.sh \
     && cargo build --release --workspace --locked \
-    && cp target/release/moqros-pub target/release/moqros-sub target/release/image_source /usr/local/bin/
+    && cp target/release/moqros-pub target/release/moqros-sub target/release/moqros-bridge \
+          target/release/image_source /usr/local/bin/
 
 FROM ros:${ROS_DISTRO}-ros-base AS ros
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libvpx9 \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libvpx9 python3-numpy \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /usr/local/bin/moqros-pub /usr/local/bin/moqros-sub /usr/local/bin/image_source /usr/local/bin/
+COPY --from=build /usr/local/bin/moqros-pub /usr/local/bin/moqros-sub /usr/local/bin/moqros-bridge \
+     /usr/local/bin/image_source /usr/local/bin/
+# The simulated robot of the teleop demo (docker/teleop.compose.yml).
+COPY --chmod=755 examples/sim/teleop_sim.py /usr/local/bin/teleop_sim
