@@ -54,29 +54,30 @@ impl Subscriber {
 	/// Wait for `name` to be announced, then subscribe to its best video rendition
 	/// whose codec this build can decode.
 	pub async fn subscribe_images(&self, name: &str) -> Result<ImageSubscriber> {
-		let (broadcast, catalog) = self.catalog(name).await?;
-		images(name, broadcast, &catalog).await
+		let (broadcast, catalog, route) = self.catalog(name).await?;
+		images(name, broadcast, &catalog, route).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to its data track.
 	pub async fn subscribe_data(&self, name: &str) -> Result<DataSubscriber> {
-		let (broadcast, catalog) = self.catalog(name).await?;
-		data(name, broadcast, &catalog).await
+		let (broadcast, catalog, route) = self.catalog(name).await?;
+		data(name, broadcast, &catalog, route).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
 	/// if this build can decode it, otherwise its data track.
 	pub async fn subscribe(&self, name: &str) -> Result<Subscription> {
-		let (broadcast, catalog) = self.catalog(name).await?;
+		let (broadcast, catalog, route) = self.catalog(name).await?;
 		match Kind::of(&catalog) {
-			Kind::Images => Ok(Subscription::Images(images(name, broadcast, &catalog).await?)),
-			Kind::Data => Ok(Subscription::Data(data(name, broadcast, &catalog).await?)),
+			Kind::Images => Ok(Subscription::Images(images(name, broadcast, &catalog, route).await?)),
+			Kind::Data => Ok(Subscription::Data(data(name, broadcast, &catalog, route).await?)),
 			Kind::None => Err(Error::NoTracks(name.to_string())),
 		}
 	}
 
-	/// Wait for `name` to be announced and read its first catalog.
-	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, Catalog)> {
+	/// Wait for `name` to be announced and read its first catalog. Also returns a watch on
+	/// the announcement, which the subscription ends with.
+	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, Catalog, RouteWatch)> {
 		let consumer = self.origin.consume();
 		let mut announced = consumer.announced();
 		loop {
@@ -92,11 +93,20 @@ impl Subscriber {
 		let broadcast = consumer.request_broadcast(name).await?;
 		let mut catalog = Catalog::<()>::subscribe(&broadcast).await?;
 		let catalog = catalog.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
-		Ok((broadcast, catalog))
+		let route = RouteWatch {
+			announced,
+			name: name.to_string(),
+		};
+		Ok((broadcast, catalog, route))
 	}
 }
 
-async fn images(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &Catalog) -> Result<ImageSubscriber> {
+async fn images(
+	name: &str,
+	broadcast: moq_net::broadcast::Consumer,
+	catalog: &Catalog,
+	route: RouteWatch,
+) -> Result<ImageSubscriber> {
 	let mut renditions = catalog.video.ranked().peekable();
 	if renditions.peek().is_none() {
 		return Err(Error::NoVideo(name.to_string()));
@@ -118,7 +128,7 @@ async fn images(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &C
 		"subscribing"
 	);
 
-	let video = GroupReader::subscribe(&broadcast, track, true).await?;
+	let video = GroupReader::subscribe(&broadcast, track, true, route).await?;
 	Ok(ImageSubscriber {
 		_broadcast: broadcast,
 		video,
@@ -127,7 +137,12 @@ async fn images(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &C
 	})
 }
 
-async fn data(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &Catalog) -> Result<DataSubscriber> {
+async fn data(
+	name: &str,
+	broadcast: moq_net::broadcast::Consumer,
+	catalog: &Catalog,
+	route: RouteWatch,
+) -> Result<DataSubscriber> {
 	let (track, settings) = DataSettings::from_catalog(catalog).ok_or_else(|| Error::NoData(name.to_string()))?;
 	tracing::info!(
 		broadcast = name,
@@ -137,7 +152,7 @@ async fn data(name: &str, broadcast: moq_net::broadcast::Consumer, catalog: &Cat
 		ros_type = settings.ros_type.as_deref().unwrap_or_default(),
 		"subscribing"
 	);
-	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot).await?;
+	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
 	Ok(DataSubscriber::new(broadcast, reader, settings))
 }
 
@@ -174,30 +189,92 @@ pub enum Subscription {
 	Data(DataSubscriber),
 }
 
-/// Reads the frames of one track, group after group.
+/// Watches the announcement of one subscribed broadcast.
+///
+/// A relay doesn't end a subscription when the broadcast's publisher retracts it: the track
+/// just goes quiet. Nor does it move the subscription when another publisher of the same name
+/// takes over. So a subscription ends on any change to the broadcast's route, and the caller
+/// resubscribes to whatever serves the name next.
+pub(crate) struct RouteWatch {
+	announced: moq_net::announce::Consumer,
+	name: String,
+}
+
+impl RouteWatch {
+	/// Resolves on the next update to this broadcast's announcement: retracted, re-announced,
+	/// or re-routed. Never resolves once the origin closes; the track ends then anyway.
+	async fn changed(&mut self) -> moq_net::announce::Kind {
+		while let Some(update) = self.announced.next().await {
+			if update.prefix.as_str() == self.name {
+				return update.kind;
+			}
+		}
+		std::future::pending().await
+	}
+}
+
+/// Reads the frames of one track, group after group, until the track ends or its broadcast's
+/// route changes.
 pub(crate) struct GroupReader {
-	track: moq_net::track::Ordered,
-	group: Option<moq_net::group::Consumer>,
-	/// Jump to a newer group as soon as one arrives, dropping the rest of the current one.
-	skip: bool,
+	frames: Frames,
+	route: RouteWatch,
+	ended: bool,
 }
 
 impl GroupReader {
-	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, track: &str, skip: bool) -> Result<Self> {
+	async fn subscribe(
+		broadcast: &moq_net::broadcast::Consumer,
+		track: &str,
+		skip: bool,
+		route: RouteWatch,
+	) -> Result<Self> {
 		let track = broadcast
 			.track(track)?
 			.subscribe(moq_net::track::Subscription::default())
 			.await?
 			.ordered();
 		Ok(Self {
-			track,
-			group: None,
-			skip,
+			frames: Frames {
+				track,
+				group: None,
+				skip,
+			},
+			route,
+			ended: false,
 		})
 	}
 
-	/// Next frame, or `None` once the track ends.
+	/// Next frame, or `None` once the track ends or the broadcast's route changes.
 	pub(crate) async fn next_frame(&mut self) -> Result<Option<moq_net::frame::Frame>> {
+		if self.ended {
+			return Ok(None);
+		}
+		tokio::select! {
+			frame = self.frames.next() => {
+				let frame = frame?;
+				self.ended = frame.is_none();
+				Ok(frame)
+			}
+			kind = self.route.changed() => {
+				tracing::info!(broadcast = self.route.name, ?kind, "broadcast announcement changed, ending the subscription");
+				self.ended = true;
+				Ok(None)
+			}
+		}
+	}
+}
+
+/// The frames of one track, group after group.
+struct Frames {
+	track: moq_net::track::Ordered,
+	group: Option<moq_net::group::Consumer>,
+	/// Jump to a newer group as soon as one arrives, dropping the rest of the current one.
+	skip: bool,
+}
+
+impl Frames {
+	/// Next frame, or `None` once the track ends.
+	async fn next(&mut self) -> Result<Option<moq_net::frame::Frame>> {
 		loop {
 			let Some(group) = self.group.as_mut() else {
 				match self.track.next_group().await? {
