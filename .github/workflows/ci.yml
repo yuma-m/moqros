@@ -1,17 +1,11 @@
 name: CI
 
+# Runs on every change, so the required check (`ci`) always reports. Changes that can't affect
+# the Rust build (docs, the web viewer, …) skip the work instead; see `changes`.
 on:
   push:
     branches: [main]
-    paths-ignore: &docs-only
-      - "**.md"
-      - "LICENSE-*"
-      - "images/**"
-      - ".dockerignore"
-      - "docker/**"
-      - "examples/web/**"
   pull_request:
-    paths-ignore: *docs-only
   workflow_dispatch:
 
 permissions:
@@ -26,8 +20,35 @@ env:
   MOQ_RELAY_VERSION: 0.17.2
 
 jobs:
+  # Whether anything but docs, the web viewer and other files the Rust build doesn't read changed.
+  # Manual runs always build.
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - "**"
+              - "!**.md"
+              - "!LICENSE-*"
+              - "!images/**"
+              - "!.dockerignore"
+              - "!docker/**"
+              - "!examples/web/**"
+
   # ROS-independent core: fmt, clippy, tests (incl. H.264 and the relay round trip).
   core:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -53,6 +74,8 @@ jobs:
 
   # Same build docs.rs does: no ROS environment, r2r's `doc-only` bindings.
   docs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -66,6 +89,8 @@ jobs:
 
   # Full workspace against a real ROS 2 install, plus the colcon (ament_cargo) package.
   ros:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -126,3 +151,14 @@ jobs:
           source install/setup.bash
           ros2 run moqros-cli moqros-pub --help
           ros2 run moqros-cli moqros-sub --help
+
+  # The one required check: fails if any job above failed or was cancelled, and passes when they
+  # passed or were skipped. A matrix job skipped as a whole reports as plain `ros`, not
+  # `ros (jazzy)`, so the matrix jobs can't be required checks themselves.
+  ci:
+    if: always()
+    needs: [changes, core, docs, ros]
+    runs-on: ubuntu-24.04
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
