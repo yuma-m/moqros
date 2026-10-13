@@ -349,6 +349,29 @@ pub fn sub_broadcasts(
 		.collect()
 }
 
+/// Refuse a bridge that would feed its own output back in: a broadcast or a ROS topic that
+/// both directions use. Every message would go round the loop forever.
+pub fn check_no_loop(topics: &[PubTopic], broadcasts: &[SubBroadcast]) -> anyhow::Result<()> {
+	let name = |name: &str| name.trim_matches('/').to_string();
+	for topic in topics {
+		for broadcast in broadcasts {
+			ensure!(
+				name(&topic.broadcast) != name(&broadcast.broadcast),
+				"the broadcast {:?} is both published (from {}) and subscribed to; that would loop",
+				topic.broadcast,
+				topic.topic
+			);
+			ensure!(
+				name(&topic.topic) != name(&broadcast.topic),
+				"the topic {} is both published to the relay and republished from {:?}; that would loop",
+				topic.topic,
+				broadcast.broadcast
+			);
+		}
+	}
+	Ok(())
+}
+
 /// ROS QoS flags.
 #[derive(Debug, Clone, Args)]
 pub struct QosArgs {
@@ -694,6 +717,15 @@ pub struct Spinner {
 }
 
 impl Spinner {
+	/// No spinner at all, for a node that only publishes: `spin_once` would busy-loop with
+	/// nothing to wait on. [`Spinner::failed`] never resolves.
+	pub fn idle() -> Self {
+		Self {
+			stop: Arc::new(AtomicBool::new(true)),
+			task: None,
+		}
+	}
+
 	/// Resolves if the spinner thread dies, which only happens when it panics, since
 	/// without spinning no ROS message arrives anymore. Never resolves again after that.
 	pub async fn failed(&mut self) -> anyhow::Error {
@@ -1120,6 +1152,26 @@ mod tests {
 			.is_ok()
 		);
 		assert!(pub_topics(Vec::new(), Format::Video, snapshot, None, None).is_err());
+	}
+
+	#[test]
+	fn refuses_loops() {
+		let topics = |specs: &[&str]| {
+			let specs = specs.iter().map(|s| s.parse::<TopicSpec>().unwrap()).collect();
+			pub_topics(specs, Format::Json, moqros::DataMode::default(), None, None).unwrap()
+		};
+		let broadcasts = |specs: &[&str]| {
+			let specs = specs.iter().map(|s| s.parse::<BroadcastSpec>().unwrap()).collect();
+			sub_broadcasts(specs, None, None, "camera").unwrap()
+		};
+
+		let odom = topics(&["/odom,broadcast=robot/odom"]);
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/cmd_vel"])).is_ok());
+		// The same broadcast both ways, however it's spelled.
+		assert!(check_no_loop(&odom, &broadcasts(&["/robot/odom/,topic=/other"])).is_err());
+		// The same topic both ways.
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/odom"])).is_err());
+		assert!(check_no_loop(&odom, &[]).is_ok());
 	}
 
 	#[test]

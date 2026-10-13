@@ -36,9 +36,13 @@ function useInUse(): boolean {
 	return inUse;
 }
 
+/** Inputs that take no typing, so the pad's keys still drive while one has focus. */
+const KEYLESS_INPUTS = new Set(["range", "checkbox", "radio", "button", "submit", "reset"]);
+
 /** Whether a key press belongs to a form field rather than to the pad. */
 function typing(target: EventTarget | null): boolean {
-	return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName));
+	if (target instanceof HTMLInputElement) return !KEYLESS_INPUTS.has(target.type);
+	return target instanceof HTMLElement && (target.isContentEditable || /^(SELECT|TEXTAREA)$/.test(target.tagName));
 }
 
 /**

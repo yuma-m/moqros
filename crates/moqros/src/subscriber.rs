@@ -195,6 +195,11 @@ pub enum Subscription {
 /// just goes quiet. Nor does it move the subscription when another publisher of the same name
 /// takes over. So a subscription ends on any change to the broadcast's route, and the caller
 /// resubscribes to whatever serves the name next.
+///
+/// That includes [`Updated`](moq_net::announce::Kind::Updated), though moq-net delivers a
+/// re-priced route in place: a takeover by another publisher also arrives as `Updated` (the path
+/// stays covered throughout), and it can't be told apart from a mere re-pricing. Route changes
+/// are rare, so an occasional needless resubscribe is the cheaper mistake.
 pub(crate) struct RouteWatch {
 	announced: moq_net::announce::Consumer,
 	name: String,
@@ -250,6 +255,9 @@ impl GroupReader {
 			return Ok(None);
 		}
 		tokio::select! {
+			// Frames first: whatever arrived before the route changed (e.g. a last stop command
+			// sent just before the retraction) is still delivered.
+			biased;
 			frame = self.frames.next() => {
 				let frame = frame?;
 				self.ended = frame.is_none();

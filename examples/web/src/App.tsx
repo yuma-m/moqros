@@ -46,6 +46,9 @@ function Viewer({ config, setConfig }: { config: Config; setConfig: (update: (co
 		const panels: Pinned[] = [...config.pinned];
 		if (config.auto) {
 			for (const name of announced) {
+				// The teleop pad's own broadcast is announced into this page's origin too; it comes and
+				// goes with the page's focus, so don't auto-show it.
+				if (name === config.teleop) continue;
 				if (config.hidden.includes(name) || !name.includes(config.filter)) continue;
 				panels.push({ name });
 			}

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use moqros::ros::MoqToRos;
 use moqros_cli::{
-	BroadcastSpec, EncoderArgs, Format, QosArgs, RelayArgs, SharedNode, TopicSpec, init_logging, spawn_spinner,
+	BroadcastSpec, EncoderArgs, Format, QosArgs, RelayArgs, SharedNode, Spinner, TopicSpec, init_logging, spawn_spinner,
 };
 
 #[derive(Debug, Parser)]
@@ -67,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
 		true => Vec::new(),
 		false => moqros_cli::sub_broadcasts(cli.broadcast.clone(), None, None, &cli.frame_id)?,
 	};
+	moqros_cli::check_no_loop(&pending, &broadcasts)?;
 
 	cli.relay.warn_if_insecure();
 	let config = cli.relay.config();
@@ -79,7 +80,12 @@ async fn main() -> anyhow::Result<()> {
 		"connecting to the relay"
 	);
 	let node = SharedNode::new(node);
-	let mut spinner = spawn_spinner(node.clone());
+	// Only the ROS -> MoQ side subscribes to anything; a node that only publishes has
+	// nothing to spin for.
+	let mut spinner = match pending.is_empty() {
+		true => Spinner::idle(),
+		false => spawn_spinner(node.clone()),
+	};
 
 	// A topic's type depends on what its broadcast carries, so wait for each broadcast
 	// (all at once) before creating its publisher.

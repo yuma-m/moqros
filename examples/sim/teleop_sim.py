@@ -107,8 +107,8 @@ class TeleopSim(Node):
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
         self.create_subscription(Twist, "/cmd_vel", self.on_cmd_vel, 10)
 
-        self.dt = 0.02
-        self.create_timer(self.dt, self.step)
+        self.last_step = time.monotonic()
+        self.create_timer(0.02, self.step)
         self.create_timer(1.0 / camera_fps, self.publish_camera)
         self.create_timer(0.2, self.publish_map)
         self.create_timer(0.1, self.publish_odom)
@@ -134,14 +134,19 @@ class TeleopSim(Node):
         return False
 
     def step(self):
+        # Integrate over the time that really passed: rendering on this same thread delays ticks.
+        # Cap it, so a long stall doesn't teleport the robot through a wall.
+        now = time.monotonic()
+        dt = min(now - self.last_step, 0.1)
+        self.last_step = now
         # Stop when the operator goes quiet: a dropped connection mustn't leave the robot driving.
-        if time.monotonic() - self.last_cmd > self.cmd_timeout:
+        if now - self.last_cmd > self.cmd_timeout:
             self.cmd = (0.0, 0.0)
         linear, angular = self.cmd
-        self.yaw = (self.yaw + angular * self.dt + math.pi) % (2 * math.pi) - math.pi
+        self.yaw = (self.yaw + angular * dt + math.pi) % (2 * math.pi) - math.pi
         # The map's y axis points down (rows), so positive yaw turns left as seen from above.
-        nx = self.x + linear * math.cos(self.yaw) * self.dt
-        ny = self.y - linear * math.sin(self.yaw) * self.dt
+        nx = self.x + linear * math.cos(self.yaw) * dt
+        ny = self.y - linear * math.sin(self.yaw) * dt
         # Slide along walls: try both axes, then each alone.
         moved = (nx, ny) if not self.blocked(nx, ny) else None
         if moved is None and not self.blocked(nx, self.y):
@@ -149,7 +154,7 @@ class TeleopSim(Node):
         if moved is None and not self.blocked(self.x, ny):
             moved = (self.x, ny)
         if moved is not None:
-            speed = math.hypot(moved[0] - self.x, moved[1] - self.y) / self.dt
+            speed = math.hypot(moved[0] - self.x, moved[1] - self.y) / dt if dt > 0 else 0.0
             self.x, self.y = moved
             self.velocity = (math.copysign(speed, linear), angular)
         else:

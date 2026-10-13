@@ -11,6 +11,9 @@ export interface Twist {
 
 export const TWIST_TYPE = "geometry_msgs/msg/Twist";
 
+/** How long the broadcast outlives the stop command it sends last. */
+const STOP_GRACE_MS = 300;
+
 export function twist(linear: number, angular: number): Twist {
 	// Every field: r2r deserializes the whole message, so a missing one fails on the robot.
 	return { linear: { x: linear, y: 0, z: 0 }, angular: { x: 0, y: 0, z: angular } };
@@ -51,13 +54,17 @@ export function useTeleopPublisher(name: string, active: boolean): { send: (mess
 			setReady(true);
 
 			effect.cleanup(() => {
-				// Leave the robot stopped rather than wait for its own timeout.
+				// Leave the robot stopped rather than wait for its own timeout. The stop and the
+				// retraction travel on different streams, so close a little later: a subscriber
+				// that sees the retraction first would drop the stop. Recreating the broadcast
+				// meanwhile is fine; the origin replaces this one, and closing it late doesn't
+				// retract its successor.
 				const stop = track.current?.appendGroup();
 				stop?.writeJson(twist(0, 0));
 				stop?.close();
 				track.current = undefined;
 				setReady(false);
-				broadcast.close();
+				setTimeout(() => broadcast.close(), STOP_GRACE_MS);
 			});
 		});
 		return () => effect.close();
