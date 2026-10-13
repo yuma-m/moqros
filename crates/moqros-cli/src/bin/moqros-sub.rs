@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
 	let (cli, mut node) = moqros_cli::init::<Cli>("moqros_sub")?;
 	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id)?;
 
+	cli.relay.warn_if_insecure();
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
 	tracing::info!(url = %cli.relay.redacted_url(), broadcasts = broadcasts.len(), "connecting to the relay");
 

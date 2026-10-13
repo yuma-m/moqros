@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
 		cli.broadcast.clone(),
 	)?;
 
+	cli.relay.warn_if_insecure();
 	let publisher = moqros::Publisher::connect(&cli.relay.config())?;
 	tracing::info!(url = %cli.relay.redacted_url(), topics = pending.len(), "connecting to the relay");
 	let node = SharedNode::new(node);
