@@ -25,6 +25,7 @@ The view is kept in the URL, so it can be bookmarked or shared:
 | `filter` | Only show announced broadcasts whose name contains this text. |
 | `show`, `video`, `data` | Comma-separated broadcasts to always show: by catalog, or as that kind. |
 | `hide` | Comma-separated broadcasts to hide. |
+| `teleop` | Broadcast to publish velocity commands on; see [Teleop](#teleop). |
 
 The `name` parameter of the old viewer still works as `video`.
 
@@ -32,6 +33,20 @@ The address bar never shows the relay's token: the viewer drops a `jwt` query pa
 segment (as Cloudflare's relays use) from `url`, and keeps the full URL in the tab's session storage, so a
 reload still connects. A link opened elsewhere asks for the token again. When a link brings a token in `url`,
 the viewer takes it out of the address bar as soon as the page loads.
+
+## Teleop
+
+With `teleop=<broadcast>` (e.g. `?teleop=robot/cmd_vel`), or *Add* with *As* set to `teleop`, the viewer shows a pad that publishes
+`geometry_msgs/msg/Twist` messages to the relay, as a moqros JSON data broadcast in snapshot mode. Up and down
+set `linear.x`, and left and right set `angular.z`, up to the speeds on the sliders. While a direction is held
+(on the pad, or with WASD or the arrow keys), it repeats the command every 100 ms. Releasing it, pressing Space,
+or leaving the window sends one zero command.
+
+Only a page that's visible and focused publishes; it retracts the broadcast when it goes to the background. A
+relay keeps serving the first publisher of a name, so this lets the tab or window in use take over from others
+left open. Bridge the broadcast onto ROS with `moqros-sub` or `moqros-bridge`
+(`--broadcast robot/cmd_vel,topic=/cmd_vel`). The robot should stop on its own when commands stop coming, like the
+[teleop demo](../../README.md#teleop-demo-docker)'s simulator does.
 
 ## Relays on other machines
 

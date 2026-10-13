@@ -349,6 +349,29 @@ pub fn sub_broadcasts(
 		.collect()
 }
 
+/// Refuse a bridge that would feed its own output back in: a broadcast or a ROS topic that
+/// both directions use. Every message would go round the loop forever.
+pub fn check_no_loop(topics: &[PubTopic], broadcasts: &[SubBroadcast]) -> anyhow::Result<()> {
+	let name = |name: &str| name.trim_matches('/').to_string();
+	for topic in topics {
+		for broadcast in broadcasts {
+			ensure!(
+				name(&topic.broadcast) != name(&broadcast.broadcast),
+				"the broadcast {:?} is both published (from {}) and subscribed to; that would loop",
+				topic.broadcast,
+				topic.topic
+			);
+			ensure!(
+				name(&topic.topic) != name(&broadcast.topic),
+				"the topic {} is both published to the relay and republished from {:?}; that would loop",
+				topic.topic,
+				broadcast.broadcast
+			);
+		}
+	}
+	Ok(())
+}
+
 /// ROS QoS flags.
 #[derive(Debug, Clone, Args)]
 pub struct QosArgs {
@@ -366,6 +389,107 @@ impl QosArgs {
 			QosProfile::sensor_data()
 		}
 	}
+}
+
+/// Video encoder flags.
+#[derive(Debug, Clone, Args)]
+pub struct EncoderArgs {
+	/// Video codec (`vp8`, or `h264` when built with the `h264` feature and
+	/// OPENH264_LIBRARY points at Cisco's OpenH264 binary).
+	#[arg(long, default_value_t = moqros::Codec::default())]
+	pub codec: moqros::Codec,
+
+	/// Target video bitrate in bits per second.
+	#[arg(long, default_value_t = 2_000_000)]
+	pub bitrate: u32,
+
+	/// Expected maximum input frame rate of the video.
+	#[arg(long, default_value_t = 30.0)]
+	pub fps: f32,
+
+	/// Maximum keyframe (MoQ group) interval of the video in milliseconds.
+	#[arg(long, default_value_t = 2000)]
+	pub keyframe_interval_ms: u64,
+}
+
+impl EncoderArgs {
+	pub fn settings(&self) -> moqros::EncoderSettings {
+		moqros::EncoderSettings {
+			codec: self.codec,
+			bitrate: self.bitrate,
+			max_fps: self.fps,
+			keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
+			..Default::default()
+		}
+	}
+}
+
+/// A running ROS -> MoQ bridge task.
+pub type PubBridge = JoinHandle<moqros::Result<moqros::ros::BridgeStats>>;
+
+/// Start bridging `topic` from ROS to MoQ once its type is known. Returns `None` while
+/// the topic hasn't appeared in the ROS graph yet.
+pub fn start_pub_topic(
+	node: &mut r2r::Node,
+	publisher: &moqros::Publisher,
+	topic: &PubTopic,
+	encoder: &EncoderArgs,
+	qos: QosProfile,
+) -> anyhow::Result<Option<PubBridge>> {
+	let bridge = match topic.format.data() {
+		None => {
+			let images = publisher.create_image_broadcast(&topic.broadcast, encoder.settings())?;
+			moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?
+		}
+		Some(format) => {
+			let ros_type = match &topic.ros_type {
+				Some(ros_type) => ros_type.clone(),
+				None => match moqros::ros::topic_type(node, &topic.topic)? {
+					Some(ros_type) => ros_type,
+					None => return Ok(None),
+				},
+			};
+			let settings = moqros::DataSettings {
+				format,
+				mode: topic.mode,
+				ros_type: Some(ros_type),
+			};
+			let data = publisher.create_data_broadcast(&topic.broadcast, settings)?;
+			moqros::ros::spawn_ros_to_moq_data(node, &topic.topic, qos, data)?
+		}
+	};
+	tracing::info!(
+		topic = topic.topic,
+		format = ?topic.format,
+		broadcast = topic.broadcast,
+		"bridging ROS -> MoQ"
+	);
+	Ok(Some(bridge))
+}
+
+/// A running MoQ -> ROS bridge task.
+pub type SubBridge = JoinHandle<moqros::Result<()>>;
+
+/// Create the ROS publisher for a subscribed broadcast and start republishing it.
+pub fn spawn_sub_broadcast(
+	ready: moqros::ros::MoqToRos,
+	node: &mut r2r::Node,
+	broadcast: &SubBroadcast,
+	qos: QosProfile,
+) -> moqros::Result<SubBridge> {
+	let bridge = ready.spawn(
+		node,
+		&broadcast.topic,
+		qos,
+		&broadcast.frame_id,
+		broadcast.ros_type.as_deref(),
+	)?;
+	tracing::info!(
+		broadcast = broadcast.broadcast,
+		topic = broadcast.topic,
+		"bridging MoQ -> ROS"
+	);
+	Ok(bridge)
 }
 
 /// Create the ROS node and parse `T` from the command line and the node's ROS parameters.
@@ -593,6 +717,15 @@ pub struct Spinner {
 }
 
 impl Spinner {
+	/// No spinner at all, for a node that only publishes: `spin_once` would busy-loop with
+	/// nothing to wait on. [`Spinner::failed`] never resolves.
+	pub fn idle() -> Self {
+		Self {
+			stop: Arc::new(AtomicBool::new(true)),
+			task: None,
+		}
+	}
+
 	/// Resolves if the spinner thread dies, which only happens when it panics, since
 	/// without spinning no ROS message arrives anymore. Never resolves again after that.
 	pub async fn failed(&mut self) -> anyhow::Error {
@@ -1019,6 +1152,26 @@ mod tests {
 			.is_ok()
 		);
 		assert!(pub_topics(Vec::new(), Format::Video, snapshot, None, None).is_err());
+	}
+
+	#[test]
+	fn refuses_loops() {
+		let topics = |specs: &[&str]| {
+			let specs = specs.iter().map(|s| s.parse::<TopicSpec>().unwrap()).collect();
+			pub_topics(specs, Format::Json, moqros::DataMode::default(), None, None).unwrap()
+		};
+		let broadcasts = |specs: &[&str]| {
+			let specs = specs.iter().map(|s| s.parse::<BroadcastSpec>().unwrap()).collect();
+			sub_broadcasts(specs, None, None, "camera").unwrap()
+		};
+
+		let odom = topics(&["/odom,broadcast=robot/odom"]);
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/cmd_vel"])).is_ok());
+		// The same broadcast both ways, however it's spelled.
+		assert!(check_no_loop(&odom, &broadcasts(&["/robot/odom/,topic=/other"])).is_err());
+		// The same topic both ways.
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/odom"])).is_err());
+		assert!(check_no_loop(&odom, &[]).is_ok());
 	}
 
 	#[test]

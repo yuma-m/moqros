@@ -67,18 +67,9 @@ async fn main() -> anyhow::Result<()> {
 	loop {
 		tokio::select! {
 			Some((ready, broadcast)) = subscribing.next() => {
-				let bridge = ready.spawn(
-					&mut node,
-					&broadcast.topic,
-					cli.qos.profile(),
-					&broadcast.frame_id,
-					broadcast.ros_type.as_deref(),
-				);
+				let bridge = moqros_cli::spawn_sub_broadcast(ready, &mut node, &broadcast, cli.qos.profile());
 				match bridge {
-					Ok(bridge) => {
-						tracing::info!(broadcast = broadcast.broadcast, topic = broadcast.topic, "bridging MoQ -> ROS");
-						bridges.push(async move { (broadcast.broadcast, bridge.await) });
-					}
+					Ok(bridge) => bridges.push(async move { (broadcast.broadcast, bridge.await) }),
 					// E.g. a message type this build has no bindings for: the other
 					// broadcasts can still go on.
 					Err(err) => {

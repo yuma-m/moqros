@@ -7,6 +7,7 @@
 //   video   comma-separated broadcasts always shown as video
 //   data    comma-separated broadcasts always shown as data
 //   hide    comma-separated announced broadcasts not to auto-show
+//   teleop  broadcast to publish geometry_msgs/msg/Twist commands on, from a teleop pad
 //
 // `name` (one video broadcast) from the old static viewer is still read as `video`.
 //
@@ -27,6 +28,8 @@ export interface Config {
 	filter: string;
 	pinned: Pinned[];
 	hidden: string[];
+	/** Broadcast the teleop pad publishes on; no pad when unset. */
+	teleop?: string;
 }
 
 function list(value: string | null): string[] {
@@ -55,6 +58,7 @@ export function parseConfig(search: string): Config {
 		filter: params.get("filter") ?? "",
 		pinned: dedupe(pinned),
 		hidden: list(params.get("hide")),
+		teleop: params.get("teleop")?.trim().replace(/^\/+/, "") || undefined,
 	};
 }
 
@@ -68,6 +72,7 @@ export function serializeConfig(config: Config): string {
 	if (names("video").length) params.set("video", names("video").join(","));
 	if (names("data").length) params.set("data", names("data").join(","));
 	if (config.hidden.length) params.set("hide", config.hidden.join(","));
+	if (config.teleop) params.set("teleop", config.teleop);
 	const query = params.toString();
 	return query ? `?${query}` : "";
 }

@@ -231,6 +231,44 @@ canvas {
 	margin: 0;
 }
 
+.teleop {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+}
+
+.teleop .pad {
+	display: grid;
+	gap: 6px;
+	grid-template-columns: repeat(3, 56px);
+	grid-template-rows: repeat(3, 56px);
+	touch-action: none;
+	user-select: none;
+}
+
+.teleop .pad button {
+	font-size: 22px;
+}
+
+.teleop .pad button.active {
+	background: #2f6fdf;
+	color: #fff;
+}
+
+.teleop .speeds {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 200px;
+}
+
+.teleop .speeds label {
+	align-items: stretch;
+	flex-direction: column;
+}
+
 .hint {
 	font-size: 13px;
 	opacity: 0.7;

@@ -25,8 +25,9 @@ subscribe to a broadcast, decode it, and republish it as a ROS topic.
 | Path | What |
 | --- | --- |
 | `crates/moqros` | The library ([crates.io](https://crates.io/crates/moqros), [docs.rs](https://docs.rs/moqros)). The core (conversion, codec, MoQ publish/subscribe) is ROS-independent; the `ros` feature adds r2r bridges. |
-| `crates/moqros-cli` | Bridge nodes ([crates.io](https://crates.io/crates/moqros-cli)): `moqros-pub` (ROS → MoQ) and `moqros-sub` (MoQ → ROS). Also a colcon (`ament_cargo`) package. |
+| `crates/moqros-cli` | Bridge nodes ([crates.io](https://crates.io/crates/moqros-cli)): `moqros-pub` (ROS → MoQ), `moqros-sub` (MoQ → ROS), and `moqros-bridge` (both in one node). Also a colcon (`ament_cargo`) package. |
 | `examples/image_source` | Sample node that plays a video file (via ffmpeg) or a PNG/JPEG directory as an Image topic. |
+| `examples/sim` | `teleop_sim`, a tiny simulated robot (rclpy, numpy) for the [teleop demo](#teleop-demo-docker). |
 | `examples/web` | Browser viewer (React, TypeScript, `@moq/watch`) for several video and data broadcasts. See [Web viewer](#web-viewer). |
 | `docker/` | Dockerfile (ROS 2 Jazzy + Rust, moq-relay) and the end-to-end `compose.yml`. |
 
@@ -73,9 +74,38 @@ docker compose -f docker/compose.yml exec moqros-sub bash -c \
 If UDP port forwarding doesn't work in your Docker setup, run the relay on the host instead
 (`cargo install moq-relay && moq-relay docker/relay.toml`).
 
+## Teleop demo (Docker)
+
+The other direction too: drive a simulated robot from the browser while watching its camera.
+
+```sh
+docker compose -f docker/teleop.compose.yml up --build
+```
+
+Open <http://localhost:8080/?teleop=robot/cmd_vel>. The `teleop` parameter adds a pad to the viewer that
+publishes `geometry_msgs/msg/Twist` commands as a JSON data broadcast. Hold WASD, the arrow keys, or the pad's
+buttons to drive, and press Space to stop. Only the page in use (visible and focused) publishes, so with several
+tabs or windows open, the one you're using drives. The demo uses the same ports as the sample above, so run one at a time.
+
+| Service | What |
+| --- | --- |
+| `sim` | `teleop_sim`: a differential-drive robot in a small grid world. It reads `/cmd_vel`, and publishes a first-person camera (`/camera/image_raw`), a top-down map (`/map/image_raw`), and `/odom`. It stops when no command arrives for 0.5 s, e.g. when the browser tab closes. |
+| `bridge` | One `moqros-bridge` node for both directions: the two images as the video broadcasts `robot/camera` and `robot/map`, `/odom` as the JSON broadcast `robot/odom`, and the browser's `robot/cmd_vel` republished on `/cmd_vel`. |
+| `relay`, `web` | The same as in the sample above. |
+
+To watch the commands arrive on the ROS side:
+
+```sh
+docker compose -f docker/teleop.compose.yml exec bridge bash -c \
+  'source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 ros2 topic echo /cmd_vel'
+```
+
+The relay lets anyone who reaches it publish, so anyone who can reach port 4443 can drive this robot. Read
+[Security](#security) before you connect a real one.
+
 ## Installing the bridge nodes
 
-`moqros-pub` and `moqros-sub` need a ROS 2 environment, libvpx, pkg-config, and libclang at build time
+`moqros-pub`, `moqros-sub`, and `moqros-bridge` need a ROS 2 environment, libvpx, pkg-config, and libclang at build time
 (see [Development](#development)).
 
 With cargo, from [crates.io](https://crates.io/crates/moqros-cli):
@@ -107,7 +137,8 @@ ros2 run moqros-cli moqros-pub --help
 - **Latency:** if the encoder falls behind, `moqros-pub` drops all but the newest pending image, and
   `moqros-sub` always jumps to the newest group.
 - **Reconnects:** the relay connection redials automatically, and `moqros-sub` resubscribes when a broadcast
-  comes back. It stamps republished images with the local receive time.
+  comes back. It also resubscribes when the relay retracts a broadcast or routes it to another publisher of the
+  same name, since the relay doesn't end subscriptions then. It stamps republished images with the local receive time.
 - **Shutdown:** on SIGINT or SIGTERM (`docker stop`, systemd), both bridges close the relay session before
   exiting, so the relay ends their broadcasts right away and a restarted `moqros-pub` can announce them again.
 - **Codec:** `moqros-pub --codec vp8|h264`. H.264 needs the `h264` feature and Cisco's OpenH264 binary:
@@ -163,6 +194,14 @@ moqros-sub --broadcast camera/image_raw,topic=/remote/image --broadcast imu --br
 | --- | --- | --- |
 | `moqros-pub --topic TOPIC,…` | `format`, `type`, `mode`, `broadcast` | `--format` and `--mode` for every topic. The broadcast name is the topic without its leading slash. |
 | `moqros-sub --broadcast NAME,…` | `topic`, `type`, `frame_id` | `--frame-id` for every broadcast. The topic is `/moqros/<broadcast>` (`/moqros/image` for a lone broadcast). |
+
+`moqros-bridge` does both in one node, e.g. for a robot that streams its camera and takes velocity commands.
+It takes `--topic` like `moqros-pub` and `--broadcast` like `moqros-sub`, with the same options. The flags
+that name a single topic or broadcast (`--type`, and the other side's name) are left out; use the options instead:
+
+```sh
+moqros-bridge --topic /camera/image_raw --topic /odom,format=json --broadcast cmd_vel,topic=/cmd_vel
+```
 
 Each topic becomes a broadcast of its own. `--type` and `--broadcast` of `moqros-pub`, and `--topic` and
 `--type` of `moqros-sub`, name a single topic, so they only work with one `--topic` or `--broadcast`. Video
