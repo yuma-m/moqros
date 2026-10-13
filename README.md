@@ -212,6 +212,23 @@ The hosted copy at <https://yuma-m.github.io/moqros/> connects to `http://localh
 set the Relay URL field or the `url` parameter for another relay. Since it's served over HTTPS, it can only
 reach an `http://` relay on `localhost`. Elsewhere, give the relay a real certificate and use `https://`.
 
+## Cloudflare MoQ relay
+
+The bridges and the viewer also work with [Cloudflare's MoQ relays](https://developers.cloudflare.com/moq/),
+which speak the IETF MoQ Transport drafts (draft-16 here). Create a relay in the Cloudflare dashboard
+(**Media > Realtime > MoQ Relay**) or through its API; it comes with a publish/subscribe token and a subscribe-only
+token. The token goes in the URL path:
+
+```sh
+moqros-pub --url "https://draft-16.cloudflare.mediaoverquic.com/$CF_PUB_TOKEN" --topic /camera/image_raw
+moqros-sub --url "https://draft-16.cloudflare.mediaoverquic.com/$CF_SUB_TOKEN" --broadcast camera/image_raw
+```
+
+For the viewer, put the subscribe-only token's URL in the Relay URL field. Each token covers its whole relay,
+so give viewers the subscribe-only one. The bridges hide the token (`/REDACTED`) when they log the URL, but
+Cloudflare's own access logs see it, and so do shell history and process lists; prefer short-lived tokens and
+revoke them after testing. The relays are a beta product, so the endpoint and the drafts it speaks may change.
+
 ## Library usage
 
 The library is published on [crates.io](https://crates.io/crates/moqros) as `moqros`:
@@ -281,8 +298,8 @@ the path it's valid under, and its publish and subscribe patterns say what it ma
 
 The bridges accept a token too (`--url "https://relay.example.com/robot?jwt=…"`), but prefer certificates:
 a URL ends up in shell history and process lists, and the bridges reuse it on every reconnect without asking
-for a new token, so once it expires they can't reconnect. They do hide the token (`jwt=REDACTED`) when they
-log the URL.
+for a new token, so once it expires they can't reconnect. They do hide the token (`jwt=REDACTED`, or a
+JWT-shaped path segment as `/REDACTED`) when they log the URL.
 
 ## Development
 

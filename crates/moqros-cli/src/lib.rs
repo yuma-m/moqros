@@ -47,7 +47,7 @@ impl RelayArgs {
 		}
 	}
 
-	/// The relay URL with its `jwt` token and password hidden, for logging.
+	/// The relay URL with its tokens and password hidden, for logging.
 	pub fn redacted_url(&self) -> moqros::Url {
 		redact_url(&self.url)
 	}
@@ -58,6 +58,17 @@ fn redact_url(url: &moqros::Url) -> moqros::Url {
 	let mut url = url.clone();
 	if url.password().is_some() {
 		let _ = url.set_password(Some(REDACTED));
+	}
+	// Some relays (e.g. Cloudflare) take the token as a path segment instead of `?jwt=`.
+	if url.path_segments().is_some_and(|mut segments| segments.any(is_jwt)) {
+		let path = url
+			.path_segments()
+			.into_iter()
+			.flatten()
+			.map(|segment| if is_jwt(segment) { REDACTED } else { segment })
+			.collect::<Vec<_>>()
+			.join("/");
+		url.set_path(&path);
 	}
 	if url.query_pairs().any(|(key, _)| key == "jwt") {
 		let pairs: Vec<(String, String)> = url
@@ -74,6 +85,15 @@ fn redact_url(url: &moqros::Url) -> moqros::Url {
 		url.query_pairs_mut().clear().extend_pairs(pairs);
 	}
 	url
+}
+
+/// Whether a path segment looks like a JWT: three base64url parts, the first a JSON header (`eyJ`).
+fn is_jwt(segment: &str) -> bool {
+	segment.starts_with("eyJ")
+		&& segment.split('.').count() == 3
+		&& segment
+			.bytes()
+			.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// What `moqros-pub` sends.
@@ -1046,8 +1066,20 @@ mod tests {
 			redact("https://user:pass@relay.example/robot"),
 			"https://user:REDACTED@relay.example/robot"
 		);
+		assert_eq!(
+			redact("https://relay.example/eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJyb2JvdCJ9.c2ln"),
+			"https://relay.example/REDACTED"
+		);
+		assert_eq!(
+			redact("https://relay.example/robot/eyJh.eyJz.sig-_/cam"),
+			"https://relay.example/robot/REDACTED/cam"
+		);
 		// URLs without secrets come back unchanged.
-		for url in ["http://localhost:4443/anon", "https://relay.example/robot?a=1"] {
+		for url in [
+			"http://localhost:4443/anon",
+			"https://relay.example/robot?a=1",
+			"https://relay.example/eyJ/robot.v1",
+		] {
 			assert_eq!(redact(url), url);
 		}
 	}
