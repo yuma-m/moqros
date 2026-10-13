@@ -1,17 +1,11 @@
 name: CI
 
+# Runs on every change, so the required checks (`core`, `ros (jazzy)`) always report. Changes
+# that can't affect the Rust build (docs, the web viewer, …) skip the work instead; see `changes`.
 on:
   push:
     branches: [main]
-    paths-ignore: &docs-only
-      - "**.md"
-      - "LICENSE-*"
-      - "images/**"
-      - ".dockerignore"
-      - "docker/**"
-      - "examples/web/**"
   pull_request:
-    paths-ignore: *docs-only
   workflow_dispatch:
 
 permissions:
@@ -26,8 +20,36 @@ env:
   MOQ_RELAY_VERSION: 0.17.2
 
 jobs:
+  # Whether anything but docs, the web viewer and other files the Rust build doesn't read changed.
+  # Manual runs always build.
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - "**"
+              - "!**.md"
+              - "!LICENSE-*"
+              - "!images/**"
+              - "!.dockerignore"
+              - "!docker/**"
+              - "!examples/web/**"
+
   # ROS-independent core: fmt, clippy, tests (incl. H.264 and the relay round trip).
+  # A skipped job counts as passing for the required check.
   core:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -53,6 +75,8 @@ jobs:
 
   # Same build docs.rs does: no ROS environment, r2r's `doc-only` bindings.
   docs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -65,7 +89,10 @@ jobs:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
 
   # Full workspace against a real ROS 2 install, plus the colcon (ament_cargo) package.
+  # Skipped steps rather than a job-level `if`: a matrix job skipped as a whole reports as `ros`
+  # instead of `ros (jazzy)`, which would leave the required check pending.
   ros:
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
@@ -80,24 +107,30 @@ jobs:
         shell: bash
     steps:
       - name: Install system dependencies
+        if: &code needs.changes.outputs.code == 'true'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates clang libclang-dev pkg-config python3-pip
       - uses: actions/checkout@v7
+        if: *code
         with:
           path: src/moqros
       - uses: dtolnay/rust-toolchain@stable
+        if: *code
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        if: *code
         with:
           workspaces: src/moqros
           key: ${{ matrix.distro }}
       - name: rosdep install
+        if: *code
         run: |
           rosdep update --rosdistro "$ROS_DISTRO"
           rosdep install --from-paths src -iy --rosdistro "$ROS_DISTRO"
       - name: Clippy (workspace)
+        if: *code
         working-directory: src/moqros
         run: |
           # shellcheck disable=SC1090
@@ -105,6 +138,7 @@ jobs:
           cargo clippy --workspace --all-targets --features moqros/h264 --locked -- -D warnings
       # Only the ROS-dependent tests; the core job covers the rest.
       - name: Test (ROS)
+        if: *code
         working-directory: src/moqros
         run: |
           # shellcheck disable=SC1090
@@ -112,15 +146,18 @@ jobs:
           cargo test -p moqros-cli --features moqros/h264 --locked
           cargo test -p moqros --features ros,h264 --lib --locked -- ros::
       - name: Install colcon-ros-cargo
+        if: *code
         run: |
           pip3 install colcon-cargo colcon-ros-cargo
           cargo install cargo-ament-build --locked
       - name: colcon build
+        if: *code
         run: |
           # shellcheck disable=SC1090
           source "/opt/ros/$ROS_DISTRO/setup.bash"
           colcon build --event-handlers console_cohesion+
       - name: Smoke test
+        if: *code
         run: |
           # shellcheck disable=SC1091
           source install/setup.bash
