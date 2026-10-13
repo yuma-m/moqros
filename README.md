@@ -270,7 +270,9 @@ The Docker sample is meant for one machine. Before you expose a relay beyond loc
 - **`http://` relay URLs trust the network.** QUIC always encrypts the stream, but with an `http://` URL the
   client fetches the certificate fingerprint it trusts over plain HTTP, so anyone on the path can swap it
   and read or alter the stream. `--insecure` skips verification entirely. Outside development, give the relay
-  a real certificate (`[listen] tls.cert`/`tls.key`) and use `https://` URLs.
+  a real certificate (`[listen] tls.cert`/`tls.key`) and use `https://` URLs. The bridges log a warning at startup for an
+  `http://` URL whose host isn't this machine (`localhost`, `*.localhost`, a loopback address), and for
+  `--insecure`.
 
 ### Authentication
 

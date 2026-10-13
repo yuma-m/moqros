@@ -51,6 +51,32 @@ impl RelayArgs {
 	pub fn redacted_url(&self) -> moqros::Url {
 		redact_url(&self.url)
 	}
+
+	/// Log a warning if these settings let anyone on the network path read or alter the stream.
+	pub fn warn_if_insecure(&self) {
+		if let Some(reason) = insecurity(&self.url, self.insecure) {
+			tracing::warn!("{reason}; anyone on the network path can read or alter the stream");
+		}
+	}
+}
+
+/// Why connecting to `url` doesn't authenticate the relay, unless it's a development setup
+/// on this machine.
+fn insecurity(url: &moqros::Url, insecure: bool) -> Option<&'static str> {
+	if insecure {
+		return Some("--insecure skips TLS certificate verification");
+	}
+	let loopback = url.host_str().is_some_and(|host| {
+		host == "localhost"
+			|| host.ends_with(".localhost")
+			|| host
+				.trim_matches(['[', ']'])
+				.parse::<std::net::IpAddr>()
+				.is_ok_and(|ip| ip.is_loopback())
+	});
+	(url.scheme() == "http" && !loopback).then_some(
+		"an http:// relay URL fetches the certificate fingerprint over plain HTTP; use https:// outside development",
+	)
 }
 
 fn redact_url(url: &moqros::Url) -> moqros::Url {
@@ -1072,6 +1098,25 @@ mod tests {
 		assert_eq!(kind(&["-h", "--fps=fast"]), Some(ErrorKind::DisplayHelp));
 		assert_eq!(kind(&["--topic", "/a"]), None);
 		assert_eq!(kind(&["--fps=fast"]), None);
+	}
+
+	#[test]
+	fn flags_unauthenticated_relays() {
+		let check = |url: &str, insecure| insecurity(&url.parse().unwrap(), insecure).is_some();
+		for url in [
+			"http://localhost:4443/anon",
+			"http://foo.localhost:4443/anon",
+			"http://127.0.0.1:4443/anon",
+			"http://[::1]:4443/anon",
+			"https://relay.example.com/robot",
+		] {
+			assert!(!check(url, false), "{url}");
+		}
+		assert!(check("http://relay:4443/anon", false));
+		assert!(check("http://192.168.1.10:4443/anon", false));
+		assert!(check("http://localhost.example.com:4443/anon", false));
+		assert!(check("https://relay.example.com/robot", true));
+		assert!(check("http://localhost:4443/anon", true));
 	}
 
 	#[test]
