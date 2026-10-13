@@ -2,16 +2,9 @@
 //! `moqros-pub`), and republish MoQ broadcasts as ROS 2 topics (like `moqros-sub`).
 //! E.g. a robot that streams its camera and takes velocity commands from a browser.
 
-use std::time::Duration;
-
-use anyhow::{Context, bail, ensure};
+use anyhow::ensure;
 use clap::Parser;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
-use moqros::ros::MoqToRos;
-use moqros_cli::{
-	BroadcastSpec, EncoderArgs, Format, QosArgs, RelayArgs, SharedNode, Spinner, TopicSpec, init_logging, spawn_spinner,
-};
+use moqros_cli::{Bridges, BroadcastSpec, EncoderArgs, Format, QosArgs, Relay, RelayArgs, TopicSpec, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -59,111 +52,30 @@ async fn main() -> anyhow::Result<()> {
 		!cli.topic.is_empty() || !cli.broadcast.is_empty(),
 		"nothing to bridge; give at least one --topic or --broadcast"
 	);
-	let mut pending = match cli.topic.is_empty() {
+	let topics = match cli.topic.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::pub_topics(cli.topic.clone(), cli.format, cli.mode, None, None)?,
+		false => moqros_cli::pub_topics(cli.topic, cli.format, cli.mode, None, None)?,
 	};
 	let broadcasts = match cli.broadcast.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(cli.broadcast.clone(), None, None, &cli.frame_id)?,
+		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id)?,
 	};
-	moqros_cli::check_no_loop(&pending, &broadcasts)?;
+	moqros_cli::check_no_loop(&topics, &broadcasts)?;
 
 	cli.relay.warn_if_insecure();
-	let config = cli.relay.config();
-	let publisher = moqros::Publisher::connect(&config)?;
-	let subscriber = moqros::Subscriber::connect(&config)?;
+	// One session carries both directions.
+	let (publisher, subscriber) = moqros::connect_both(&cli.relay.config())?;
 	tracing::info!(
 		url = %cli.relay.redacted_url(),
-		topics = pending.len(),
+		topics = topics.len(),
 		broadcasts = broadcasts.len(),
 		"connecting to the relay"
 	);
-	let node = SharedNode::new(node);
-	// Only the ROS -> MoQ side subscribes to anything; a node that only publishes has
-	// nothing to spin for.
-	let mut spinner = match pending.is_empty() {
-		true => Spinner::idle(),
-		false => spawn_spinner(node.clone()),
+	let bridges = Bridges {
+		topics,
+		broadcasts,
+		encoder: cli.encoder.settings(),
+		qos: cli.qos.profile(),
 	};
-
-	// A topic's type depends on what its broadcast carries, so wait for each broadcast
-	// (all at once) before creating its publisher.
-	let mut subscribing: FuturesUnordered<_> = broadcasts
-		.into_iter()
-		.map(|broadcast| {
-			let subscriber = subscriber.clone();
-			async move { (MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast) }
-		})
-		.collect();
-	// ROS -> MoQ and MoQ -> ROS bridges.
-	let mut pub_bridges = FuturesUnordered::new();
-	let mut sub_bridges = FuturesUnordered::new();
-	let mut logged = false;
-	// Created once, so a signal arriving while the loop body runs isn't missed.
-	let shutdown = moqros_cli::shutdown_signal();
-	tokio::pin!(shutdown);
-
-	loop {
-		// Start every topic whose type is known by now; data topics without a `type`
-		// wait until something publishes them.
-		let mut waiting = Vec::new();
-		for topic in std::mem::take(&mut pending) {
-			let started = node
-				.with(|node| moqros_cli::start_pub_topic(node, &publisher, &topic, &cli.encoder, cli.qos.profile()))?;
-			match started {
-				Some(bridge) => {
-					let topic_name = topic.topic.clone();
-					pub_bridges.push(async move { (topic_name, bridge.await) });
-				}
-				None => {
-					waiting.push(topic.topic.clone());
-					pending.push(topic);
-				}
-			}
-		}
-		if !waiting.is_empty() && !logged {
-			tracing::info!(topics = ?waiting, "waiting for topics to appear to learn their types");
-			logged = true;
-		}
-
-		tokio::select! {
-			Some((ready, broadcast)) = subscribing.next() => {
-				let bridge = node.with(|node| moqros_cli::spawn_sub_broadcast(ready, node, &broadcast, cli.qos.profile()));
-				match bridge {
-					Ok(bridge) => sub_bridges.push(async move { (broadcast.broadcast, bridge.await) }),
-					// E.g. a message type this build has no bindings for: the other
-					// broadcasts and topics can still go on.
-					Err(err) => {
-						tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
-						if subscribing.is_empty() && sub_bridges.is_empty() && pub_bridges.is_empty() && pending.is_empty() {
-							bail!("nothing left to bridge");
-						}
-					}
-				}
-			}
-			Some((topic, res)) = pub_bridges.next() => {
-				let stats = res.context("bridge panicked")??;
-				tracing::info!(topic, ?stats, "topic stream ended");
-				return Ok(());
-			}
-			Some((broadcast, res)) = sub_bridges.next() => {
-				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
-				return Ok(());
-			}
-			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
-			res = publisher.closed() => return res.context("relay connection closed"),
-			// E.g. the relay refused the session: no broadcast would ever be announced.
-			res = subscriber.closed() => return res.context("relay connection closed"),
-			err = spinner.failed() => return Err(err),
-			res = &mut shutdown => {
-				tracing::info!(signal = res?, "shutting down");
-				let (published, subscribed) = tokio::join!(publisher.close(), subscriber.close());
-				for err in [published.err(), subscribed.err()].into_iter().flatten() {
-					tracing::warn!(%err, "the relay connection didn't close cleanly");
-				}
-				return Ok(());
-			}
-		}
-	}
+	moqros_cli::run_bridges(node, Relay::both(publisher, subscriber), bridges).await
 }

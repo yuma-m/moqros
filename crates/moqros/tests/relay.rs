@@ -189,6 +189,60 @@ async fn publish_and_subscribe_data_through_relay() -> anyhow::Result<()> {
 	Ok(())
 }
 
+/// Read the next message of `name` on `subscriber` as a number, retrying until one arrives.
+async fn first_number(subscriber: &Subscriber, name: &str) -> anyhow::Result<u32> {
+	let Subscription::Data(mut messages) = subscriber.subscribe(name).await? else {
+		panic!("{name}: expected a data subscription");
+	};
+	let message = messages.next_message().await?.expect("broadcast ended early");
+	Ok(std::str::from_utf8(&message.payload)?.parse()?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_connection_publishes_and_subscribes() -> anyhow::Result<()> {
+	let Ok(bin) = std::env::var("MOQROS_RELAY_BIN") else {
+		eprintln!("MOQROS_RELAY_BIN not set; skipping relay test");
+		return Ok(());
+	};
+	let _ = tracing_subscriber::fmt().with_env_filter("moqros=debug").try_init();
+
+	let port = 14447;
+	let _relay = start_relay(&bin, port);
+	tokio::time::sleep(Duration::from_millis(500)).await;
+	let config = ClientConfig::new(format!("http://127.0.0.1:{port}/anon").parse()?);
+
+	// A robot that streams its state and takes commands, and an operator doing the opposite,
+	// each over a single session.
+	let (robot_pub, robot_sub) = moqros::connect_both(&config)?;
+	let (operator_pub, operator_sub) = moqros::connect_both(&config)?;
+	tokio::time::timeout(Duration::from_secs(10), robot_pub.established()).await??;
+	tokio::time::timeout(Duration::from_secs(10), operator_sub.established()).await??;
+
+	let settings = DataSettings::new(DataFormat::Json);
+	let mut state = robot_pub.create_data_broadcast("robot/state", settings.clone())?;
+	let mut command = operator_pub.create_data_broadcast("operator/cmd", settings)?;
+	let publishing: tokio::task::JoinHandle<moqros::Result<()>> = tokio::spawn(async move {
+		for n in 0u32.. {
+			state.publish(n.to_string())?;
+			command.publish((n + 1000).to_string())?;
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		Ok(())
+	});
+
+	let to_operator =
+		tokio::time::timeout(Duration::from_secs(10), first_number(&operator_sub, "robot/state")).await??;
+	let to_robot = tokio::time::timeout(Duration::from_secs(10), first_number(&robot_sub, "operator/cmd")).await??;
+	assert!(to_operator < 1000, "robot state: {to_operator}");
+	assert!(to_robot >= 1000, "operator command: {to_robot}");
+
+	// Both handles close the one session.
+	robot_sub.close().await?;
+	tokio::time::timeout(Duration::from_secs(5), robot_pub.closed()).await??;
+	publishing.abort();
+	Ok(())
+}
+
 /// A CA, and a client certificate it signed, written as PEM files to `dir`.
 fn write_client_certs(dir: &Path) -> anyhow::Result<()> {
 	use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};

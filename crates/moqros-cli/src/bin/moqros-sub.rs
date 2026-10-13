@@ -1,12 +1,8 @@
 //! Subscribe to MoQ broadcasts and republish each as a ROS 2 topic: video decoded into
 //! images, or data tracks as the message type they carry.
 
-use anyhow::{Context, bail};
 use clap::Parser;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
-use moqros::ros::MoqToRos;
-use moqros_cli::{BroadcastSpec, QosArgs, RelayArgs, init_logging};
+use moqros_cli::{Bridges, BroadcastSpec, QosArgs, Relay, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -41,58 +37,17 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	init_logging();
-	let (cli, mut node) = moqros_cli::init::<Cli>("moqros_sub")?;
+	let (cli, node) = moqros_cli::init::<Cli>("moqros_sub")?;
 	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id)?;
 
 	cli.relay.warn_if_insecure();
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
 	tracing::info!(url = %cli.relay.redacted_url(), broadcasts = broadcasts.len(), "connecting to the relay");
-
-	// A topic's type depends on what its broadcast carries, so wait for each broadcast
-	// (all at once) before creating its publisher.
-	let mut subscribing: FuturesUnordered<_> = broadcasts
-		.into_iter()
-		.map(|broadcast| {
-			let subscriber = subscriber.clone();
-			async move { (MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast) }
-		})
-		.collect();
-	let mut bridges = FuturesUnordered::new();
-	// Created once, so a signal arriving while the loop body runs isn't missed.
-	let shutdown = moqros_cli::shutdown_signal();
-	tokio::pin!(shutdown);
-
-	// The node only publishes, so it never needs spinning (spin_once would busy-loop
-	// with nothing to wait on).
-	loop {
-		tokio::select! {
-			Some((ready, broadcast)) = subscribing.next() => {
-				let bridge = moqros_cli::spawn_sub_broadcast(ready, &mut node, &broadcast, cli.qos.profile());
-				match bridge {
-					Ok(bridge) => bridges.push(async move { (broadcast.broadcast, bridge.await) }),
-					// E.g. a message type this build has no bindings for: the other
-					// broadcasts can still go on.
-					Err(err) => {
-						tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
-						if subscribing.is_empty() && bridges.is_empty() {
-							bail!("no broadcast could be republished");
-						}
-					}
-				}
-			}
-			Some((broadcast, res)) = bridges.next() => {
-				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
-				return Ok(());
-			}
-			// E.g. the relay refused the session: no broadcast would ever be announced.
-			res = subscriber.closed() => return res.context("relay connection closed"),
-			res = &mut shutdown => {
-				tracing::info!(signal = res?, "shutting down");
-				if let Err(err) = subscriber.close().await {
-					tracing::warn!(%err, "the relay connection didn't close cleanly");
-				}
-				return Ok(());
-			}
-		}
-	}
+	let bridges = Bridges {
+		topics: Vec::new(),
+		broadcasts,
+		encoder: Default::default(),
+		qos: cli.qos.profile(),
+	};
+	moqros_cli::run_bridges(node, Relay::subscriber(subscriber), bridges).await
 }

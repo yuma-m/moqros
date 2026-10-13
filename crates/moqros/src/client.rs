@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::Result;
+use crate::{Publisher, Result, Subscriber};
 
 /// Where and how to connect to a MoQ relay.
 #[derive(Debug, Clone)]
@@ -49,6 +49,26 @@ impl ClientConfig {
 		connect.tls.key = self.tls_key.clone();
 		Ok(connect.init(Default::default())?)
 	}
+}
+
+/// Start one connection to the relay that both publishes and subscribes, e.g. for a robot
+/// that streams its camera and takes commands. Must be called inside a tokio runtime.
+///
+/// The two handles share the session: [`Publisher::closed`] and [`Subscriber::closed`] resolve
+/// together, and closing either closes both. Each direction keeps its own origin, so the
+/// broadcasts subscribed to aren't published back to the relay.
+pub fn connect_both(config: &ClientConfig) -> Result<(Publisher, Subscriber)> {
+	let publish = moq_tokio::origin::spawn();
+	let subscribe = moq_tokio::origin::spawn();
+	let connection = config
+		.client()?
+		.with_publisher(&publish)
+		.with_subscriber(subscribe.clone())
+		.connect(config.url.clone());
+	Ok((
+		Publisher::from_parts(publish, connection.clone()),
+		Subscriber::from_parts(subscribe, connection),
+	))
 }
 
 /// How long [`established`] waits for the relay to refuse a session it just accepted.
