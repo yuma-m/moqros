@@ -161,8 +161,20 @@ pub(crate) trait EncoderBackend: Send {
 
 /// A codec implementation behind [`Decoder`].
 pub(crate) trait DecoderBackend: Send {
-	/// Decode one frame into packed `rgb8` `(width, height, pixels)`.
-	fn decode(&mut self, data: &[u8]) -> Result<Option<(u32, u32, Vec<u8>)>>;
+	/// Decode one frame into packed `rgb8` `(width, height, pixels)`, failing with
+	/// [`Error::TooLarge`] for pictures above `max_pixels`.
+	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>>;
+}
+
+/// Default for [`Decoder::set_max_pixels`]: 8K UHD (7680x4320).
+pub const DEFAULT_MAX_PIXELS: u64 = 7680 * 4320;
+
+/// Fail with [`Error::TooLarge`] if a `width`x`height` picture is above `max` pixels.
+pub(crate) fn check_size(width: u32, height: u32, max: u64) -> Result<()> {
+	if width as u64 * height as u64 > max {
+		return Err(Error::TooLarge { width, height, max });
+	}
+	Ok(())
 }
 
 /// Stateful encoder that accepts [`Image`]s of any supported pixel format.
@@ -246,9 +258,13 @@ impl Encoder {
 }
 
 /// Decoder producing `rgb8` [`Image`]s.
+///
+/// A bitstream can declare a huge picture in a few bytes, so pictures above
+/// [`Decoder::max_pixels`] are rejected rather than allocated.
 pub struct Decoder {
 	codec: Codec,
 	inner: Box<dyn DecoderBackend>,
+	max_pixels: u64,
 }
 
 impl Decoder {
@@ -261,16 +277,32 @@ impl Decoder {
 			#[allow(unreachable_patterns)]
 			other => return Err(unavailable(other)),
 		};
-		Ok(Self { codec, inner })
+		Ok(Self {
+			codec,
+			inner,
+			max_pixels: DEFAULT_MAX_PIXELS,
+		})
 	}
 
 	pub fn codec(&self) -> Codec {
 		self.codec
 	}
 
+	/// Largest picture, in pixels, [`Decoder::decode`] accepts.
+	pub fn max_pixels(&self) -> u64 {
+		self.max_pixels
+	}
+
+	/// Accept pictures of up to `max_pixels` (default [`DEFAULT_MAX_PIXELS`]).
+	pub fn set_max_pixels(&mut self, max_pixels: u64) {
+		self.max_pixels = max_pixels;
+	}
+
 	/// Decode one frame. Returns `None` if no picture is ready yet (e.g. while waiting for a keyframe).
+	///
+	/// Fails with [`Error::TooLarge`] for a picture above [`Decoder::max_pixels`].
 	pub fn decode(&mut self, data: &[u8], timestamp: Duration) -> Result<Option<Image>> {
-		let Some((width, height, rgb)) = self.inner.decode(data)? else {
+		let Some((width, height, rgb)) = self.inner.decode(data, self.max_pixels)? else {
 			return Ok(None);
 		};
 		Ok(Some(Image::new(width, height, PixelFormat::Rgb8, rgb, timestamp)?))
@@ -487,6 +519,32 @@ pub(crate) mod tests {
 			assert!(!frame.keyframe);
 			assert_eq!((frame.width, frame.height), (32, 32));
 		}
+	}
+
+	/// Pictures above the decoder's limit fail without being converted.
+	pub(crate) fn rejects_oversized_pictures(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			..Default::default()
+		})
+		.unwrap();
+		let frame = encoder.encode(&test_pattern(64, 48, 0)).unwrap().unwrap();
+
+		let mut decoder = Decoder::new(codec).unwrap();
+		assert_eq!(decoder.max_pixels(), DEFAULT_MAX_PIXELS);
+		decoder.set_max_pixels(64 * 48 - 1);
+		assert!(matches!(
+			decoder.decode(&frame.data, frame.timestamp),
+			Err(Error::TooLarge {
+				width: 64,
+				height: 48,
+				..
+			})
+		));
+
+		let mut decoder = Decoder::new(codec).unwrap();
+		decoder.set_max_pixels(64 * 48);
+		assert!(decoder.decode(&frame.data, frame.timestamp).unwrap().is_some());
 	}
 
 	/// Keyframes keep their interval when the capture clock jumps backwards (e.g. a

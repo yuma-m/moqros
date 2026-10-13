@@ -96,7 +96,7 @@ pub mod ros;
 pub use client::{ClientConfig, broadcast_name_for_topic};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
-pub use codec::{Codec, Decoder, EncodedFrame, Encoder, EncoderSettings};
+pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings};
 pub use convert::{I420, Planes, yuv_to_rgb8};
 pub use data::{CDR_MIME, DATA_TRACK, DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};

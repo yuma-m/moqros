@@ -16,6 +16,8 @@ pub enum Error {
 
 	#[error("codec unavailable: {0}")]
 	CodecUnavailable(String),
+	#[error("decoded picture {width}x{height} exceeds the limit of {max} pixels")]
+	TooLarge { width: u32, height: u32, max: u64 },
 
 	#[error("moq error: {0}")]
 	Moq(#[from] hang::moq_net::Error),

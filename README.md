@@ -263,6 +263,9 @@ The Docker sample is meant for one machine. Before you expose a relay beyond loc
 - **Published broadcasts can reach ROS.** `moqros-sub` republishes whatever arrives on its broadcasts as ROS
   messages. On an open relay, someone else can publish under the same name and inject messages into your
   ROS graph, e.g. `geometry_msgs/msg/Twist` on a command topic.
+- **Decoded pictures are capped.** A few bytes of bitstream can declare a huge picture, so `moqros-sub`
+  rejects pictures above 8K UHD (7680×4320 pixels) instead of allocating them, and resubscribes. In the
+  library, raise or lower the cap with `ImageSubscriber::set_max_pixels` or `Decoder::set_max_pixels`.
 - **The compose file listens on all interfaces.** Its `ports:` entries bind 4443 (relay) and 8080 (viewer)
   on every host interface, and on Linux Docker's port publishing bypasses firewalls such as ufw. To keep the
   sample local, bind to loopback (`"127.0.0.1:4443:4443/udp"`, `"127.0.0.1:4443:4443/tcp"`,
