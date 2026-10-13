@@ -261,6 +261,11 @@ impl ImageSubscriber {
 		self.codec
 	}
 
+	/// Accept decoded pictures of up to `max_pixels`; see [`Decoder::set_max_pixels`].
+	pub fn set_max_pixels(&mut self, max_pixels: u64) {
+		self.decoder.set_max_pixels(max_pixels);
+	}
+
 	/// Next encoded frame, or `None` once the broadcast ends.
 	pub async fn next_frame(&mut self) -> Result<Option<VideoFrame>> {
 		let Some(frame) = self.video.next_frame().await? else {
@@ -275,6 +280,9 @@ impl ImageSubscriber {
 	}
 
 	/// Next decoded `rgb8` image, or `None` once the broadcast ends.
+	///
+	/// Fails with [`Error::TooLarge`] for a picture above the decoder's
+	/// [`max_pixels`](Decoder::max_pixels).
 	pub async fn next_image(&mut self) -> Result<Option<Image>> {
 		while let Some(frame) = self.next_frame().await? {
 			if let Some(image) = self.decoder.decode(&frame.data, frame.timestamp)? {

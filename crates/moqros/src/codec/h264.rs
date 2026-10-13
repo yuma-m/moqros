@@ -18,7 +18,7 @@ use openh264::encoder::{
 };
 use openh264::formats::YUVSource;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings, annexb_nals};
+use super::{DecoderBackend, EncoderBackend, EncoderSettings, annexb_nals, check_size};
 use crate::convert::{I420, Planes, yuv_to_rgb8};
 use crate::{Error, Result};
 
@@ -141,11 +141,13 @@ impl H264Decoder {
 }
 
 impl DecoderBackend for H264Decoder {
-	fn decode(&mut self, data: &[u8]) -> Result<Option<(u32, u32, Vec<u8>)>> {
+	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
+		// OpenH264 has allocated the picture by now, but the RGB copies aren't made.
 		let Some(yuv) = self.inner.decode(data).map_err(codec_error)? else {
 			return Ok(None);
 		};
 		let (width, height) = yuv.dimensions();
+		check_size(width as u32, height as u32, max_pixels)?;
 		let (ys, us, vs) = yuv.strides();
 		let planes = Planes {
 			width,
@@ -228,6 +230,13 @@ mod tests {
 	fn rejects_invalid_images() {
 		if available() {
 			tests::rejects_invalid_images(Codec::H264);
+		}
+	}
+
+	#[test]
+	fn rejects_oversized_pictures() {
+		if available() {
+			tests::rejects_oversized_pictures(Codec::H264);
 		}
 	}
 

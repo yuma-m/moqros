@@ -9,7 +9,7 @@ use bytes::{Bytes, BytesMut};
 use hang::catalog::VideoCodec;
 use vpx_sys as vpx;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings};
+use super::{DecoderBackend, EncoderBackend, EncoderSettings, check_size};
 use crate::convert::{I420, Planes, yuv_to_rgb8};
 use crate::{Error, Result};
 
@@ -174,8 +174,23 @@ impl Vp8Decoder {
 	}
 }
 
+/// Picture size declared by a VP8 key frame header (RFC 6386 §9.1), or `None` for
+/// interframes, which keep the size of the last key frame.
+fn keyframe_size(data: &[u8]) -> Option<(u32, u32)> {
+	if data.len() < 10 || data[0] & 1 != 0 || data[3..6] != [0x9d, 0x01, 0x2a] {
+		return None;
+	}
+	// The top two bits of each are a scaling hint, not part of the size.
+	let dim = |i: usize| (u16::from_le_bytes([data[i], data[i + 1]]) & 0x3fff) as u32;
+	Some((dim(6), dim(8)))
+}
+
 impl DecoderBackend for Vp8Decoder {
-	fn decode(&mut self, data: &[u8]) -> Result<Option<(u32, u32, Vec<u8>)>> {
+	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
+		// Check before libvpx allocates frame buffers for the declared size.
+		if let Some((width, height)) = keyframe_size(data) {
+			check_size(width, height, max_pixels)?;
+		}
 		unsafe {
 			check(
 				vpx::vpx_codec_decode(&mut self.ctx, data.as_ptr(), data.len() as _, ptr::null_mut(), 0),
@@ -193,6 +208,7 @@ impl DecoderBackend for Vp8Decoder {
 				return Err(Error::Codec(format!("unexpected VP8 output format {:?}", img.fmt)));
 			}
 
+			check_size(img.d_w, img.d_h, max_pixels)?;
 			let (width, height) = (img.d_w as usize, img.d_h as usize);
 			let ch = height.div_ceil(2);
 			let plane = |i: usize, rows: usize| {
@@ -276,6 +292,36 @@ mod tests {
 	#[test]
 	fn keyframe_after_clock_jump() {
 		tests::keyframe_after_clock_jump(Codec::Vp8);
+	}
+
+	#[test]
+	fn rejects_oversized_pictures() {
+		tests::rejects_oversized_pictures(Codec::Vp8);
+	}
+
+	/// A key frame header declaring 16383x16383 fails before libvpx allocates for it.
+	#[test]
+	fn rejects_oversized_keyframe_headers() {
+		let mut data = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0xff, 0x3f, 0xff, 0x3f];
+		data.extend([0u8; 32]);
+		assert_eq!(super::keyframe_size(&data), Some((16383, 16383)));
+		let mut decoder = super::super::Decoder::new(Codec::Vp8).unwrap();
+		assert!(matches!(
+			decoder.decode(&data, std::time::Duration::ZERO),
+			Err(crate::Error::TooLarge {
+				width: 16383,
+				height: 16383,
+				..
+			})
+		));
+	}
+
+	#[test]
+	fn keyframe_size_reads_encoded_frames() {
+		let mut encoder = super::super::Encoder::new(Default::default()).unwrap();
+		let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
+		assert_eq!(super::keyframe_size(&frame.data), Some((64, 48)));
+		assert_eq!(super::keyframe_size(&[0x11, 0x02, 0x00]), None);
 	}
 
 	#[test]
