@@ -24,7 +24,7 @@ ENTRYPOINT ["moq-relay", "/etc/moq/relay.toml"]
 # ---------------------------------------------------------------------------
 FROM ros:${ROS_DISTRO}-ros-base AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates clang libclang-dev pkg-config libvpx-dev \
+      curl ca-certificates clang libclang-dev pkg-config libvpx-dev libaom-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH \
@@ -35,12 +35,12 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
     . /opt/ros/${ROS_DISTRO}/setup.sh \
-    && cargo build --release --workspace --locked \
+    && cargo build --release --workspace --locked --features moqros/av1 \
     && cp target/release/moqros-pub target/release/moqros-sub target/release/moqros-bridge \
           target/release/image_source /usr/local/bin/
 
 FROM ros:${ROS_DISTRO}-ros-base AS ros
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libvpx9 python3-numpy \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libvpx9 libaom3 python3-numpy \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/moqros-pub /usr/local/bin/moqros-sub /usr/local/bin/moqros-bridge \
      /usr/local/bin/image_source /usr/local/bin/

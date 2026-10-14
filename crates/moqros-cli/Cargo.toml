@@ -18,6 +18,10 @@ features = ["doc-only"]
 default = []
 # H.264 support (loads Cisco's OpenH264 binary from OPENH264_LIBRARY at runtime).
 h264 = ["moqros/h264"]
+# AV1 support (needs libaom at build time).
+av1 = ["moqros/av1"]
+# Hardware encoders through GStreamer (needs the GStreamer development files at build time).
+hw = ["moqros/hw"]
 # Build docs without a ROS environment (docs.rs). Not for real use.
 doc-only = ["moqros/doc-only"]
 

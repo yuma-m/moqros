@@ -4,6 +4,7 @@
 #     -> moqros-pub -> relay -> browser + moqros-sub (/moqros/image, /moqros/frames, /moqros/chatter, /moqros/pose)
 #
 #   docker compose -f docker/compose.yml up --build
+#   CODEC=av1 docker compose -f docker/compose.yml up --build   # AV1 instead of VP8
 #
 # Sample inputs are generated into ./samples on first start (no host ffmpeg needed).
 #   open http://localhost:8080
@@ -79,7 +80,7 @@ services:
     <<: *ros
     command: ["moqros-pub", "--topic", "/sample/image_raw", "--topic", "/sample/frames/image_raw",
               "--topic", "/chatter,format=json", "--topic", "/sample/pose,format=json",
-              "--url", "http://relay:4443/anon", "--reliable"]
+              "--url", "http://relay:4443/anon", "--reliable", "--codec", "${CODEC:-vp8}"]
     network_mode: service:source
     ipc: service:source
     depends_on: [relay, source, source-frames, chatter, pose]

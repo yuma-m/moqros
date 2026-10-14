@@ -13,9 +13,14 @@ rust-version = "1.91"
 [workspace.dependencies]
 moqros = { path = "crates/moqros", version = "0.4.1" }
 anyhow = "1"
+aom-sys = "0.3.3"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
+# 0.25 needs Rust 1.92; 0.24 supports GStreamer 1.20 (Humble) and 1.24 (Jazzy) alike.
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
 hang = "0.21.11"
 moq-auth = { version = "0.2.1", default-features = false, features = ["serve"] }
 moq-tokio = "0.19.23"

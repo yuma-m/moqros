@@ -2,8 +2,9 @@
 //!
 //! Stream ROS 2 topics over [Media over QUIC](https://moq.dev).
 //!
-//! Images are converted to I420, encoded (VP8 via libvpx by default, or H.264 via
-//! Cisco's OpenH264 binary with the `h264` feature) and published as
+//! Images are converted to I420, encoded (VP8 via libvpx by default, AV1 via libaom with the
+//! `av1` feature, or H.264 via Cisco's OpenH264 binary with the `h264` feature; on a GPU through
+//! GStreamer with the `hw` feature) and published as
 //! [hang](https://docs.rs/hang) broadcasts, the format played by the `@moq/watch`
 //! web component. The reverse direction (MoQ -> decoded images) is also provided.
 //!
@@ -51,11 +52,19 @@
 //! | Feature | What |
 //! | --- | --- |
 //! | `vp8` (default) | VP8 through the system libvpx, real-time CBR. Needs libvpx, pkg-config, and libclang at build time. |
+//! | `av1` | AV1 (Main profile, 8-bit) through the system libaom in real-time mode. Needs libaom, pkg-config, and libclang at build time. |
 //! | `h264` | H.264 (Constrained Baseline, `avc3`) through Cisco's prebuilt OpenH264 binary, loaded at runtime. |
+//! | `hw` | Hardware encoders (VA-API, NVENC) through GStreamer, falling back to software. Needs the GStreamer development files at build time. |
 //! | `ros` | ROS 2 bridges built on r2r. Needs a sourced ROS 2 environment and libclang at build time. |
 //!
 //! Pick the codec with [`EncoderSettings::codec`]. A subscriber picks the best rendition in
 //! the catalog that this build can decode.
+//!
+//! With the `hw` feature, [`EncoderSettings::hardware`] ([`Hardware::Auto`] by default) encodes
+//! on the first hardware encoder GStreamer can start for the codec: VA-API (`va` plugin, or the
+//! older `vaapi` plugin) on Intel/AMD GPUs, or NVENC (`nvcodec` plugin) on NVIDIA GPUs. When
+//! none works, it logs a warning and encodes in software, so the codec's own feature is still
+//! required. Decoding always runs in software.
 //!
 //! The `h264` feature never compiles OpenH264: Cisco only covers the MPEG LA royalties for
 //! binaries downloaded from Cisco. Give the binary's path in `OPENH264_LIBRARY` or with
@@ -96,7 +105,7 @@ pub mod ros;
 pub use client::{ClientConfig, broadcast_name_for_topic, connect_both};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
-pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings};
+pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
 pub use convert::{I420, Planes, yuv_to_rgb8};
 pub use data::{CDR_MIME, DATA_TRACK, DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};

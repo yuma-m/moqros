@@ -12,8 +12,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use moqros::{
-	ClientConfig, DataFormat, DataMode, DataSettings, EncoderSettings, Image, PixelFormat, Publisher, Subscriber,
-	Subscription,
+	ClientConfig, Codec, DataFormat, DataMode, DataSettings, EncoderSettings, Image, PixelFormat, Publisher,
+	Subscriber, Subscription,
 };
 
 struct Relay(Child);
@@ -75,16 +75,29 @@ async fn publish_and_subscribe_through_relay() -> anyhow::Result<()> {
 
 	let publisher = Publisher::connect(&config)?;
 	tokio::time::timeout(Duration::from_secs(10), publisher.established()).await??;
+	let subscriber = Subscriber::connect(&config)?;
+	tokio::time::timeout(Duration::from_secs(10), subscriber.established()).await??;
+
+	for &codec in Codec::available() {
+		if codec == Codec::H264 && std::env::var_os("OPENH264_LIBRARY").is_none() {
+			eprintln!("OPENH264_LIBRARY not set; skipping H.264 through the relay");
+			continue;
+		}
+		images_through_relay(&publisher, &subscriber, codec).await?;
+	}
+	Ok(())
+}
+
+async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, codec: Codec) -> anyhow::Result<()> {
+	let name = format!("test/image-{codec}");
 	let mut broadcast = publisher.create_image_broadcast(
-		"test/image",
+		&name,
 		EncoderSettings {
+			codec,
 			keyframe_interval: Duration::from_millis(200),
 			..Default::default()
 		},
 	)?;
-
-	let subscriber = Subscriber::connect(&config)?;
-	tokio::time::timeout(Duration::from_secs(10), subscriber.established()).await??;
 
 	// Publish continuously from a blocking thread, like a ROS callback would.
 	let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
@@ -99,19 +112,24 @@ async fn publish_and_subscribe_through_relay() -> anyhow::Result<()> {
 		Ok(())
 	});
 
-	let mut images = tokio::time::timeout(Duration::from_secs(10), subscriber.subscribe_images("test/image")).await??;
+	let mut images = tokio::time::timeout(Duration::from_secs(10), subscriber.subscribe_images(&name)).await??;
+	assert_eq!(images.codec(), codec);
 
 	let mut received = Vec::new();
 	while received.len() < 10 {
 		let image = tokio::time::timeout(Duration::from_secs(5), images.next_image())
 			.await??
 			.expect("broadcast ended early");
-		assert_eq!((image.width, image.height, image.format), (160, 120, PixelFormat::Rgb8));
+		assert_eq!(
+			(image.width, image.height, image.format),
+			(160, 120, PixelFormat::Rgb8),
+			"{codec}"
+		);
 		received.push(image.timestamp);
 	}
 	assert!(
 		received.windows(2).all(|w| w[0] < w[1]),
-		"timestamps increase: {received:?}"
+		"{codec}: timestamps increase: {received:?}"
 	);
 
 	stop_tx.send(()).ok();

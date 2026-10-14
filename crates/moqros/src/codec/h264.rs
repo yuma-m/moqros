@@ -18,7 +18,7 @@ use openh264::encoder::{
 };
 use openh264::formats::YUVSource;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings, annexb_nals, check_size};
+use super::{DecoderBackend, EncoderBackend, EncoderSettings, check_size, h264_catalog_codec};
 use crate::convert::{I420, Planes, yuv_to_rgb8};
 use crate::{Error, Result};
 
@@ -116,16 +116,8 @@ impl EncoderBackend for H264Encoder {
 		Ok((!data.is_empty()).then(|| (data.into(), keyframe)))
 	}
 
-	/// `avc3.PPCCLL` (SPS/PPS inline), read from the keyframe's SPS.
 	fn catalog_codec(&self, keyframe: &[u8]) -> VideoCodec {
-		let sps = annexb_nals(keyframe).find(|nal| nal.first().map(|h| h & 0x1f) == Some(7) && nal.len() >= 4);
-		let (profile, constraints, level) = sps.map_or((0x42, 0xc0, 0x1f), |sps| (sps[1], sps[2], sps[3]));
-		VideoCodec::H264(hang::catalog::H264 {
-			inline: true,
-			profile,
-			constraints,
-			level,
-		})
+		h264_catalog_codec(keyframe)
 	}
 }
 

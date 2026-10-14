@@ -1,4 +1,4 @@
-//! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8 or H.264 broadcasts,
+//! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8, H.264, or AV1 broadcasts,
 //! and other messages as hang data broadcasts.
 
 use hang::catalog::{Catalog, Container, PRIORITY, VideoCodec, VideoConfig};
@@ -131,7 +131,8 @@ impl ImagePublisher {
 		}
 	}
 
-	/// Send an already encoded frame (VP8, or Annex-B H.264 with SPS/PPS inline in keyframes).
+	/// Send an already encoded frame (VP8, Annex-B H.264 with SPS/PPS inline in keyframes, or an
+	/// AV1 temporal unit with the sequence header in keyframes).
 	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<()> {
 		if frame.keyframe {
 			self.update_catalog(frame)?;
