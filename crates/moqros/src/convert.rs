@@ -65,6 +65,15 @@ impl I420 {
 		(y, u, v)
 	}
 
+	/// A black frame of `width`x`height` (both even).
+	#[cfg(feature = "hw")]
+	pub fn black(width: usize, height: usize) -> Self {
+		let luma = width * height;
+		let mut data = vec![128u8; luma + luma / 2];
+		data[..luma].fill(16);
+		Self { width, height, data }
+	}
+
 	/// Convert any supported [`Image`] to I420.
 	///
 	/// 4:2:0 video needs even dimensions, so an odd trailing row or column is cropped.

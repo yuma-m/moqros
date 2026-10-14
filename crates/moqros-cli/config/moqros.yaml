@@ -21,7 +21,10 @@ moqros_pub:
     type:
     # json/cdr: snapshot (skip to the newest message) or stream (every message, in order).
     mode: snapshot
+    # vp8, av1 (`av1` feature) or h264 (`h264` feature + OPENH264_LIBRARY).
     codec: vp8
+    # Hardware encoder (`hw` feature): auto (fall back to software), off, or require.
+    hw: auto
     bitrate: 2000000
     fps: 30.0
     keyframe_interval_ms: 2000

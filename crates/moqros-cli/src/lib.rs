@@ -563,10 +563,16 @@ impl QosArgs {
 /// Video encoder flags.
 #[derive(Debug, Clone, Args)]
 pub struct EncoderArgs {
-	/// Video codec (`vp8`, or `h264` when built with the `h264` feature and
-	/// OPENH264_LIBRARY points at Cisco's OpenH264 binary).
+	/// Video codec: `vp8`, `av1` (built with the `av1` feature), or `h264` (built with the
+	/// `h264` feature, with OPENH264_LIBRARY pointing at Cisco's OpenH264 binary).
 	#[arg(long, default_value_t = moqros::Codec::default())]
 	pub codec: moqros::Codec,
+
+	/// Hardware video encoding (built with the `hw` feature): `auto` uses a VA-API or NVENC
+	/// encoder through GStreamer when one works and falls back to software, `off` always
+	/// encodes in software, and `require` fails without a hardware encoder.
+	#[arg(long, default_value_t = moqros::Hardware::default())]
+	pub hw: moqros::Hardware,
 
 	/// Target video bitrate in bits per second.
 	#[arg(long, default_value_t = 2_000_000)]
@@ -588,6 +594,7 @@ impl EncoderArgs {
 			bitrate: self.bitrate,
 			max_fps: self.fps,
 			keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
+			hardware: self.hw,
 			..Default::default()
 		}
 	}
@@ -1090,6 +1097,29 @@ mod tests {
 			parse::<TestCli>(&[], &[("format", string("xml"))]),
 			Err(ParseError::Param(_))
 		));
+	}
+
+	#[derive(Debug, Parser)]
+	struct EncoderCli {
+		#[command(flatten)]
+		encoder: EncoderArgs,
+	}
+
+	#[test]
+	fn encoder_params_fill_flags() {
+		let cli: EncoderCli = parse(&[], &[]).unwrap();
+		assert_eq!(cli.encoder.settings().hardware, moqros::Hardware::Auto);
+
+		let params = [("codec", string("av1")), ("hw", string("off"))];
+		let settings = parse::<EncoderCli>(&[], &params).unwrap().encoder.settings();
+		assert_eq!(
+			(settings.codec, settings.hardware),
+			(moqros::Codec::Av1, moqros::Hardware::Off)
+		);
+
+		let cli: EncoderCli = parse(&["--hw", "require"], &params).unwrap();
+		assert_eq!(cli.encoder.hw, moqros::Hardware::Require);
+		assert!(parse::<EncoderCli>(&["--hw", "gpu"], &[]).is_err());
 	}
 
 	#[test]

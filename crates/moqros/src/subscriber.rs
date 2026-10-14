@@ -1,4 +1,4 @@
-//! Subscribe to moqros broadcasts: hang VP8/H.264 video decoded back into images, or data tracks.
+//! Subscribe to moqros broadcasts: hang VP8/H.264/AV1 video decoded back into images, or data tracks.
 
 use std::time::Duration;
 
@@ -331,7 +331,7 @@ pub struct VideoFrame {
 	/// Presentation time relative to the start of the broadcast.
 	pub timestamp: Duration,
 	pub keyframe: bool,
-	/// Codec payload (VP8 frame or Annex-B H.264 access unit).
+	/// Codec payload (VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit).
 	pub data: Bytes,
 }
 
@@ -399,13 +399,13 @@ mod tests {
 		assert_eq!(Kind::of(&catalog(serde_json::json!({ "json": data }))), Kind::Data);
 		// Video nobody can decode still subscribes, to report the codecs on offer...
 		assert_eq!(
-			Kind::of(&catalog(serde_json::json!({ "video": video("av01.0.04M.08") }))),
+			Kind::of(&catalog(serde_json::json!({ "video": video("vp09.00.10.08") }))),
 			Kind::Images
 		);
 		// ...unless there's data to read instead.
 		assert_eq!(
 			Kind::of(&catalog(
-				serde_json::json!({ "video": video("av01.0.04M.08"), "json": data })
+				serde_json::json!({ "video": video("vp09.00.10.08"), "json": data })
 			)),
 			Kind::Data
 		);
@@ -413,6 +413,7 @@ mod tests {
 			let codec = match codec {
 				Codec::Vp8 => "vp8",
 				Codec::H264 => "avc3.42001f",
+				Codec::Av1 => "av01.0.08M.08",
 			};
 			assert_eq!(
 				Kind::of(&catalog(serde_json::json!({ "video": video(codec), "json": data }))),

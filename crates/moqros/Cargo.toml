@@ -20,16 +20,25 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["vp8"]
 # VP8 via the system libvpx (royalty-free). Needs libvpx + pkg-config + libclang at build time.
 vp8 = ["dep:env-libvpx-sys"]
+# AV1 via the system libaom (royalty-free). Needs libaom + pkg-config + libclang at build time.
+av1 = ["dep:aom-sys"]
 # H.264 via Cisco's prebuilt OpenH264 library, loaded at runtime (never compiled from source).
 h264 = ["dep:openh264"]
+# Hardware encoders (VA-API, NVENC) through GStreamer, with software as the fallback.
+# Needs the GStreamer development files at build time.
+hw = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 # ROS 2 bridge built on r2r. Requires a sourced ROS 2 environment at build time.
 ros = ["dep:r2r", "dep:futures"]
 # Build docs without a ROS environment (docs.rs). Not for real use.
 doc-only = ["ros", "r2r/doc-only"]
 
 [dependencies]
+aom-sys = { workspace = true, optional = true }
 bytes.workspace = true
 futures = { workspace = true, optional = true }
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
+gstreamer-video = { workspace = true, optional = true }
 hang.workspace = true
 moq-tokio.workspace = true
 openh264 = { workspace = true, optional = true }

@@ -9,7 +9,8 @@
 Stream ROS 2 topics over [Media over QUIC](https://moq.dev) (MoQ), in Rust: images as video, and any other
 message type as JSON or CDR data.
 
-moqros converts each image to I420, encodes it (VP8 or H.264), and publishes it to a MoQ relay as a
+moqros converts each image to I420, encodes it (VP8, AV1, or H.264, on a GPU when one is available), and
+publishes it to a MoQ relay as a
 [hang](https://docs.rs/hang) broadcast. That's the WebCodecs-friendly format played by the official
 [`@moq/watch`](https://www.npmjs.com/package/@moq/watch) web component. Topics of any other type go into a
 hang data track instead (see [Other message types](#other-message-types)). It can also go the other way:
@@ -42,7 +43,7 @@ docker compose -f docker/compose.yml up --build
 On first start, the one-shot `samples` service generates a test video (`samples/sample.mp4`) and a PNG
 sequence (`samples/frames/`) with ffmpeg inside the container. Files that already exist are kept. To stream
 your own footage, put a video file or a directory of PNG/JPEG frames in `samples/` and pass `SAMPLE=<name>`
-(`SAMPLE=frames` plays the PNG sequence instead of the video).
+(`SAMPLE=frames` plays the PNG sequence instead of the video). `CODEC=av1` streams AV1 instead of VP8.
 
 Open <http://localhost:8080> in a Chromium-based browser or Firefox. Both support WebTransport. The page
 connects to `http://localhost:4443/anon` and shows a panel for every broadcast the relay announces: the two
@@ -141,12 +142,34 @@ ros2 run moqros-cli moqros-pub --help
   same name, since the relay doesn't end subscriptions then. It stamps republished images with the local receive time.
 - **Shutdown:** on SIGINT or SIGTERM (`docker stop`, systemd), both bridges close the relay session before
   exiting, so the relay ends their broadcasts right away and a restarted `moqros-pub` can announce them again.
-- **Codec:** `moqros-pub --codec vp8|h264`. H.264 needs the `h264` feature and Cisco's OpenH264 binary:
+- **Codec:** `moqros-pub --codec vp8|av1|h264`. AV1 needs the `av1` feature and libaom at build time
+  (`apt install libaom-dev`, `brew install aom`). H.264 needs the `h264` feature and Cisco's OpenH264 binary:
 
   ```sh
   export OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)   # downloads from ciscobinary.openh264.org
   cargo run -p moqros-cli --features h264 --bin moqros-pub -- --codec h264 ...
   ```
+
+  Browsers decode all three through WebCodecs; AV1 needs a reasonably recent browser.
+- **Hardware encoding:** built with the `hw` feature, `moqros-pub` encodes on a GPU through GStreamer when it
+  can (`--hw auto`, the default): VA-API on Intel and AMD GPUs, and NVENC on NVIDIA GPUs, for each codec the GPU
+  supports (H.264 on most, AV1 on recent ones, VP8 on few). It tries each known encoder element and keeps the
+  first one that starts and honors keyframe requests, logging which one it uses; with none, it logs a warning
+  and encodes in software, so the codec's own feature is still needed. A hardware encoder that fails mid-stream
+  (e.g. after a GPU reset) is replaced by software, starting with a keyframe, and an encoder that failed at a
+  resolution isn't tried again at that resolution until the process restarts. `--hw off` always encodes in
+  software, and `--hw require` fails instead of falling back. Decoding (`moqros-sub`) always runs in software.
+
+  ```sh
+  # Build: GStreamer development files. Run: the plugins with the encoders and parsers, and the GPU driver.
+  sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-bad   # + gstreamer1.0-vaapi on Ubuntu 22.04
+  cargo run -p moqros-cli --features hw,av1 --bin moqros-pub -- --codec av1 ...
+  ```
+
+  `gst-inspect-1.0 va` and `gst-inspect-1.0 nvcodec` list the encoders GStreamer found; the node needs access to
+  the GPU (`/dev/dri/renderD*` for VA-API, the `video` or `render` group). With H.264 on a hardware encoder,
+  OpenH264 is only loaded if the bridge has to fall back to software.
 
 ### ROS arguments and parameters
 
@@ -292,7 +315,8 @@ let bridge = spawn_ros_to_moq(&mut node, "/camera/image_raw", QosProfile::sensor
 
 To publish and subscribe over one connection, use `moqros::connect_both(&config)`, which returns a `Publisher`
 and a `Subscriber` sharing it. See [docs.rs](https://docs.rs/moqros) for the API, data broadcasts, use without ROS, the codec features
-(VP8 by default, H.264 through Cisco's OpenH264 binary), and the format on the wire.
+(VP8 by default, AV1 through libaom, H.264 through Cisco's OpenH264 binary, hardware encoders through GStreamer),
+and the format on the wire.
 
 ## Security
 
@@ -365,6 +389,11 @@ sudo apt install libvpx-dev pkg-config libclang-dev
 cargo test -p moqros
 # H.264 tests (skipped unless OPENH264_LIBRARY is set):
 # OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh) cargo test -p moqros --features h264
+# AV1 (needs libaom-dev) and the GStreamer backend (needs the GStreamer packages above, plus
+# gstreamer1.0-plugins-good, whose software encoders stand in for hardware ones in the tests):
+# cargo test -p moqros --features av1,hw
+# On a machine with a GPU, also run the checks against its hardware encoders:
+# MOQROS_HW_TEST=1 cargo test -p moqros --features av1,hw -- --nocapture hardware_encoders
 
 # Integration test through a real relay:
 cargo install moq-relay
@@ -384,4 +413,6 @@ IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs" c
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
 
 Dependencies have their own licenses. libvpx is BSD-3-Clause, and the `env-libvpx-sys` bindings are MPL-2.0.
+libaom is BSD-2-Clause with the [Alliance for Open Media patent license](https://aomedia.org/license/patent-license/).
+GStreamer is LGPL-2.1 and is linked dynamically.
 Cisco's OpenH264 binary is covered by [Cisco's binary license](https://www.openh264.org/BINARY_LICENSE.txt).

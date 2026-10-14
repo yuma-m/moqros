@@ -1,8 +1,12 @@
 //! Video encoding/decoding.
 //!
 //! - **VP8** (feature `vp8`, default): royalty-free, via the system libvpx.
+//! - **AV1** (feature `av1`): royalty-free, via the system libaom.
 //! - **H.264** (feature `h264`): via Cisco's prebuilt OpenH264 binary, loaded at
 //!   runtime so Cisco's patent license applies. See [`set_openh264_library`].
+//!
+//! With the `hw` feature, encoders run on the GPU through GStreamer when one is available
+//! (see [`Hardware`]); decoding always runs in software.
 
 use std::fmt;
 use std::str::FromStr;
@@ -15,8 +19,13 @@ use crate::clock::StreamClock;
 use crate::convert::I420;
 use crate::{Error, Image, PixelFormat, Result};
 
+#[cfg(feature = "av1")]
+mod av1;
+#[cfg(feature = "hw")]
+mod gst;
 #[cfg(feature = "h264")]
 mod h264;
+mod obu;
 #[cfg(feature = "vp8")]
 mod vp8;
 
@@ -29,6 +38,7 @@ pub use h264::set_openh264_library;
 pub enum Codec {
 	Vp8,
 	H264,
+	Av1,
 }
 
 impl Codec {
@@ -37,6 +47,8 @@ impl Codec {
 		&[
 			#[cfg(feature = "vp8")]
 			Codec::Vp8,
+			#[cfg(feature = "av1")]
+			Codec::Av1,
 			#[cfg(feature = "h264")]
 			Codec::H264,
 		]
@@ -52,6 +64,7 @@ impl Codec {
 		match codec {
 			VideoCodec::VP8 => Some(Self::Vp8),
 			VideoCodec::H264(_) => Some(Self::H264),
+			VideoCodec::AV1(_) => Some(Self::Av1),
 			_ => None,
 		}
 	}
@@ -62,6 +75,7 @@ impl Codec {
 			// RFC 6386 §9.1: bit 0 of the frame tag is 0 for key frames.
 			Self::Vp8 => data.first().is_some_and(|b| b & 1 == 0),
 			Self::H264 => annexb_nals(data).any(|nal| nal.first().map(|h| h & 0x1f) == Some(5)),
+			Self::Av1 => obu::is_keyframe(data),
 		}
 	}
 }
@@ -77,6 +91,7 @@ impl fmt::Display for Codec {
 		f.write_str(match self {
 			Self::Vp8 => "vp8",
 			Self::H264 => "h264",
+			Self::Av1 => "av1",
 		})
 	}
 }
@@ -88,7 +103,49 @@ impl FromStr for Codec {
 		match s.to_ascii_lowercase().as_str() {
 			"vp8" => Ok(Self::Vp8),
 			"h264" | "avc" => Ok(Self::H264),
+			"av1" | "av01" => Ok(Self::Av1),
 			other => Err(Error::CodecUnavailable(format!("unknown codec {other:?}"))),
+		}
+	}
+}
+
+/// Whether [`Encoder`] encodes on a hardware encoder (feature `hw`).
+///
+/// Hardware encoders are reached through GStreamer: VA-API (`va` and `vaapi` plugins) on
+/// Intel/AMD GPUs and NVENC (`nvcodec` plugin) on NVIDIA GPUs. Software encoding stays the
+/// fallback, so the codec's own feature is still needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Hardware {
+	/// Always encode in software.
+	Off,
+	/// Use a hardware encoder when one works, otherwise encode in software.
+	#[default]
+	Auto,
+	/// Fail unless a hardware encoder works.
+	Require,
+}
+
+impl fmt::Display for Hardware {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(match self {
+			Self::Off => "off",
+			Self::Auto => "auto",
+			Self::Require => "require",
+		})
+	}
+}
+
+impl FromStr for Hardware {
+	type Err = Error;
+
+	fn from_str(s: &str) -> Result<Self> {
+		match s.to_ascii_lowercase().as_str() {
+			"off" => Ok(Self::Off),
+			"auto" => Ok(Self::Auto),
+			"require" => Ok(Self::Require),
+			other => Err(Error::InvalidSettings(format!(
+				"unknown hardware mode {other:?} (expected off, auto, or require)"
+			))),
 		}
 	}
 }
@@ -107,6 +164,8 @@ pub struct EncoderSettings {
 	pub keyframe_interval: Duration,
 	/// Encoder worker threads; 0 picks a sensible default.
 	pub threads: u16,
+	/// Whether to encode on a hardware encoder.
+	pub hardware: Hardware,
 }
 
 impl Default for EncoderSettings {
@@ -117,6 +176,7 @@ impl Default for EncoderSettings {
 			max_fps: 30.0,
 			keyframe_interval: Duration::from_secs(2),
 			threads: 0,
+			hardware: Hardware::default(),
 		}
 	}
 }
@@ -141,13 +201,14 @@ impl EncoderSettings {
 /// One encoded frame.
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
-	/// VP8 frame, or an Annex-B H.264 access unit.
+	/// VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit (low-overhead OBUs).
 	pub data: Bytes,
 	pub keyframe: bool,
 	pub width: u32,
 	pub height: u32,
 	pub timestamp: Duration,
-	/// Catalog codec description (for H.264, parsed from the keyframe's SPS).
+	/// Catalog codec description (for H.264 parsed from the keyframe's SPS, for AV1 from its
+	/// sequence header).
 	pub codec: VideoCodec,
 }
 
@@ -184,6 +245,8 @@ pub(crate) fn check_size(width: u32, height: u32, max: u64) -> Result<()> {
 pub struct Encoder {
 	settings: EncoderSettings,
 	inner: Option<(Box<dyn EncoderBackend>, (usize, usize))>,
+	/// Hardware encoder in use, if any.
+	hardware: Option<&'static str>,
 	/// Stream time (pts) of the last keyframe.
 	last_keyframe: Option<u64>,
 	/// Catalog codec of the last keyframe, reused for the delta frames that follow it.
@@ -192,14 +255,21 @@ pub struct Encoder {
 }
 
 impl Encoder {
-	/// Fails if `settings.codec` isn't compiled into this build.
+	/// Fails if `settings.codec` isn't compiled into this build, or if `settings.hardware` is
+	/// [`Hardware::Require`] without the `hw` feature.
 	pub fn new(settings: EncoderSettings) -> Result<Self> {
 		if !settings.codec.is_available() {
 			return Err(unavailable(settings.codec));
 		}
+		if settings.hardware == Hardware::Require && !cfg!(feature = "hw") {
+			return Err(Error::CodecUnavailable(
+				"hardware encoding is not compiled in (enable the `hw` feature)".into(),
+			));
+		}
 		Ok(Self {
 			settings,
 			inner: None,
+			hardware: None,
 			last_keyframe: None,
 			codec: None,
 			clock: StreamClock::default(),
@@ -208,6 +278,12 @@ impl Encoder {
 
 	pub fn settings(&self) -> &EncoderSettings {
 		&self.settings
+	}
+
+	/// Name of the GStreamer element encoding on hardware, once the first frame picked one.
+	/// `None` while encoding in software.
+	pub fn hardware_encoder(&self) -> Option<&'static str> {
+		self.hardware
 	}
 
 	/// Request that the next frame is encoded as a keyframe.
@@ -222,7 +298,10 @@ impl Encoder {
 
 		if self.inner.as_ref().map(|(_, d)| *d) != Some(dims) {
 			tracing::debug!(codec = %self.settings.codec, width = dims.0, height = dims.1, "creating encoder");
-			self.inner = Some((create_encoder(&self.settings, dims)?, dims));
+			// Drop the old encoder first: a hardware encoder may only allow one session.
+			self.inner = None;
+			let backend = self.create_backend(dims)?;
+			self.inner = Some((backend, dims));
 			self.last_keyframe = None;
 			self.codec = None;
 		}
@@ -236,7 +315,29 @@ impl Encoder {
 			.last_keyframe
 			.is_none_or(|last| pts.saturating_sub(last) >= interval);
 
-		let Some((data, keyframe)) = backend.encode(&yuv, pts, force)? else {
+		let encoded = match backend.encode(&yuv, pts, force) {
+			Ok(encoded) => encoded,
+			// A hardware encoder that fails mid-stream (e.g. a GPU reset) is replaced by a
+			// software one in auto mode; the frame is encoded again as a keyframe.
+			Err(err) if self.hardware.is_some() && self.settings.hardware == Hardware::Auto => {
+				tracing::warn!(codec = %self.settings.codec, element = self.hardware, %err, "hardware encoder failed; encoding in software");
+				self.hardware = None;
+				self.inner = None;
+				let backend = create_software_encoder(&self.settings, dims)?;
+				let (backend, _) = self.inner.insert((backend, dims));
+				self.codec = None;
+				backend.encode(&yuv, pts, true)?
+			}
+			Err(err) => {
+				// Recreate the encoder on the next frame rather than reuse a broken one.
+				if self.hardware.is_some() {
+					self.inner = None;
+				}
+				return Err(err);
+			}
+		};
+		let (backend, _) = self.inner.as_mut().expect("encoder initialized above");
+		let Some((data, keyframe)) = encoded else {
 			return Ok(None);
 		};
 		if keyframe {
@@ -255,6 +356,37 @@ impl Encoder {
 			timestamp: image.timestamp,
 			codec,
 		}))
+	}
+
+	/// A hardware encoder if one works (and is wanted), otherwise a software one.
+	///
+	/// Hardware encoders may only reject some sizes, so they're tried again for a new
+	/// resolution; ones that failed at a size aren't (see [`gst::GstEncoder::new`]).
+	fn create_backend(&mut self, dims: (usize, usize)) -> Result<Box<dyn EncoderBackend>> {
+		#[cfg(feature = "hw")]
+		if self.settings.hardware != Hardware::Off {
+			let first_attempt = gst::first_attempt(self.settings.codec, dims);
+			match gst::GstEncoder::new(&self.settings, dims, self.hardware) {
+				Ok(encoder) => {
+					if self.hardware != Some(encoder.element()) {
+						tracing::info!(codec = %self.settings.codec, element = encoder.element(), "using hardware encoder");
+					}
+					self.hardware = Some(encoder.element());
+					return Ok(Box::new(encoder));
+				}
+				Err(err) if self.settings.hardware == Hardware::Require => return Err(err),
+				Err(err) => {
+					// Warn once per codec and size, not for every topic.
+					if first_attempt {
+						tracing::warn!(codec = %self.settings.codec, %err, "no usable hardware encoder; encoding in software");
+					} else {
+						tracing::debug!(codec = %self.settings.codec, %err, "no usable hardware encoder; encoding in software");
+					}
+					self.hardware = None;
+				}
+			}
+		}
+		create_software_encoder(&self.settings, dims)
 	}
 }
 
@@ -275,6 +407,8 @@ impl Decoder {
 			Codec::Vp8 => Box::new(vp8::Vp8Decoder::new()?),
 			#[cfg(feature = "h264")]
 			Codec::H264 => Box::new(h264::H264Decoder::new()?),
+			#[cfg(feature = "av1")]
+			Codec::Av1 => Box::new(av1::Av1Decoder::new()?),
 			#[allow(unreachable_patterns)]
 			other => return Err(unavailable(other)),
 		};
@@ -310,12 +444,17 @@ impl Decoder {
 	}
 }
 
-fn create_encoder(settings: &EncoderSettings, (width, height): (usize, usize)) -> Result<Box<dyn EncoderBackend>> {
+fn create_software_encoder(
+	settings: &EncoderSettings,
+	(width, height): (usize, usize),
+) -> Result<Box<dyn EncoderBackend>> {
 	Ok(match settings.codec {
 		#[cfg(feature = "vp8")]
 		Codec::Vp8 => Box::new(vp8::Vp8Encoder::new(settings, width as u32, height as u32)?),
 		#[cfg(feature = "h264")]
 		Codec::H264 => Box::new(h264::H264Encoder::new(settings)?),
+		#[cfg(feature = "av1")]
+		Codec::Av1 => Box::new(av1::Av1Encoder::new(settings, width as u32, height as u32)?),
 		#[allow(unreachable_patterns)]
 		other => {
 			let _ = (width, height);
@@ -328,6 +467,19 @@ fn unavailable(codec: Codec) -> Error {
 	Error::CodecUnavailable(format!(
 		"{codec} support is not compiled in (enable the `{codec}` feature)"
 	))
+}
+
+/// `avc3.PPCCLL` (SPS/PPS inline) for an Annex-B keyframe, read from its SPS.
+#[cfg(any(feature = "h264", feature = "hw"))]
+pub(crate) fn h264_catalog_codec(keyframe: &[u8]) -> VideoCodec {
+	let sps = annexb_nals(keyframe).find(|nal| nal.first().map(|h| h & 0x1f) == Some(7) && nal.len() >= 4);
+	let (profile, constraints, level) = sps.map_or((0x42, 0xc0, 0x1f), |sps| (sps[1], sps[2], sps[3]));
+	VideoCodec::H264(hang::catalog::H264 {
+		inline: true,
+		profile,
+		constraints,
+		level,
+	})
 }
 
 /// Iterate the NAL units (without start codes) of an Annex-B byte stream.
@@ -582,7 +734,8 @@ pub(crate) mod tests {
 	fn codec_names() {
 		assert_eq!("vp8".parse::<Codec>().unwrap(), Codec::Vp8);
 		assert_eq!("H264".parse::<Codec>().unwrap(), Codec::H264);
-		assert!("av1".parse::<Codec>().is_err());
+		assert_eq!("AV1".parse::<Codec>().unwrap(), Codec::Av1);
+		assert!("vp9".parse::<Codec>().is_err());
 		assert!(Codec::Vp8.is_keyframe(&[0x10, 0x02, 0x00]));
 		assert!(!Codec::Vp8.is_keyframe(&[0x11, 0x02, 0x00]));
 	}
@@ -597,10 +750,11 @@ pub(crate) mod tests {
 
 	#[test]
 	fn codec_names_round_trip() {
-		for codec in [Codec::Vp8, Codec::H264] {
+		for codec in [Codec::Vp8, Codec::H264, Codec::Av1] {
 			assert_eq!(codec.to_string().parse::<Codec>().unwrap(), codec);
 		}
 		assert_eq!("AVC".parse::<Codec>().unwrap(), Codec::H264);
+		assert_eq!("av01".parse::<Codec>().unwrap(), Codec::Av1);
 		assert!(matches!("".parse::<Codec>(), Err(Error::CodecUnavailable(_))));
 	}
 
@@ -609,7 +763,9 @@ pub(crate) mod tests {
 		assert_eq!(Codec::from_catalog(&VideoCodec::VP8), Some(Codec::Vp8));
 		let avc: VideoCodec = "avc3.42001f".parse().unwrap();
 		assert_eq!(Codec::from_catalog(&avc), Some(Codec::H264));
-		assert_eq!(Codec::from_catalog(&VideoCodec::Unknown("av01.0.04M.08".into())), None);
+		let av1: VideoCodec = "av01.0.04M.08".parse().unwrap();
+		assert_eq!(Codec::from_catalog(&av1), Some(Codec::Av1));
+		assert_eq!(Codec::from_catalog(&VideoCodec::Unknown("hev2".into())), None);
 	}
 
 	#[test]
@@ -632,7 +788,7 @@ pub(crate) mod tests {
 
 	#[test]
 	fn missing_codecs_are_reported() {
-		for codec in [Codec::Vp8, Codec::H264] {
+		for codec in [Codec::Vp8, Codec::H264, Codec::Av1] {
 			if !codec.is_available() {
 				let settings = EncoderSettings {
 					codec,
@@ -641,6 +797,46 @@ pub(crate) mod tests {
 				assert!(matches!(Encoder::new(settings), Err(Error::CodecUnavailable(_))));
 				assert!(matches!(Decoder::new(codec), Err(Error::CodecUnavailable(_))));
 			}
+		}
+	}
+
+	#[test]
+	fn hardware_modes() {
+		for mode in [Hardware::Off, Hardware::Auto, Hardware::Require] {
+			assert_eq!(mode.to_string().parse::<Hardware>().unwrap(), mode);
+		}
+		assert_eq!("AUTO".parse::<Hardware>().unwrap(), Hardware::Auto);
+		assert!(matches!("on".parse::<Hardware>(), Err(Error::InvalidSettings(_))));
+		assert_eq!(EncoderSettings::default().hardware, Hardware::Auto);
+	}
+
+	#[test]
+	fn hardware_off_encodes_in_software() {
+		let Some(&codec) = Codec::available().first() else {
+			return;
+		};
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			hardware: Hardware::Off,
+			..Default::default()
+		})
+		.unwrap();
+		if codec == Codec::H264 && std::env::var_os("OPENH264_LIBRARY").is_none() {
+			return;
+		}
+		assert!(encoder.encode(&test_pattern(32, 32, 0)).unwrap().unwrap().keyframe);
+		assert_eq!(encoder.hardware_encoder(), None);
+	}
+
+	#[cfg(not(feature = "hw"))]
+	#[test]
+	fn required_hardware_needs_the_hw_feature() {
+		let settings = EncoderSettings {
+			hardware: Hardware::Require,
+			..Default::default()
+		};
+		if settings.codec.is_available() {
+			assert!(matches!(Encoder::new(settings), Err(Error::CodecUnavailable(_))));
 		}
 	}
 

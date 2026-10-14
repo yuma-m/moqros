@@ -1,5 +1,5 @@
 import { Net, Player, Signals } from "@moq/watch";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useConnection } from "../moq/ConnectionContext";
 import { useOptionalValue } from "../moq/useSignal";
 import { Panel } from "./Panel";
@@ -18,6 +18,20 @@ function useFps(player: Player | undefined): number {
 		return () => clearInterval(timer);
 	}, [player]);
 	return fps;
+}
+
+/** Short name of a WebCodecs codec string, e.g. `AV1` for `av01.0.05M.08`. */
+function codecName(codec: string): string {
+	const prefixes: [string, string][] = [
+		["av01", "AV1"],
+		["avc1", "H.264"],
+		["avc3", "H.264"],
+		["hev1", "H.265"],
+		["hvc1", "H.265"],
+		["vp09", "VP9"],
+		["vp8", "VP8"],
+	];
+	return prefixes.find(([prefix]) => codec.startsWith(prefix))?.[1] ?? codec;
 }
 
 /** Plays one hang video broadcast into a canvas, on the page's shared connection. */
@@ -56,13 +70,27 @@ export function VideoPanel({ name, onClose }: { name: string; onClose: () => voi
 	const display = useOptionalValue(player?.video.out.display);
 	const stalled = useOptionalValue(player?.video.out.stalled);
 	const isPaused = useOptionalValue(paused);
+	// The rendition being played; its codec string can change when the publisher restarts.
+	const config = useOptionalValue(player?.video.source.out.config);
 	const fps = useFps(player);
 
-	let line: string;
+	let line: ReactNode;
 	if (!connection) line = "invalid relay URL";
 	else if (status !== "live") line = status === "loading" ? "loading the catalog…" : "waiting for the broadcast…";
 	else if (!display) line = "waiting for a keyframe…";
-	else line = `${display.width}×${display.height} · ${fps} fps${stalled ? " · stalled" : ""}`;
+	else
+		line = (
+			<>
+				{display.width}×{display.height}
+				{config && (
+					<>
+						{" · "}
+						<span title={config.codec}>{codecName(config.codec)}</span>
+					</>
+				)}
+				{` · ${fps} fps${stalled ? " · stalled" : ""}`}
+			</>
+		);
 
 	return (
 		<Panel
