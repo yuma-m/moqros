@@ -7,7 +7,7 @@ use hang::moq_net;
 use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
 use crate::data::{DataPublisher, DataSettings};
-use crate::{ClientConfig, Error, Image, Result};
+use crate::{ClientConfig, Error, Image, Result, Session};
 
 /// Name of the single video track inside every moqros broadcast.
 pub const VIDEO_TRACK: &str = "video";
@@ -20,7 +20,7 @@ pub const VIDEO_TRACK: &str = "video";
 #[derive(Clone)]
 pub struct Publisher {
 	origin: moq_net::origin::Producer,
-	connection: moq_tokio::Connection,
+	session: Session,
 }
 
 impl Publisher {
@@ -28,32 +28,34 @@ impl Publisher {
 	pub fn connect(config: &ClientConfig) -> Result<Self> {
 		let origin = moq_tokio::origin::spawn();
 		let connection = config.client()?.with_publisher(&origin).connect(config.url.clone());
-		Ok(Self { origin, connection })
+		Ok(Self {
+			origin,
+			session: Session::new(connection),
+		})
 	}
 
-	pub(crate) fn from_parts(origin: moq_net::origin::Producer, connection: moq_tokio::Connection) -> Self {
-		Self { origin, connection }
+	pub(crate) fn from_parts(origin: moq_net::origin::Producer, session: Session) -> Self {
+		Self { origin, session }
 	}
 
-	/// Wait until the first session with the relay is established.
-	///
-	/// Fails if the relay refuses the session, e.g. for missing credentials.
+	/// The relay connection, shared with every clone.
+	pub fn session(&self) -> &Session {
+		&self.session
+	}
+
+	/// See [`Session::established`].
 	pub async fn established(&self) -> Result<()> {
-		crate::client::established(&self.connection).await
+		self.session.established().await
 	}
 
-	/// Resolves when the connection gives up for good.
+	/// See [`Session::closed`].
 	pub async fn closed(&self) -> Result<()> {
-		Ok(self.connection.closed().await?)
+		self.session.closed().await
 	}
 
-	/// Close the connection for every clone, without redialing.
-	///
-	/// Data already queued is delivered first, for at most about a second. Call this before
-	/// exiting so the relay ends this session's broadcasts right away; otherwise it holds them
-	/// until the session times out.
+	/// See [`Session::close`].
 	pub async fn close(&self) -> Result<()> {
-		Ok(self.connection.clone().close().await?)
+		self.session.close().await
 	}
 
 	/// Create and announce a broadcast named `name` that carries encoded images.

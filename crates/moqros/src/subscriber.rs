@@ -8,7 +8,7 @@ use hang::moq_net;
 
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSettings, DataSubscriber};
-use crate::{ClientConfig, Error, Image, Result};
+use crate::{ClientConfig, Error, Image, Result, Session};
 
 /// A connection to a relay used to consume image and data broadcasts.
 ///
@@ -16,7 +16,7 @@ use crate::{ClientConfig, Error, Image, Result};
 #[derive(Clone)]
 pub struct Subscriber {
 	origin: moq_net::origin::Producer,
-	connection: moq_tokio::Connection,
+	session: Session,
 }
 
 impl Subscriber {
@@ -27,32 +27,34 @@ impl Subscriber {
 			.client()?
 			.with_subscriber(origin.clone())
 			.connect(config.url.clone());
-		Ok(Self { origin, connection })
+		Ok(Self {
+			origin,
+			session: Session::new(connection),
+		})
 	}
 
-	pub(crate) fn from_parts(origin: moq_net::origin::Producer, connection: moq_tokio::Connection) -> Self {
-		Self { origin, connection }
+	pub(crate) fn from_parts(origin: moq_net::origin::Producer, session: Session) -> Self {
+		Self { origin, session }
 	}
 
-	/// Wait until the first session with the relay is established.
-	///
-	/// Fails if the relay refuses the session, e.g. for missing credentials.
+	/// The relay connection, shared with every clone.
+	pub fn session(&self) -> &Session {
+		&self.session
+	}
+
+	/// See [`Session::established`].
 	pub async fn established(&self) -> Result<()> {
-		crate::client::established(&self.connection).await
+		self.session.established().await
 	}
 
-	/// Resolves when the connection gives up for good.
+	/// See [`Session::closed`].
 	pub async fn closed(&self) -> Result<()> {
-		Ok(self.connection.closed().await?)
+		self.session.closed().await
 	}
 
-	/// Close the connection for every clone, without redialing.
-	///
-	/// Data already queued is delivered first, for at most about a second. Call this before
-	/// exiting so the relay ends this session's subscriptions right away; otherwise it holds them
-	/// until the session times out.
+	/// See [`Session::close`].
 	pub async fn close(&self) -> Result<()> {
-		Ok(self.connection.clone().close().await?)
+		self.session.close().await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to its best video rendition

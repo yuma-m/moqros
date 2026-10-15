@@ -102,7 +102,7 @@ mod subscriber;
 #[cfg(feature = "ros")]
 pub mod ros;
 
-pub use client::{ClientConfig, broadcast_name_for_topic, connect_both};
+pub use client::{ClientConfig, Session, broadcast_name_for_topic, connect_both};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
 pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
