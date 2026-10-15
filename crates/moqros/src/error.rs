@@ -47,13 +47,28 @@ pub enum Error {
 	MissingRosType(String),
 
 	#[error("json error: {0}")]
-	Json(String),
+	Json(#[from] serde_json::Error),
 
 	#[error("origin closed before broadcast {0:?} was announced")]
 	NotAnnounced(String),
 
+	#[cfg(feature = "ros")]
+	#[cfg_attr(docsrs, doc(cfg(feature = "ros")))]
 	#[error("ros error: {0}")]
-	Ros(String),
+	Ros(#[from] r2r::Error),
+
+	/// Publishers of a ROS topic disagree on its message type.
+	#[error("{topic} has several types: {}", types.join(", "))]
+	TopicTypes { topic: String, types: Vec<String> },
+
+	/// A resubscribed broadcast carries something its ROS topic can't take, e.g. data
+	/// instead of video, or another message type.
+	#[error("broadcast {broadcast} changed from {from} to {to}")]
+	BroadcastChanged {
+		broadcast: String,
+		from: String,
+		to: String,
+	},
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

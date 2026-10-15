@@ -6,7 +6,7 @@ use r2r::std_msgs::msg::Header;
 use tokio::task::JoinHandle;
 
 use super::meter::{RateMeter, WarnOnce};
-use super::{QosProfile, RosImage, image_to_ros, json_error, now_stamp, ros_error};
+use super::{QosProfile, RosImage, image_to_ros, now_stamp};
 use crate::{DataFormat, DataSettings, DataSubscriber, Error, ImageSubscriber, Result, Subscriber, Subscription};
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
@@ -106,7 +106,7 @@ impl MoqToRos {
 		} = target;
 		let output = match &self.first {
 			Subscription::Images(_) => RosOutput::Images {
-				publisher: node.create_publisher::<RosImage>(&topic, qos).map_err(ros_error)?,
+				publisher: node.create_publisher::<RosImage>(&topic, qos)?,
 				frame_id,
 			},
 			Subscription::Data(data) => {
@@ -115,9 +115,7 @@ impl MoqToRos {
 					.or_else(|| settings.ros_type.clone())
 					.ok_or_else(|| Error::MissingRosType(self.broadcast.clone()))?;
 				RosOutput::Data {
-					publisher: node
-						.create_publisher_untyped(&topic, &ros_type, qos)
-						.map_err(ros_error)?,
+					publisher: node.create_publisher_untyped(&topic, &ros_type, qos)?,
 					catalog: settings.clone(),
 				}
 			}
@@ -181,13 +179,17 @@ async fn republish(
 				republish_images(images, publisher, frame_id, &mut count).await?
 			}
 			(Subscription::Data(data), RosOutput::Data { publisher, catalog }) => {
-				if let Some(changed) = data_changed(catalog, data.settings()) {
-					return Err(Error::Ros(format!("broadcast {broadcast} changed {changed}")));
+				if let Some((from, to)) = data_changed(catalog, data.settings()) {
+					return Err(Error::BroadcastChanged { broadcast, from, to });
 				}
 				republish_data(data, publisher, catalog.format, &mut count).await
 			}
 			(Subscription::Images(_), RosOutput::Data { .. }) => {
-				return Err(Error::Ros(format!("broadcast {broadcast} changed from data to video")));
+				return Err(Error::BroadcastChanged {
+					broadcast,
+					from: "data".into(),
+					to: "video".into(),
+				});
 			}
 			(Subscription::Data(_), RosOutput::Images { .. }) => {
 				return Err(Error::NoVideo(broadcast));
@@ -202,8 +204,8 @@ async fn republish(
 }
 
 /// How a resubscribed data track differs from the `first` one in ways the topic can't
-/// follow, if it does. The mode doesn't matter for republishing.
-fn data_changed(first: &DataSettings, now: &DataSettings) -> Option<String> {
+/// follow, as `(from, to)`, if it does. The mode doesn't matter for republishing.
+fn data_changed(first: &DataSettings, now: &DataSettings) -> Option<(String, String)> {
 	let name = |settings: &DataSettings| {
 		format!(
 			"{} {}",
@@ -211,8 +213,7 @@ fn data_changed(first: &DataSettings, now: &DataSettings) -> Option<String> {
 			settings.ros_type.as_deref().unwrap_or("(untyped)")
 		)
 	};
-	(first.format != now.format || first.ros_type != now.ros_type)
-		.then(|| format!("from {} to {}", name(first), name(now)))
+	(first.format != now.format || first.ros_type != now.ros_type).then(|| (name(first), name(now)))
 }
 
 /// Publish decoded images until the subscription ends, returning why it did.
@@ -231,7 +232,7 @@ async fn republish_images(
 					stamp: now_stamp(),
 					frame_id: frame_id.to_string(),
 				};
-				publisher.publish(&image_to_ros(&image, header)).map_err(ros_error)?;
+				publisher.publish(&image_to_ros(&image, header))?;
 				*count += 1;
 				meter.tick();
 			}
@@ -260,9 +261,9 @@ async fn republish_data(
 		};
 		let published = match format {
 			DataFormat::Json => serde_json::from_slice(&message.payload)
-				.map_err(json_error)
-				.and_then(|value| publisher.publish(value).map_err(ros_error)),
-			DataFormat::Cdr => publisher.publish_raw(&message.payload).map_err(ros_error),
+				.map_err(Error::from)
+				.and_then(|value| publisher.publish(value).map_err(Error::from)),
+			DataFormat::Cdr => publisher.publish_raw(&message.payload).map_err(Error::from),
 		};
 		match published {
 			Ok(()) => {
@@ -296,8 +297,8 @@ mod tests {
 		assert_eq!(data_changed(&first, &stream), None);
 		let cdr = settings(DataFormat::Cdr, crate::DataMode::Snapshot, "std_msgs/msg/Header");
 		assert_eq!(
-			data_changed(&first, &cdr).as_deref(),
-			Some("from json std_msgs/msg/Header to cdr std_msgs/msg/Header")
+			data_changed(&first, &cdr),
+			Some(("json std_msgs/msg/Header".into(), "cdr std_msgs/msg/Header".into()))
 		);
 		let string = settings(DataFormat::Json, crate::DataMode::Snapshot, "std_msgs/msg/String");
 		assert!(data_changed(&first, &string).is_some());

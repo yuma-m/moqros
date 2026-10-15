@@ -97,6 +97,7 @@ mod convert;
 mod data;
 mod error;
 mod image;
+mod names;
 mod publisher;
 mod subscriber;
 mod track;

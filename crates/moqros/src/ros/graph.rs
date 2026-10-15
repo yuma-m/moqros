@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use super::ros_error;
 use crate::{Error, Result};
 
 /// The message type of `topic` in the ROS graph, or `None` if nothing publishes it yet.
@@ -10,14 +9,17 @@ use crate::{Error, Result};
 /// Relative names resolve against the node's namespace; remappings aren't applied.
 /// Fails if publishers disagree on the type.
 pub fn topic_type(node: &r2r::Node, topic: &str) -> Result<Option<String>> {
-	let namespace = node.namespace().map_err(ros_error)?;
-	let node_name = node.fully_qualified_name().map_err(ros_error)?;
+	let namespace = node.namespace()?;
+	let node_name = node.fully_qualified_name()?;
 	let topic = resolve_topic(&namespace, &node_name, topic);
-	let topics = node.get_topic_names_and_types().map_err(ros_error)?;
+	let topics = node.get_topic_names_and_types()?;
 	match topics.get(&topic).map(Vec::as_slice) {
 		None | Some([]) => Ok(None),
 		Some([ros_type]) => Ok(Some(ros_type.clone())),
-		Some(types) => Err(Error::Ros(format!("{topic} has several types: {}", types.join(", ")))),
+		Some(types) => Err(Error::TopicTypes {
+			topic,
+			types: types.to_vec(),
+		}),
 	}
 }
 

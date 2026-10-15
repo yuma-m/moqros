@@ -8,7 +8,7 @@ use futures::{Stream, StreamExt};
 use tokio::task::JoinHandle;
 
 use super::meter::{RateMeter, WarnOnce};
-use super::{BridgeStats, QosProfile, RosImage, image_from_ros, json_error, ros_error};
+use super::{BridgeStats, QosProfile, RosImage, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
 /// Forward a ROS image topic into a MoQ broadcast.
@@ -22,7 +22,7 @@ pub fn spawn_ros_to_moq(
 	qos: QosProfile,
 	mut broadcast: ImagePublisher,
 ) -> Result<JoinHandle<Result<BridgeStats>>> {
-	let mut stream = node.subscribe::<RosImage>(topic, qos).map_err(ros_error)?;
+	let mut stream = node.subscribe::<RosImage>(topic, qos)?;
 	let topic = topic.to_string();
 
 	let slot = Arc::new(LatestSlot::default());
@@ -136,15 +136,10 @@ pub fn spawn_ros_to_moq_data(
 		.ok_or_else(|| Error::MissingRosType(broadcast.name().to_string()))?;
 	let mut messages: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> = match settings.format {
 		DataFormat::Json => Box::pin(
-			node.subscribe_untyped(topic, &ros_type, qos)
-				.map_err(ros_error)?
-				.map(|msg| Ok(serde_json::to_vec(&msg.map_err(ros_error)?).map_err(json_error)?.into())),
+			node.subscribe_untyped(topic, &ros_type, qos)?
+				.map(|msg| Ok(serde_json::to_vec(&msg?)?.into())),
 		),
-		DataFormat::Cdr => Box::pin(
-			node.subscribe_raw(topic, &ros_type, qos)
-				.map_err(ros_error)?
-				.map(|msg| Ok(msg.into())),
-		),
+		DataFormat::Cdr => Box::pin(node.subscribe_raw(topic, &ros_type, qos)?.map(|msg| Ok(msg.into()))),
 	};
 
 	Ok(tokio::spawn(async move {
