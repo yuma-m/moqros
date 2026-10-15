@@ -5,12 +5,12 @@ use std::mem::MaybeUninit;
 use std::os::raw::c_int;
 use std::ptr;
 
-use bytes::{Bytes, BytesMut};
-use hang::catalog::VideoCodec;
+use bytes::BytesMut;
 use vpx_sys as vpx;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings, check_size};
-use crate::convert::{I420, Planes, yuv_to_rgb8};
+use super::vp8_header::keyframe_size;
+use super::{DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, rgb8_picture};
+use crate::convert::{I420, Planes};
 use crate::{Error, Result};
 
 /// Speed/quality trade-off; negative values select real-time mode in libvpx.
@@ -75,7 +75,7 @@ impl Vp8Encoder {
 }
 
 impl EncoderBackend for Vp8Encoder {
-	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<(Bytes, bool)>> {
+	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		debug_assert_eq!((frame.width() as u32, frame.height() as u32), (self.width, self.height));
 
 		let mut out = BytesMut::new();
@@ -127,11 +127,10 @@ impl EncoderBackend for Vp8Encoder {
 			}
 		}
 
-		Ok((!out.is_empty()).then(|| (out.freeze(), keyframe)))
-	}
-
-	fn catalog_codec(&self, _keyframe: &[u8]) -> VideoCodec {
-		VideoCodec::VP8
+		Ok((!out.is_empty()).then(|| EncodedChunk {
+			data: out.freeze(),
+			keyframe,
+		}))
 	}
 }
 
@@ -154,7 +153,7 @@ impl Vp8Decoder {
 	pub fn new() -> Result<Self> {
 		unsafe {
 			let cfg = vpx::vpx_codec_dec_cfg_t {
-				threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32),
+				threads: default_threads(),
 				w: 0,
 				h: 0,
 			};
@@ -172,17 +171,6 @@ impl Vp8Decoder {
 			Ok(Self { ctx: ctx.assume_init() })
 		}
 	}
-}
-
-/// Picture size declared by a VP8 key frame header (RFC 6386 §9.1), or `None` for
-/// interframes, which keep the size of the last key frame.
-fn keyframe_size(data: &[u8]) -> Option<(u32, u32)> {
-	if data.len() < 10 || data[0] & 1 != 0 || data[3..6] != [0x9d, 0x01, 0x2a] {
-		return None;
-	}
-	// The top two bits of each are a scaling hint, not part of the size.
-	let dim = |i: usize| (u16::from_le_bytes([data[i], data[i + 1]]) & 0x3fff) as u32;
-	Some((dim(6), dim(8)))
 }
 
 impl DecoderBackend for Vp8Decoder {
@@ -208,21 +196,13 @@ impl DecoderBackend for Vp8Decoder {
 				return Err(Error::Codec(format!("unexpected VP8 output format {:?}", img.fmt)));
 			}
 
-			check_size(img.d_w, img.d_h, max_pixels)?;
-			let (width, height) = (img.d_w as usize, img.d_h as usize);
-			let ch = height.div_ceil(2);
-			let plane = |i: usize, rows: usize| {
-				let stride = img.stride[i] as usize;
-				(std::slice::from_raw_parts(img.planes[i], stride * rows), stride)
-			};
-			let planes = Planes {
-				width,
-				height,
-				y: plane(0, height),
-				u: plane(1, ch),
-				v: plane(2, ch),
-			};
-			Ok(Some((width as u32, height as u32, yuv_to_rgb8(&planes))))
+			let planes = Planes::from_raw(
+				img.d_w as usize,
+				img.d_h as usize,
+				std::array::from_fn(|i| img.planes[i].cast_const()),
+				std::array::from_fn(|i| img.stride[i] as usize),
+			);
+			Ok(Some(rgb8_picture(&planes, max_pixels)?))
 		}
 	}
 }
@@ -304,7 +284,7 @@ mod tests {
 	fn rejects_oversized_keyframe_headers() {
 		let mut data = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0xff, 0x3f, 0xff, 0x3f];
 		data.extend([0u8; 32]);
-		assert_eq!(super::keyframe_size(&data), Some((16383, 16383)));
+		assert_eq!(super::super::vp8_header::keyframe_size(&data), Some((16383, 16383)));
 		let mut decoder = super::super::Decoder::new(Codec::Vp8).unwrap();
 		assert!(matches!(
 			decoder.decode(&data, std::time::Duration::ZERO),
@@ -320,8 +300,8 @@ mod tests {
 	fn keyframe_size_reads_encoded_frames() {
 		let mut encoder = super::super::Encoder::new(Default::default()).unwrap();
 		let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
-		assert_eq!(super::keyframe_size(&frame.data), Some((64, 48)));
-		assert_eq!(super::keyframe_size(&[0x11, 0x02, 0x00]), None);
+		assert_eq!(super::super::vp8_header::keyframe_size(&frame.data), Some((64, 48)));
+		assert_eq!(super::super::vp8_header::keyframe_size(&[0x11, 0x02, 0x00]), None);
 	}
 
 	#[test]
