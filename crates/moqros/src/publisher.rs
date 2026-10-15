@@ -7,6 +7,7 @@ use hang::moq_net;
 use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
 use crate::data::{DataPublisher, DataSettings};
+use crate::track::{BroadcastWriter, GroupWriter};
 use crate::{ClientConfig, Error, Image, Result, Session};
 
 /// Name of the single video track inside every moqros broadcast.
@@ -79,13 +80,9 @@ impl Publisher {
 /// or skip ahead at group boundaries. The catalog is republished whenever the
 /// resolution or codec parameters change.
 pub struct ImagePublisher {
-	name: String,
-	broadcast: moq_net::broadcast::Producer,
-	catalog: moq_net::track::Producer,
-	video: moq_net::track::Producer,
-	group: Option<moq_net::group::Producer>,
-	/// What [`Self::group`] has used of moq-net's per-group limits.
-	budget: GroupBudget,
+	// Declared before `broadcast`, so the open group is finished before the broadcast closes.
+	video: GroupWriter,
+	broadcast: BroadcastWriter,
 	encoder: Encoder,
 	rendition: Option<(u32, u32, VideoCodec)>,
 	clock: StreamClock,
@@ -94,20 +91,13 @@ pub struct ImagePublisher {
 impl ImagePublisher {
 	fn new(origin: &moq_net::origin::Producer, name: &str, settings: EncoderSettings) -> Result<Self> {
 		let encoder = Encoder::new(settings)?;
-		let broadcast = origin.create_broadcast(name)?;
-		broadcast.announce(Default::default())?;
-
-		let catalog = broadcast.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())?;
+		let broadcast = BroadcastWriter::create(origin, name)?;
 		let video = broadcast.create_track(VIDEO_TRACK, hang::container::track_info(PRIORITY.video))?;
 		tracing::info!(broadcast = name, codec = %encoder.settings().codec, "announced image broadcast");
 
 		Ok(Self {
-			name: name.to_string(),
+			video: GroupWriter::new(video),
 			broadcast,
-			catalog,
-			video,
-			group: None,
-			budget: GroupBudget::default(),
 			encoder,
 			rendition: None,
 			clock: StreamClock::default(),
@@ -116,7 +106,7 @@ impl ImagePublisher {
 
 	/// Broadcast name, relative to the relay URL.
 	pub fn name(&self) -> &str {
-		&self.name
+		self.broadcast.name()
 	}
 
 	/// Encode and send one image. Returns whether a frame was written.
@@ -138,38 +128,30 @@ impl ImagePublisher {
 	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<()> {
 		if frame.keyframe {
 			self.update_catalog(frame)?;
-			if let Some(group) = self.group.take() {
-				group.finish()?;
-			}
-			self.group = Some(self.video.append_group()?);
-			self.budget = GroupBudget::default();
-		} else if self.group.is_some() && !self.budget.fits(frame.data.len()) {
+			self.video.start_group()?;
+		} else if self.video.is_open() && !self.video.fits(frame.data.len()) {
 			// moq-net would abort the group on this write. Close it and drop frames
 			// until the next keyframe opens a new one.
 			tracing::warn!(
-				broadcast = %self.name,
+				broadcast = %self.name(),
 				"video group is full; raise the bitrate budget or shorten the keyframe interval"
 			);
-			if let Some(group) = self.group.take() {
-				group.finish()?;
-			}
+			self.video.finish_group()?;
 		}
 
 		// Nothing decodable can be sent until the first keyframe opens a group.
-		let Some(group) = self.group.as_mut() else {
+		if !self.video.is_open() {
 			self.encoder.force_keyframe();
 			return Ok(());
-		};
+		}
 
 		let timestamp = self.clock.micros(frame.timestamp);
-		let frame = hang::container::Frame {
+		self.video.write_container(&hang::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(timestamp).map_err(|_| Error::Timestamp)?,
 			payload: frame.data.clone(),
-		};
-		frame.write_to(group)?;
-		self.budget.add(frame.payload.len());
+		})?;
 		// Start the next group early, so a long keyframe interval doesn't fill this one.
-		if self.budget.nearly_full() {
+		if self.video.nearly_full() {
 			self.encoder.force_keyframe();
 		}
 		Ok(())
@@ -193,12 +175,10 @@ impl ImagePublisher {
 		let mut catalog = Catalog::<()>::default();
 		catalog.video.insert(VIDEO_TRACK, config)?;
 
-		let mut group = self.catalog.append_group()?;
-		group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
-		group.finish()?;
+		self.broadcast.publish_catalog(&catalog)?;
 
 		tracing::info!(
-			broadcast = %self.name,
+			broadcast = %self.name(),
 			codec = %codec,
 			width = frame.width,
 			height = frame.height,
@@ -206,45 +186,6 @@ impl ImagePublisher {
 		);
 		self.rendition = Some(rendition);
 		Ok(())
-	}
-}
-
-/// How much of moq-net's per-group limits a group has used, so writers can start a new
-/// group before a write would abort the current one.
-#[derive(Debug, Default)]
-pub(crate) struct GroupBudget {
-	frames: usize,
-	bytes: u64,
-}
-
-impl GroupBudget {
-	/// Bytes a frame may add on top of its payload (hang's timestamp varint).
-	const OVERHEAD: u64 = 8;
-
-	/// Whether a frame with `payload` bytes still fits into the group.
-	pub(crate) fn fits(&self, payload: usize) -> bool {
-		self.frames < moq_net::group::MAX_GROUP_FRAMES
-			&& self.bytes + payload as u64 + Self::OVERHEAD <= moq_net::group::MAX_CACHE_BYTES
-	}
-
-	/// Account for a frame with `payload` bytes.
-	pub(crate) fn add(&mut self, payload: usize) {
-		self.frames += 1;
-		self.bytes += payload as u64 + Self::OVERHEAD;
-	}
-
-	/// Whether the group has used three quarters of either limit.
-	fn nearly_full(&self) -> bool {
-		self.frames >= moq_net::group::MAX_GROUP_FRAMES / 4 * 3 || self.bytes >= moq_net::group::MAX_CACHE_BYTES / 4 * 3
-	}
-}
-
-impl Drop for ImagePublisher {
-	fn drop(&mut self) {
-		if let Some(group) = self.group.take() {
-			let _ = group.finish();
-		}
-		self.broadcast.close();
 	}
 }
 
@@ -276,7 +217,7 @@ mod tests {
 			publisher
 				.publish(&crate::codec::tests::test_pattern(16, 16, t))
 				.unwrap();
-			keyframes += usize::from(publisher.budget.frames == 1);
+			keyframes += usize::from(publisher.video.frames() == 1);
 		}
 		assert_eq!(keyframes, 2);
 	}
@@ -300,8 +241,8 @@ mod tests {
 		for n in 0..limit + 10 {
 			publisher.publish_encoded(&frame(n, n == 0)).unwrap();
 		}
-		assert!(publisher.group.is_none());
+		assert!(!publisher.video.is_open());
 		publisher.publish_encoded(&frame(limit + 10, true)).unwrap();
-		assert_eq!(publisher.budget.frames, 1);
+		assert_eq!(publisher.video.frames(), 1);
 	}
 }

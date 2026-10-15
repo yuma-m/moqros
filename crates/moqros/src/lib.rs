@@ -98,6 +98,7 @@ mod error;
 mod image;
 mod publisher;
 mod subscriber;
+mod track;
 
 #[cfg(feature = "ros")]
 pub mod ros;
