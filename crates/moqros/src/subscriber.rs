@@ -6,8 +6,9 @@ use bytes::Bytes;
 use hang::catalog::Catalog;
 use hang::moq_net;
 
+use crate::catalog::{self, Kind};
 use crate::codec::{Codec, Decoder};
-use crate::data::{DataMode, DataSettings, DataSubscriber};
+use crate::data::{DataMode, DataSubscriber};
 use crate::track::{GroupReader, RouteWatch};
 use crate::{ClientConfig, Error, Image, Result, Session};
 
@@ -111,18 +112,7 @@ async fn images(
 	catalog: &Catalog,
 	route: RouteWatch,
 ) -> Result<ImageSubscriber> {
-	let mut renditions = catalog.video.ranked().peekable();
-	if renditions.peek().is_none() {
-		return Err(Error::NoVideo(name.to_string()));
-	}
-	let mut offered = Vec::new();
-	let (track, config, codec) = renditions
-		.find_map(|(track, config)| {
-			offered.push(config.codec.to_string());
-			let codec = Codec::from_catalog(&config.codec).filter(|c| c.is_available())?;
-			Some((track, config, codec))
-		})
-		.ok_or_else(|| Error::UnsupportedCodec(offered.join(", ")))?;
+	let (track, config, codec) = catalog::select_video(catalog, name)?;
 	tracing::info!(
 		broadcast = name,
 		track = %track,
@@ -147,7 +137,7 @@ async fn data(
 	catalog: &Catalog,
 	route: RouteWatch,
 ) -> Result<DataSubscriber> {
-	let (track, settings) = DataSettings::from_catalog(catalog).ok_or_else(|| Error::NoData(name.to_string()))?;
+	let (track, settings) = catalog::find_data(catalog).ok_or_else(|| Error::NoData(name.to_string()))?;
 	tracing::info!(
 		broadcast = name,
 		track,
@@ -158,33 +148,6 @@ async fn data(
 	);
 	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
 	Ok(DataSubscriber::new(broadcast, reader, settings))
-}
-
-/// Which track [`Subscriber::subscribe`] reads from a catalog.
-#[derive(Debug, PartialEq, Eq)]
-enum Kind {
-	Images,
-	Data,
-	None,
-}
-
-impl Kind {
-	fn of(catalog: &Catalog) -> Self {
-		let decodable = catalog
-			.video
-			.ranked()
-			.any(|(_, config)| Codec::from_catalog(&config.codec).is_some_and(Codec::is_available));
-		if decodable {
-			Self::Images
-		} else if DataSettings::from_catalog(catalog).is_some() {
-			Self::Data
-		} else if !catalog.video.renditions.is_empty() {
-			// Subscribing fails, but says which codecs the broadcast offers.
-			Self::Images
-		} else {
-			Self::None
-		}
-	}
 }
 
 /// What [`Subscriber::subscribe`] found in a broadcast.
@@ -247,47 +210,5 @@ impl ImageSubscriber {
 			}
 		}
 		Ok(None)
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn catalog(json: serde_json::Value) -> Catalog {
-		serde_json::from_value(json).unwrap()
-	}
-
-	#[test]
-	fn picks_what_this_build_can_read() {
-		let video = |codec: &str| serde_json::json!({ "renditions": { "video": { "codec": codec } } });
-		let data = serde_json::json!({ "tracks": { "data": { "mode": "snapshot" } } });
-
-		assert_eq!(Kind::of(&catalog(serde_json::json!({}))), Kind::None);
-		assert_eq!(Kind::of(&catalog(serde_json::json!({ "json": data }))), Kind::Data);
-		// Video nobody can decode still subscribes, to report the codecs on offer...
-		assert_eq!(
-			Kind::of(&catalog(serde_json::json!({ "video": video("vp09.00.10.08") }))),
-			Kind::Images
-		);
-		// ...unless there's data to read instead.
-		assert_eq!(
-			Kind::of(&catalog(
-				serde_json::json!({ "video": video("vp09.00.10.08"), "json": data })
-			)),
-			Kind::Data
-		);
-		for codec in Codec::available() {
-			let codec = match codec {
-				Codec::Vp8 => "vp8",
-				Codec::H264 => "avc3.42001f",
-				Codec::Av1 => "av01.0.08M.08",
-			};
-			assert_eq!(
-				Kind::of(&catalog(serde_json::json!({ "video": video(codec), "json": data }))),
-				Kind::Images,
-				"{codec}"
-			);
-		}
 	}
 }

@@ -89,6 +89,7 @@
 // On docs.rs, label feature-gated items with the feature they need.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod catalog;
 mod client;
 mod clock;
 mod codec;
@@ -103,15 +104,16 @@ mod track;
 #[cfg(feature = "ros")]
 pub mod ros;
 
+pub use catalog::{CDR_MIME, DATA_TRACK, VIDEO_TRACK};
 pub use client::{ClientConfig, Session, broadcast_name_for_topic, connect_both};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
 pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
 pub use convert::{I420, Planes, yuv_to_rgb8};
-pub use data::{CDR_MIME, DATA_TRACK, DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
+pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
-pub use publisher::{ImagePublisher, Publisher, VIDEO_TRACK};
+pub use publisher::{ImagePublisher, Publisher};
 pub use subscriber::{ImageSubscriber, Subscriber, Subscription, VideoFrame};
 
 /// Re-exported so applications can name hang/moq types without version skew.

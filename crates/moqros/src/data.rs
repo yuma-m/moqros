@@ -10,20 +10,12 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{BinaryConfig, Catalog, JsonConfig, Mode, PRIORITY};
+use hang::catalog::PRIORITY;
 use hang::moq_net;
 
+use crate::catalog::{self, DATA_TRACK};
 use crate::track::{BroadcastWriter, GroupReader, GroupWriter};
 use crate::{Error, Result};
-
-/// Name of the single data track inside every moqros data broadcast.
-pub const DATA_TRACK: &str = "data";
-
-/// Media type of [`DataFormat::Cdr`] payloads in the catalog's `binary` section.
-pub const CDR_MIME: &str = "application/x-ros2-cdr";
-
-/// Catalog field naming the ROS message type of a data track.
-const ROS_TYPE_KEY: &str = "rosType";
 
 /// How each message is serialized on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,23 +59,6 @@ pub enum DataMode {
 	Stream,
 }
 
-impl DataMode {
-	fn to_catalog(self) -> Mode {
-		match self {
-			Self::Snapshot => Mode::Snapshot,
-			Self::Stream => Mode::Stream,
-		}
-	}
-
-	fn from_catalog(mode: &Mode) -> Option<Self> {
-		match mode {
-			Mode::Snapshot => Some(Self::Snapshot),
-			Mode::Stream => Some(Self::Stream),
-			_ => None,
-		}
-	}
-}
-
 impl fmt::Display for DataMode {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str(match self {
@@ -123,54 +98,6 @@ impl DataSettings {
 			ros_type: None,
 		}
 	}
-
-	/// Add the [`DATA_TRACK`] entry to `catalog`.
-	pub(crate) fn insert_into(&self, catalog: &mut Catalog) -> Result<()> {
-		let mut extra = serde_json::Map::new();
-		if let Some(ros_type) = &self.ros_type {
-			extra.insert(ROS_TYPE_KEY.into(), ros_type.clone().into());
-		}
-		let mode = self.mode.to_catalog();
-		match self.format {
-			DataFormat::Json => {
-				let mut config = JsonConfig::new(mode);
-				config.schema = self.ros_type.as_ref().map(|ros_type| format!("ros2:{ros_type}"));
-				config.extra = extra;
-				catalog.json.insert(DATA_TRACK, config)?;
-			}
-			DataFormat::Cdr => {
-				let mut config = BinaryConfig::new(mode);
-				config.mime = Some(CDR_MIME.into());
-				config.extra = extra;
-				catalog.binary.insert(DATA_TRACK, config)?;
-			}
-		}
-		Ok(())
-	}
-
-	/// The first data track of `catalog` moqros can read, JSON before CDR.
-	pub(crate) fn from_catalog(catalog: &Catalog) -> Option<(String, Self)> {
-		let settings = |format, mode: &Mode, extra: &serde_json::Map<String, serde_json::Value>| {
-			Some(Self {
-				format,
-				// A consumer must ignore a track whose mode it doesn't know.
-				mode: DataMode::from_catalog(mode)?,
-				ros_type: extra.get(ROS_TYPE_KEY).and_then(|t| t.as_str()).map(String::from),
-			})
-		};
-		let json = catalog.json.tracks.iter().filter_map(|(track, config)| {
-			Some((track.clone(), settings(DataFormat::Json, &config.mode, &config.extra)?))
-		});
-		let cdr = catalog
-			.binary
-			.tracks
-			.iter()
-			.filter(|(_, config)| config.mime.as_deref() == Some(CDR_MIME))
-			.filter_map(|(track, config)| {
-				Some((track.clone(), settings(DataFormat::Cdr, &config.mode, &config.extra)?))
-			});
-		json.chain(cdr).next()
-	}
 }
 
 /// Writes messages into one MoQ data broadcast.
@@ -183,9 +110,7 @@ pub struct DataPublisher {
 
 impl DataPublisher {
 	pub(crate) fn new(origin: &moq_net::origin::Producer, name: &str, settings: DataSettings) -> Result<Self> {
-		let mut catalog = Catalog::<()>::default();
-		settings.insert_into(&mut catalog)?;
-
+		let catalog = catalog::data(&settings)?;
 		let mut broadcast = BroadcastWriter::create(origin, name)?;
 		let track = broadcast.create_track(DATA_TRACK, moq_net::track::Info::default().with_priority(PRIORITY.text))?;
 		broadcast.publish_catalog(&catalog)?;
@@ -299,54 +224,6 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn catalog_round_trip() {
-		for settings in [
-			settings(DataFormat::Json, DataMode::Snapshot, Some("sensor_msgs/msg/Imu")),
-			settings(DataFormat::Cdr, DataMode::Stream, Some("std_msgs/msg/String")),
-			settings(DataFormat::Json, DataMode::Stream, None),
-		] {
-			let mut catalog = Catalog::default();
-			settings.insert_into(&mut catalog).unwrap();
-			let catalog: Catalog = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
-			assert_eq!(
-				DataSettings::from_catalog(&catalog),
-				Some((DATA_TRACK.to_string(), settings.clone()))
-			);
-		}
-	}
-
-	#[test]
-	fn catalog_entries() {
-		let mut catalog = Catalog::default();
-		settings(DataFormat::Json, DataMode::Snapshot, Some("std_msgs/msg/String"))
-			.insert_into(&mut catalog)
-			.unwrap();
-		let json: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
-		assert_eq!(
-			json["json"]["tracks"][DATA_TRACK],
-			serde_json::json!({
-				"mode": "snapshot",
-				"schema": "ros2:std_msgs/msg/String",
-				"rosType": "std_msgs/msg/String",
-			})
-		);
-
-		let mut catalog = Catalog::default();
-		settings(DataFormat::Cdr, DataMode::Stream, Some("std_msgs/msg/String"))
-			.insert_into(&mut catalog)
-			.unwrap();
-		let json: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
-		assert_eq!(
-			json["binary"]["tracks"][DATA_TRACK],
-			serde_json::json!({
-				"mode": "stream",
-				"mime": CDR_MIME,
-				"rosType": "std_msgs/msg/String",
-			})
-		);
-	}
-
 	/// A stream track outgrowing moq-net's group limits continues in a new group.
 	#[tokio::test]
 	async fn stream_continues_past_a_full_group() {
@@ -386,22 +263,5 @@ mod tests {
 			groups += 1;
 		}
 		assert_eq!((groups, received), (2, count));
-	}
-
-	#[test]
-	fn ignores_unreadable_tracks() {
-		let catalog: Catalog = serde_json::from_value(serde_json::json!({
-			"json": { "tracks": { "future": { "mode": "window" } } },
-			"binary": { "tracks": {
-				"thumbs": { "mode": "snapshot", "mime": "image/jpeg" },
-				"raw": { "mode": "stream", "mime": CDR_MIME },
-			} },
-		}))
-		.unwrap();
-		assert_eq!(
-			DataSettings::from_catalog(&catalog),
-			Some(("raw".to_string(), settings(DataFormat::Cdr, DataMode::Stream, None)))
-		);
-		assert_eq!(DataSettings::from_catalog(&Catalog::default()), None);
 	}
 }

@@ -1,17 +1,15 @@
 //! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8, H.264, or AV1 broadcasts,
 //! and other messages as hang data broadcasts.
 
-use hang::catalog::{Catalog, Container, PRIORITY, VideoCodec, VideoConfig};
+use hang::catalog::{PRIORITY, VideoCodec};
 use hang::moq_net;
 
+use crate::catalog::{self, VIDEO_TRACK};
 use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
 use crate::data::{DataPublisher, DataSettings};
 use crate::track::{BroadcastWriter, GroupWriter};
 use crate::{ClientConfig, Error, Image, Result, Session};
-
-/// Name of the single video track inside every moqros broadcast.
-pub const VIDEO_TRACK: &str = "video";
 
 /// A connection to a relay that can carry any number of image and data broadcasts.
 ///
@@ -164,17 +162,7 @@ impl ImagePublisher {
 			return Ok(());
 		}
 
-		let settings = self.encoder.settings();
-		let mut config = VideoConfig::new(codec.clone());
-		config.coded_width = Some(frame.width);
-		config.coded_height = Some(frame.height);
-		config.bitrate = Some(settings.bitrate as u64);
-		config.framerate = Some(settings.max_fps as f64);
-		config.container = Container::Legacy;
-
-		let mut catalog = Catalog::<()>::default();
-		catalog.video.insert(VIDEO_TRACK, config)?;
-
+		let catalog = catalog::video(frame, self.encoder.settings())?;
 		self.broadcast.publish_catalog(&catalog)?;
 
 		tracing::info!(
