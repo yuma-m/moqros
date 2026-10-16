@@ -59,8 +59,6 @@ pub use r2r;
 pub use r2r::QosProfile;
 pub use to_moq::{spawn_ros_to_moq, spawn_ros_to_moq_data};
 
-use crate::Error;
-
 /// The ROS message type moqros encodes as video.
 pub type RosImage = r2r::sensor_msgs::msg::Image;
 
@@ -73,12 +71,4 @@ pub struct BridgeStats {
 	pub received: u64,
 	pub sent: u64,
 	pub dropped: u64,
-}
-
-fn ros_error(err: r2r::Error) -> Error {
-	Error::Ros(err.to_string())
-}
-
-fn json_error(err: serde_json::Error) -> Error {
-	Error::Json(err.to_string())
 }

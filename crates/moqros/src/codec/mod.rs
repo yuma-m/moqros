@@ -8,8 +8,6 @@
 //! With the `hw` feature, encoders run on the GPU through GStreamer when one is available
 //! (see [`Hardware`]); decoding always runs in software.
 
-use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -95,32 +93,15 @@ impl Codec {
 	}
 }
 
+crate::names::named_enum!(Codec, "codec", {
+	Vp8 => "vp8",
+	H264 => "h264" | "avc",
+	Av1 => "av1" | "av01",
+});
+
 impl Default for Codec {
 	fn default() -> Self {
 		Self::available().first().copied().unwrap_or(Self::Vp8)
-	}
-}
-
-impl fmt::Display for Codec {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(match self {
-			Self::Vp8 => "vp8",
-			Self::H264 => "h264",
-			Self::Av1 => "av1",
-		})
-	}
-}
-
-impl FromStr for Codec {
-	type Err = Error;
-
-	fn from_str(s: &str) -> Result<Self> {
-		match s.to_ascii_lowercase().as_str() {
-			"vp8" => Ok(Self::Vp8),
-			"h264" | "avc" => Ok(Self::H264),
-			"av1" | "av01" => Ok(Self::Av1),
-			other => Err(Error::CodecUnavailable(format!("unknown codec {other:?}"))),
-		}
 	}
 }
 
@@ -140,30 +121,11 @@ pub enum Hardware {
 	Require,
 }
 
-impl fmt::Display for Hardware {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(match self {
-			Self::Off => "off",
-			Self::Auto => "auto",
-			Self::Require => "require",
-		})
-	}
-}
-
-impl FromStr for Hardware {
-	type Err = Error;
-
-	fn from_str(s: &str) -> Result<Self> {
-		match s.to_ascii_lowercase().as_str() {
-			"off" => Ok(Self::Off),
-			"auto" => Ok(Self::Auto),
-			"require" => Ok(Self::Require),
-			other => Err(Error::InvalidSettings(format!(
-				"unknown hardware mode {other:?} (expected off, auto, or require)"
-			))),
-		}
-	}
-}
+crate::names::named_enum!(Hardware, "hardware mode", {
+	Off => "off",
+	Auto => "auto",
+	Require => "require",
+});
 
 /// Tuning knobs for [`Encoder`].
 #[derive(Debug, Clone)]
@@ -749,7 +711,7 @@ pub(crate) mod tests {
 		}
 		assert_eq!("AVC".parse::<Codec>().unwrap(), Codec::H264);
 		assert_eq!("av01".parse::<Codec>().unwrap(), Codec::Av1);
-		assert!(matches!("".parse::<Codec>(), Err(Error::CodecUnavailable(_))));
+		assert!(matches!("".parse::<Codec>(), Err(Error::InvalidSettings(_))));
 	}
 
 	#[test]

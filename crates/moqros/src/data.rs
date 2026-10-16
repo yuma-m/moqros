@@ -5,17 +5,15 @@
 //! message payload, as is; the catalog entry also names the ROS message type (`rosType`) so a
 //! subscriber can republish it without being told.
 
-use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::PRIORITY;
 use hang::moq_net;
 
+use crate::Result;
 use crate::catalog::{self, DATA_TRACK};
 use crate::track::{BroadcastWriter, GroupReader, GroupWriter};
-use crate::{Error, Result};
 
 /// How each message is serialized on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,26 +24,10 @@ pub enum DataFormat {
 	Cdr,
 }
 
-impl fmt::Display for DataFormat {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(match self {
-			Self::Json => "json",
-			Self::Cdr => "cdr",
-		})
-	}
-}
-
-impl FromStr for DataFormat {
-	type Err = Error;
-
-	fn from_str(s: &str) -> Result<Self> {
-		match s.to_ascii_lowercase().as_str() {
-			"json" => Ok(Self::Json),
-			"cdr" => Ok(Self::Cdr),
-			other => Err(Error::InvalidSettings(format!("unknown data format {other:?}"))),
-		}
-	}
-}
+crate::names::named_enum!(DataFormat, "data format", {
+	Json => "json",
+	Cdr => "cdr",
+});
 
 /// How messages map onto MoQ groups.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -59,26 +41,10 @@ pub enum DataMode {
 	Stream,
 }
 
-impl fmt::Display for DataMode {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(match self {
-			Self::Snapshot => "snapshot",
-			Self::Stream => "stream",
-		})
-	}
-}
-
-impl FromStr for DataMode {
-	type Err = Error;
-
-	fn from_str(s: &str) -> Result<Self> {
-		match s.to_ascii_lowercase().as_str() {
-			"snapshot" => Ok(Self::Snapshot),
-			"stream" => Ok(Self::Stream),
-			other => Err(Error::InvalidSettings(format!("unknown data mode {other:?}"))),
-		}
-	}
-}
+crate::names::named_enum!(DataMode, "data mode", {
+	Snapshot => "snapshot",
+	Stream => "stream",
+});
 
 /// Describes a data track: given to [`Publisher::create_data_broadcast`](crate::Publisher::create_data_broadcast),
 /// and read back from the catalog by [`DataSubscriber::settings`].
@@ -202,6 +168,7 @@ impl DataSubscriber {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Error;
 
 	#[test]
 	fn names_round_trip() {
