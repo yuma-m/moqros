@@ -60,34 +60,66 @@ impl ClientConfig {
 pub fn connect_both(config: &ClientConfig) -> Result<(Publisher, Subscriber)> {
 	let publish = moq_tokio::origin::spawn();
 	let subscribe = moq_tokio::origin::spawn();
-	let connection = config
-		.client()?
-		.with_publisher(&publish)
-		.with_subscriber(subscribe.clone())
-		.connect(config.url.clone());
+	let session = Session::new(
+		config
+			.client()?
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
+			.connect(config.url.clone()),
+	);
 	Ok((
-		Publisher::from_parts(publish, connection.clone()),
-		Subscriber::from_parts(subscribe, connection),
+		Publisher::from_parts(publish, session.clone()),
+		Subscriber::from_parts(subscribe, session),
 	))
 }
 
-/// How long [`established`] waits for the relay to refuse a session it just accepted.
+/// How long [`Session::established`] waits for the relay to refuse a session it just accepted.
 const REFUSAL_WINDOW: Duration = Duration::from_millis(500);
 
-/// Wait until a session with the relay is up and the relay hasn't refused it.
+/// The connection to a relay behind a [`Publisher`] or [`Subscriber`].
 ///
-/// A relay accepts the transport before it asks its auth server about the session, so
-/// a refusal (e.g. `Unauthorized`) closes a session that already looked established.
-/// Watch the connection for a moment longer so that refusal is returned here.
-pub(crate) async fn established(connection: &moq_tokio::Connection) -> Result<()> {
-	// The returned handle is a clone; the caller's handle keeps the dial alive.
-	let _ = connection.clone().established().await?;
-	tokio::select! {
-		res = connection.closed() => {
-			res?;
-			Err(moq_tokio::Error::Reconnect("the connection closed right after it was established".into()).into())
+/// The connection redials in the background if it drops. Clones share it, and so do a
+/// publisher and subscriber made by [`connect_both`].
+#[derive(Clone)]
+pub struct Session {
+	connection: moq_tokio::Connection,
+}
+
+impl Session {
+	pub(crate) fn new(connection: moq_tokio::Connection) -> Self {
+		Self { connection }
+	}
+
+	/// Wait until the first session with the relay is established.
+	///
+	/// Fails if the relay refuses the session, e.g. for missing credentials.
+	pub async fn established(&self) -> Result<()> {
+		// A relay accepts the transport before it asks its auth server about the session, so
+		// a refusal (e.g. `Unauthorized`) closes a session that already looked established.
+		// Watch the connection for a moment longer so that refusal is returned here.
+		// The returned handle is a clone; our handle keeps the dial alive.
+		let _ = self.connection.clone().established().await?;
+		tokio::select! {
+			res = self.connection.closed() => {
+				res?;
+				Err(moq_tokio::Error::Reconnect("the connection closed right after it was established".into()).into())
+			}
+			_ = tokio::time::sleep(REFUSAL_WINDOW) => Ok(()),
 		}
-		_ = tokio::time::sleep(REFUSAL_WINDOW) => Ok(()),
+	}
+
+	/// Resolves when the connection gives up for good.
+	pub async fn closed(&self) -> Result<()> {
+		Ok(self.connection.closed().await?)
+	}
+
+	/// Close the connection for every clone, without redialing.
+	///
+	/// Data already queued is delivered first, for at most about a second. Call this before
+	/// exiting so the relay ends this session's broadcasts and subscriptions right away;
+	/// otherwise it holds them until the session times out.
+	pub async fn close(&self) -> Result<()> {
+		Ok(self.connection.clone().close().await?)
 	}
 }
 

@@ -365,12 +365,14 @@ pub struct Bridges {
 pub struct Relay {
 	publisher: Option<moqros::Publisher>,
 	subscriber: Option<moqros::Subscriber>,
+	session: moqros::Session,
 }
 
 impl Relay {
 	/// For a node that only has topics.
 	pub fn publisher(publisher: moqros::Publisher) -> Self {
 		Self {
+			session: publisher.session().clone(),
 			publisher: Some(publisher),
 			subscriber: None,
 		}
@@ -379,6 +381,7 @@ impl Relay {
 	/// For a node that only has broadcasts.
 	pub fn subscriber(subscriber: moqros::Subscriber) -> Self {
 		Self {
+			session: subscriber.session().clone(),
 			publisher: None,
 			subscriber: Some(subscriber),
 		}
@@ -387,25 +390,9 @@ impl Relay {
 	/// Both directions over the one connection [`moqros::connect_both`] returns.
 	pub fn both(publisher: moqros::Publisher, subscriber: moqros::Subscriber) -> Self {
 		Self {
+			session: publisher.session().clone(),
 			publisher: Some(publisher),
 			subscriber: Some(subscriber),
-		}
-	}
-
-	// Both handles share one connection, so either one stands for it.
-	async fn closed(&self) -> moqros::Result<()> {
-		match (&self.publisher, &self.subscriber) {
-			(Some(publisher), _) => publisher.closed().await,
-			(None, Some(subscriber)) => subscriber.closed().await,
-			(None, None) => std::future::pending().await,
-		}
-	}
-
-	async fn close(&self) -> moqros::Result<()> {
-		match (&self.publisher, &self.subscriber) {
-			(Some(publisher), _) => publisher.close().await,
-			(None, Some(subscriber)) => subscriber.close().await,
-			(None, None) => Ok(()),
 		}
 	}
 }
@@ -505,11 +492,11 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			}
 			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
 			// E.g. the relay refused the session: nothing would ever be announced.
-			res = relay.closed() => return res.context("relay connection closed"),
+			res = relay.session.closed() => return res.context("relay connection closed"),
 			err = spinner.failed() => return Err(err),
 			res = &mut shutdown => {
 				tracing::info!(signal = res?, "shutting down");
-				if let Err(err) = relay.close().await {
+				if let Err(err) = relay.session.close().await {
 					tracing::warn!(%err, "the relay connection didn't close cleanly");
 				}
 				return Ok(());
