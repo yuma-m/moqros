@@ -19,9 +19,8 @@ use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use hang::catalog::VideoCodec;
 
-use super::{Codec, EncoderBackend, EncoderSettings, h264_catalog_codec, obu};
+use super::{Codec, EncodedChunk, EncoderBackend, EncoderSettings};
 use crate::convert::I420;
 use crate::{Error, Result};
 
@@ -437,7 +436,7 @@ impl GstEncoder {
 }
 
 impl EncoderBackend for GstEncoder {
-	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<(Bytes, bool)>> {
+	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		#[cfg(test)]
 		if tests::FAIL_NEXT.take() {
 			mark_failed(self.element, self.codec, self.dims);
@@ -447,7 +446,7 @@ impl EncoderBackend for GstEncoder {
 		match self.encode_at(frame, pts, force_keyframe, FRAME_TIMEOUT) {
 			Ok(Some(data)) if !data.is_empty() => {
 				let keyframe = self.codec.is_keyframe(&data);
-				Ok(Some((data, keyframe)))
+				Ok(Some(EncodedChunk { data, keyframe }))
 			}
 			Ok(_) => Ok(None),
 			Err(err) => {
@@ -455,14 +454,6 @@ impl EncoderBackend for GstEncoder {
 				mark_failed(self.element, self.codec, self.dims);
 				Err(err)
 			}
-		}
-	}
-
-	fn catalog_codec(&self, keyframe: &[u8]) -> VideoCodec {
-		match self.codec {
-			Codec::H264 => h264_catalog_codec(keyframe),
-			Codec::Av1 => obu::catalog_codec(keyframe),
-			Codec::Vp8 => VideoCodec::VP8,
 		}
 	}
 }

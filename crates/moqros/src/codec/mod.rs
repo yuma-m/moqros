@@ -16,9 +16,10 @@ use bytes::Bytes;
 use hang::catalog::VideoCodec;
 
 use crate::clock::StreamClock;
-use crate::convert::I420;
+use crate::convert::{I420, Planes, yuv_to_rgb8};
 use crate::{Error, Image, PixelFormat, Result};
 
+mod annexb;
 #[cfg(feature = "av1")]
 mod av1;
 #[cfg(feature = "hw")]
@@ -28,6 +29,7 @@ mod h264;
 mod obu;
 #[cfg(feature = "vp8")]
 mod vp8;
+mod vp8_header;
 
 #[cfg(feature = "h264")]
 pub use h264::set_openh264_library;
@@ -42,6 +44,10 @@ pub enum Codec {
 }
 
 impl Codec {
+	/// Every codec moqros knows, compiled in or not.
+	#[cfg(test)]
+	pub(crate) const ALL: &[Codec] = &[Codec::Vp8, Codec::H264, Codec::Av1];
+
 	/// Codecs compiled into this build, preferred first.
 	pub const fn available() -> &'static [Codec] {
 		&[
@@ -72,10 +78,19 @@ impl Codec {
 	/// Whether `data` (one encoded frame) is a keyframe.
 	pub fn is_keyframe(self, data: &[u8]) -> bool {
 		match self {
-			// RFC 6386 §9.1: bit 0 of the frame tag is 0 for key frames.
-			Self::Vp8 => data.first().is_some_and(|b| b & 1 == 0),
-			Self::H264 => annexb_nals(data).any(|nal| nal.first().map(|h| h & 0x1f) == Some(5)),
+			Self::Vp8 => vp8_header::is_keyframe(data),
+			Self::H264 => annexb::is_keyframe(data),
 			Self::Av1 => obu::is_keyframe(data),
+		}
+	}
+
+	/// Catalog codec description for an encoded keyframe (for H.264 read from its SPS, for
+	/// AV1 from its sequence header).
+	pub(crate) fn catalog_codec(self, keyframe: &[u8]) -> VideoCodec {
+		match self {
+			Self::Vp8 => VideoCodec::VP8,
+			Self::H264 => annexb::catalog_codec(keyframe),
+			Self::Av1 => obu::catalog_codec(keyframe),
 		}
 	}
 }
@@ -184,7 +199,7 @@ impl Default for EncoderSettings {
 impl EncoderSettings {
 	pub(crate) fn threads(&self) -> u32 {
 		match self.threads {
-			0 => std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32),
+			0 => default_threads(),
 			n => n as u32,
 		}
 	}
@@ -196,6 +211,11 @@ impl EncoderSettings {
 			.ceil()
 			.max(1.0) as u32
 	}
+}
+
+/// Codec worker threads when none are configured: one per core, at most 4.
+pub(crate) fn default_threads() -> u32 {
+	std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32)
 }
 
 /// One encoded frame.
@@ -212,20 +232,31 @@ pub struct EncodedFrame {
 	pub codec: VideoCodec,
 }
 
+/// What an [`EncoderBackend`] produced for one input frame.
+pub(crate) struct EncodedChunk {
+	pub data: Bytes,
+	pub keyframe: bool,
+}
+
 /// A codec implementation behind [`Encoder`].
 pub(crate) trait EncoderBackend: Send {
-	/// Encode one frame at `pts` microseconds. Returns `(data, keyframe)`, or `None` if dropped.
-	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<(Bytes, bool)>>;
-
-	/// Catalog codec description for an encoded keyframe.
-	fn catalog_codec(&self, keyframe: &[u8]) -> VideoCodec;
+	/// Encode one frame at `pts` microseconds. Returns `None` if the encoder dropped it.
+	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>>;
 }
 
 /// A codec implementation behind [`Decoder`].
 pub(crate) trait DecoderBackend: Send {
-	/// Decode one frame into packed `rgb8` `(width, height, pixels)`, failing with
-	/// [`Error::TooLarge`] for pictures above `max_pixels`.
+	/// Decode one frame into packed `rgb8` `(width, height, pixels)` (see [`rgb8_picture`]),
+	/// failing with [`Error::TooLarge`] for pictures above `max_pixels`.
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>>;
+}
+
+/// A decoder's output picture as packed `rgb8` `(width, height, pixels)`, failing with
+/// [`Error::TooLarge`] before converting a picture above `max_pixels`.
+pub(crate) fn rgb8_picture(planes: &Planes<'_>, max_pixels: u64) -> Result<(u32, u32, Vec<u8>)> {
+	let (width, height) = (planes.width as u32, planes.height as u32);
+	check_size(width, height, max_pixels)?;
+	Ok((width, height, yuv_to_rgb8(planes)))
 }
 
 /// Default for [`Decoder::set_max_pixels`]: 8K UHD (7680x4320).
@@ -244,14 +275,31 @@ pub(crate) fn check_size(width: u32, height: u32, max: u64) -> Result<()> {
 /// The codec is (re)created lazily whenever the input resolution changes.
 pub struct Encoder {
 	settings: EncoderSettings,
-	inner: Option<(Box<dyn EncoderBackend>, (usize, usize))>,
-	/// Hardware encoder in use, if any.
+	active: Option<ActiveBackend>,
+	/// Hardware encoder in use, if any. Outlives a backend that's recreated, so the same
+	/// element is tried first for the new one.
 	hardware: Option<&'static str>,
 	/// Stream time (pts) of the last keyframe.
 	last_keyframe: Option<u64>,
+	clock: StreamClock,
+}
+
+/// The backend an [`Encoder`] currently encodes with, and what it has produced so far.
+struct ActiveBackend {
+	backend: Box<dyn EncoderBackend>,
+	dims: (usize, usize),
 	/// Catalog codec of the last keyframe, reused for the delta frames that follow it.
 	codec: Option<VideoCodec>,
-	clock: StreamClock,
+}
+
+impl ActiveBackend {
+	fn new(backend: Box<dyn EncoderBackend>, dims: (usize, usize)) -> Self {
+		Self {
+			backend,
+			dims,
+			codec: None,
+		}
+	}
 }
 
 impl Encoder {
@@ -268,10 +316,9 @@ impl Encoder {
 		}
 		Ok(Self {
 			settings,
-			inner: None,
+			active: None,
 			hardware: None,
 			last_keyframe: None,
-			codec: None,
 			clock: StreamClock::default(),
 		})
 	}
@@ -296,16 +343,13 @@ impl Encoder {
 		let yuv = I420::from_image(image)?;
 		let dims = (yuv.width(), yuv.height());
 
-		if self.inner.as_ref().map(|(_, d)| *d) != Some(dims) {
+		if self.active.as_ref().is_none_or(|active| active.dims != dims) {
 			tracing::debug!(codec = %self.settings.codec, width = dims.0, height = dims.1, "creating encoder");
 			// Drop the old encoder first: a hardware encoder may only allow one session.
-			self.inner = None;
-			let backend = self.create_backend(dims)?;
-			self.inner = Some((backend, dims));
+			self.active = None;
+			self.active = Some(ActiveBackend::new(self.create_backend(dims)?, dims));
 			self.last_keyframe = None;
-			self.codec = None;
 		}
-		let (backend, _) = self.inner.as_mut().expect("encoder initialized above");
 
 		// Codecs want strictly increasing presentation times. Keyframes are scheduled on
 		// the same timeline, so capture clock jumps can't stall or flood them.
@@ -315,37 +359,16 @@ impl Encoder {
 			.last_keyframe
 			.is_none_or(|last| pts.saturating_sub(last) >= interval);
 
-		let encoded = match backend.encode(&yuv, pts, force) {
-			Ok(encoded) => encoded,
-			// A hardware encoder that fails mid-stream (e.g. a GPU reset) is replaced by a
-			// software one in auto mode; the frame is encoded again as a keyframe.
-			Err(err) if self.hardware.is_some() && self.settings.hardware == Hardware::Auto => {
-				tracing::warn!(codec = %self.settings.codec, element = self.hardware, %err, "hardware encoder failed; encoding in software");
-				self.hardware = None;
-				self.inner = None;
-				let backend = create_software_encoder(&self.settings, dims)?;
-				let (backend, _) = self.inner.insert((backend, dims));
-				self.codec = None;
-				backend.encode(&yuv, pts, true)?
-			}
-			Err(err) => {
-				// Recreate the encoder on the next frame rather than reuse a broken one.
-				if self.hardware.is_some() {
-					self.inner = None;
-				}
-				return Err(err);
-			}
-		};
-		let (backend, _) = self.inner.as_mut().expect("encoder initialized above");
-		let Some((data, keyframe)) = encoded else {
+		let Some(EncodedChunk { data, keyframe }) = self.encode_with_fallback(&yuv, pts, force)? else {
 			return Ok(None);
 		};
 		if keyframe {
 			self.last_keyframe = Some(pts);
 		}
-		let codec = match &self.codec {
+		let active = self.active.as_mut().expect("backend created above");
+		let codec = match &active.codec {
 			Some(codec) if !keyframe => codec.clone(),
-			_ => self.codec.insert(backend.catalog_codec(&data)).clone(),
+			_ => active.codec.insert(self.settings.codec.catalog_codec(&data)).clone(),
 		};
 
 		Ok(Some(EncodedFrame {
@@ -356,6 +379,33 @@ impl Encoder {
 			timestamp: image.timestamp,
 			codec,
 		}))
+	}
+
+	/// Encode on the active backend.
+	///
+	/// A hardware encoder that fails mid-stream (e.g. a GPU reset) is replaced by a software
+	/// one in auto mode, and the frame is encoded again as a keyframe.
+	fn encode_with_fallback(&mut self, yuv: &I420, pts: u64, force: bool) -> Result<Option<EncodedChunk>> {
+		let active = self.active.as_mut().expect("backend created before encoding");
+		let dims = active.dims;
+		match active.backend.encode(yuv, pts, force) {
+			Ok(chunk) => Ok(chunk),
+			Err(err) if self.hardware.is_some() && self.settings.hardware == Hardware::Auto => {
+				tracing::warn!(codec = %self.settings.codec, element = self.hardware, %err, "hardware encoder failed; encoding in software");
+				self.hardware = None;
+				self.active = None;
+				let backend = create_software_encoder(&self.settings, dims)?;
+				let active = self.active.insert(ActiveBackend::new(backend, dims));
+				active.backend.encode(yuv, pts, true)
+			}
+			Err(err) => {
+				// Recreate the encoder on the next frame rather than reuse a broken one.
+				if self.hardware.is_some() {
+					self.active = None;
+				}
+				Err(err)
+			}
+		}
 	}
 
 	/// A hardware encoder if one works (and is wanted), otherwise a software one.
@@ -467,47 +517,6 @@ fn unavailable(codec: Codec) -> Error {
 	Error::CodecUnavailable(format!(
 		"{codec} support is not compiled in (enable the `{codec}` feature)"
 	))
-}
-
-/// `avc3.PPCCLL` (SPS/PPS inline) for an Annex-B keyframe, read from its SPS.
-#[cfg(any(feature = "h264", feature = "hw"))]
-pub(crate) fn h264_catalog_codec(keyframe: &[u8]) -> VideoCodec {
-	let sps = annexb_nals(keyframe).find(|nal| nal.first().map(|h| h & 0x1f) == Some(7) && nal.len() >= 4);
-	let (profile, constraints, level) = sps.map_or((0x42, 0xc0, 0x1f), |sps| (sps[1], sps[2], sps[3]));
-	VideoCodec::H264(hang::catalog::H264 {
-		inline: true,
-		profile,
-		constraints,
-		level,
-	})
-}
-
-/// Iterate the NAL units (without start codes) of an Annex-B byte stream.
-pub(crate) fn annexb_nals(data: &[u8]) -> impl Iterator<Item = &[u8]> {
-	let mut starts = Vec::new();
-	let mut i = 0;
-	while i + 3 <= data.len() {
-		if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-			starts.push(i + 3);
-			i += 3;
-		} else {
-			i += 1;
-		}
-	}
-	let ends: Vec<usize> = starts
-		.iter()
-		.skip(1)
-		.map(|&s| {
-			// Trim the start code and any zero bytes preceding it (4-byte start codes).
-			let mut e = s - 3;
-			while e > 0 && data[e - 1] == 0 {
-				e -= 1;
-			}
-			e
-		})
-		.chain(std::iter::once(data.len()))
-		.collect();
-	starts.into_iter().zip(ends).map(move |(s, e)| &data[s..e.max(s)])
 }
 
 #[cfg(test)]
@@ -724,13 +733,6 @@ pub(crate) mod tests {
 	}
 
 	#[test]
-	fn nal_splitter_handles_3_and_4_byte_start_codes() {
-		let data = [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 4];
-		let nals: Vec<&[u8]> = annexb_nals(&data).collect();
-		assert_eq!(nals, vec![&[0x67, 1, 2][..], &[0x68, 3][..], &[0x65, 4][..]]);
-	}
-
-	#[test]
 	fn codec_names() {
 		assert_eq!("vp8".parse::<Codec>().unwrap(), Codec::Vp8);
 		assert_eq!("H264".parse::<Codec>().unwrap(), Codec::H264);
@@ -741,16 +743,8 @@ pub(crate) mod tests {
 	}
 
 	#[test]
-	fn nal_splitter_ignores_leading_bytes_and_streams_without_start_codes() {
-		assert_eq!(annexb_nals(&[]).count(), 0);
-		assert_eq!(annexb_nals(&[1, 2, 3, 0, 0]).count(), 0);
-		let nals: Vec<&[u8]> = annexb_nals(&[9, 9, 0, 0, 1, 0x41, 5]).collect();
-		assert_eq!(nals, vec![&[0x41, 5][..]]);
-	}
-
-	#[test]
 	fn codec_names_round_trip() {
-		for codec in [Codec::Vp8, Codec::H264, Codec::Av1] {
+		for &codec in Codec::ALL {
 			assert_eq!(codec.to_string().parse::<Codec>().unwrap(), codec);
 		}
 		assert_eq!("AVC".parse::<Codec>().unwrap(), Codec::H264);
@@ -788,7 +782,7 @@ pub(crate) mod tests {
 
 	#[test]
 	fn missing_codecs_are_reported() {
-		for codec in [Codec::Vp8, Codec::H264, Codec::Av1] {
+		for &codec in Codec::ALL {
 			if !codec.is_available() {
 				let settings = EncoderSettings {
 					codec,

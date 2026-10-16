@@ -6,11 +6,12 @@ use std::os::raw::{c_int, c_uint};
 use std::ptr;
 
 use aom_sys as aom;
-use bytes::{Bytes, BytesMut};
-use hang::catalog::VideoCodec;
+use bytes::BytesMut;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings, check_size, obu};
-use crate::convert::{I420, Planes, yuv_to_rgb8};
+use super::{
+	DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, obu, rgb8_picture,
+};
+use crate::convert::{I420, Planes};
 use crate::{Error, Result};
 
 /// Speed/quality trade-off of libaom's real-time mode; 9 is fast enough for live video on
@@ -86,7 +87,7 @@ impl Av1Encoder {
 }
 
 impl EncoderBackend for Av1Encoder {
-	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<(Bytes, bool)>> {
+	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		debug_assert_eq!((frame.width() as u32, frame.height() as u32), (self.width, self.height));
 
 		let mut out = BytesMut::new();
@@ -131,12 +132,10 @@ impl EncoderBackend for Av1Encoder {
 			}
 		}
 
-		Ok((!out.is_empty()).then(|| (out.freeze(), keyframe)))
-	}
-
-	/// `av01.P.LLT.DD`, read from the keyframe's sequence header.
-	fn catalog_codec(&self, keyframe: &[u8]) -> VideoCodec {
-		obu::catalog_codec(keyframe)
+		Ok((!out.is_empty()).then(|| EncodedChunk {
+			data: out.freeze(),
+			keyframe,
+		}))
 	}
 }
 
@@ -159,7 +158,7 @@ impl Av1Decoder {
 	pub fn new() -> Result<Self> {
 		unsafe {
 			let cfg = aom::aom_codec_dec_cfg_t {
-				threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32),
+				threads: default_threads(),
 				w: 0,
 				h: 0,
 				// Output 8-bit streams as 8-bit images even when libaom is built for high bit depth.
@@ -207,21 +206,13 @@ impl DecoderBackend for Av1Decoder {
 				)));
 			}
 
-			check_size(img.d_w, img.d_h, max_pixels)?;
-			let (width, height) = (img.d_w as usize, img.d_h as usize);
-			let ch = height.div_ceil(2);
-			let plane = |i: usize, rows: usize| {
-				let stride = img.stride[i] as usize;
-				(std::slice::from_raw_parts(img.planes[i], stride * rows), stride)
-			};
-			let planes = Planes {
-				width,
-				height,
-				y: plane(0, height),
-				u: plane(1, ch),
-				v: plane(2, ch),
-			};
-			Ok(Some((width as u32, height as u32, yuv_to_rgb8(&planes))))
+			let planes = Planes::from_raw(
+				img.d_w as usize,
+				img.d_h as usize,
+				std::array::from_fn(|i| img.planes[i].cast_const()),
+				std::array::from_fn(|i| img.stride[i] as usize),
+			);
+			Ok(Some(rgb8_picture(&planes, max_pixels)?))
 		}
 	}
 }

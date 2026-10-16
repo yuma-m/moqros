@@ -183,6 +183,32 @@ pub struct Planes<'a> {
 	pub v: (&'a [u8], usize),
 }
 
+impl<'a> Planes<'a> {
+	/// Planes of a `width`x`height` picture in a decoder-owned buffer.
+	///
+	/// # Safety
+	///
+	/// Each pointer must be valid for reads of its stride times its rows (`height` for luma,
+	/// half of it rounded up for chroma) for `'a`.
+	pub(crate) unsafe fn from_raw(width: usize, height: usize, planes: [*const u8; 3], strides: [usize; 3]) -> Self {
+		let rows = [height, height.div_ceil(2), height.div_ceil(2)];
+		// SAFETY: the caller vouches for every plane.
+		let plane = |i: usize| {
+			(
+				unsafe { std::slice::from_raw_parts(planes[i], strides[i] * rows[i]) },
+				strides[i],
+			)
+		};
+		Self {
+			width,
+			height,
+			y: plane(0),
+			u: plane(1),
+			v: plane(2),
+		}
+	}
+}
+
 /// Convert planar 4:2:0 into packed `rgb8`.
 pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
 	let (width, height) = (src.width, src.height);

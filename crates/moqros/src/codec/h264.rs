@@ -8,8 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use bytes::Bytes;
-use hang::catalog::VideoCodec;
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::encoder::{
@@ -18,8 +16,8 @@ use openh264::encoder::{
 };
 use openh264::formats::YUVSource;
 
-use super::{DecoderBackend, EncoderBackend, EncoderSettings, check_size, h264_catalog_codec};
-use crate::convert::{I420, Planes, yuv_to_rgb8};
+use super::{DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, rgb8_picture};
+use crate::convert::{I420, Planes};
 use crate::{Error, Result};
 
 /// Environment variable naming Cisco's OpenH264 shared library.
@@ -100,7 +98,7 @@ impl H264Encoder {
 }
 
 impl EncoderBackend for H264Encoder {
-	fn encode(&mut self, frame: &I420, _pts: u64, force_keyframe: bool) -> Result<Option<(Bytes, bool)>> {
+	fn encode(&mut self, frame: &I420, _pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		if force_keyframe {
 			self.inner.force_intra_frame();
 		}
@@ -113,11 +111,10 @@ impl EncoderBackend for H264Encoder {
 			FrameType::Skip | FrameType::Invalid => return Ok(None),
 		};
 		let data = bitstream.to_vec();
-		Ok((!data.is_empty()).then(|| (data.into(), keyframe)))
-	}
-
-	fn catalog_codec(&self, keyframe: &[u8]) -> VideoCodec {
-		h264_catalog_codec(keyframe)
+		Ok((!data.is_empty()).then(|| EncodedChunk {
+			data: data.into(),
+			keyframe,
+		}))
 	}
 }
 
@@ -139,7 +136,6 @@ impl DecoderBackend for H264Decoder {
 			return Ok(None);
 		};
 		let (width, height) = yuv.dimensions();
-		check_size(width as u32, height as u32, max_pixels)?;
 		let (ys, us, vs) = yuv.strides();
 		let planes = Planes {
 			width,
@@ -148,7 +144,7 @@ impl DecoderBackend for H264Decoder {
 			u: (yuv.u(), us),
 			v: (yuv.v(), vs),
 		};
-		Ok(Some((width as u32, height as u32, yuv_to_rgb8(&planes))))
+		Ok(Some(rgb8_picture(&planes, max_pixels)?))
 	}
 }
 
