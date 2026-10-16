@@ -640,13 +640,13 @@ fn spawn_sub_broadcast(
 	broadcast: &SubBroadcast,
 	qos: QosProfile,
 ) -> moqros::Result<SubBridge> {
-	let bridge = ready.spawn(
-		node,
-		&broadcast.topic,
+	let target = moqros::ros::RosTarget {
+		topic: broadcast.topic.clone(),
 		qos,
-		&broadcast.frame_id,
-		broadcast.ros_type.as_deref(),
-	)?;
+		frame_id: broadcast.frame_id.clone(),
+		ros_type: broadcast.ros_type.clone(),
+	};
+	let bridge = ready.spawn(node, target)?;
 	tracing::info!(
 		broadcast = broadcast.broadcast,
 		topic = broadcast.topic,
