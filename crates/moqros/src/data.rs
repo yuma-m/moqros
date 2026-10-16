@@ -13,8 +13,7 @@ use bytes::Bytes;
 use hang::catalog::{BinaryConfig, Catalog, JsonConfig, Mode, PRIORITY};
 use hang::moq_net;
 
-use crate::publisher::GroupBudget;
-use crate::subscriber::GroupReader;
+use crate::track::{BroadcastWriter, GroupReader, GroupWriter};
 use crate::{Error, Result};
 
 /// Name of the single data track inside every moqros data broadcast.
@@ -176,15 +175,10 @@ impl DataSettings {
 
 /// Writes messages into one MoQ data broadcast.
 pub struct DataPublisher {
-	name: String,
 	settings: DataSettings,
-	broadcast: moq_net::broadcast::Producer,
-	_catalog: moq_net::track::Producer,
-	track: moq_net::track::Producer,
-	/// The open group of a [`DataMode::Stream`] track.
-	group: Option<moq_net::group::Producer>,
-	/// What [`Self::group`] has used of moq-net's per-group limits.
-	budget: GroupBudget,
+	// Declared before `broadcast`, so the open group is finished before the broadcast closes.
+	track: GroupWriter,
+	broadcast: BroadcastWriter,
 }
 
 impl DataPublisher {
@@ -192,14 +186,9 @@ impl DataPublisher {
 		let mut catalog = Catalog::<()>::default();
 		settings.insert_into(&mut catalog)?;
 
-		let broadcast = origin.create_broadcast(name)?;
-		broadcast.announce(Default::default())?;
-		let catalog_track = broadcast.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())?;
+		let mut broadcast = BroadcastWriter::create(origin, name)?;
 		let track = broadcast.create_track(DATA_TRACK, moq_net::track::Info::default().with_priority(PRIORITY.text))?;
-
-		let mut group = catalog_track.append_group()?;
-		group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
-		group.finish()?;
+		broadcast.publish_catalog(&catalog)?;
 		tracing::info!(
 			broadcast = name,
 			format = %settings.format,
@@ -209,19 +198,15 @@ impl DataPublisher {
 		);
 
 		Ok(Self {
-			name: name.to_string(),
 			settings,
+			track: GroupWriter::new(track),
 			broadcast,
-			_catalog: catalog_track,
-			track,
-			group: None,
-			budget: GroupBudget::default(),
 		})
 	}
 
 	/// Broadcast name, relative to the relay URL.
 	pub fn name(&self) -> &str {
-		&self.name
+		self.broadcast.name()
 	}
 
 	pub fn settings(&self) -> &DataSettings {
@@ -234,38 +219,17 @@ impl DataPublisher {
 		let timestamp = moq_net::Timestamp::now();
 		match self.settings.mode {
 			DataMode::Snapshot => {
-				let mut group = self.track.append_group()?;
-				group.write_frame(timestamp, payload)?;
-				group.finish()?;
+				self.track.write_frame(timestamp, payload)?;
+				self.track.finish_group()?;
 			}
 			DataMode::Stream => {
-				let size = payload.len();
-				if !self.budget.fits(size)
-					&& let Some(group) = self.group.take()
-				{
-					group.finish()?;
+				if !self.track.fits(payload.len()) {
+					self.track.finish_group()?;
 				}
-				let group = match &mut self.group {
-					Some(group) => group,
-					None => {
-						self.budget = GroupBudget::default();
-						self.group.insert(self.track.append_group()?)
-					}
-				};
-				group.write_frame(timestamp, payload)?;
-				self.budget.add(size);
+				self.track.write_frame(timestamp, payload)?;
 			}
 		}
 		Ok(())
-	}
-}
-
-impl Drop for DataPublisher {
-	fn drop(&mut self) {
-		if let Some(group) = self.group.take() {
-			let _ = group.finish();
-		}
-		self.broadcast.close();
 	}
 }
 

@@ -8,6 +8,7 @@ use hang::moq_net;
 
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSettings, DataSubscriber};
+use crate::track::{GroupReader, RouteWatch};
 use crate::{ClientConfig, Error, Image, Result, Session};
 
 /// A connection to a relay used to consume image and data broadcasts.
@@ -99,10 +100,7 @@ impl Subscriber {
 		let broadcast = consumer.request_broadcast(name).await?;
 		let mut catalog = Catalog::<()>::subscribe(&broadcast).await?;
 		let catalog = catalog.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
-		let route = RouteWatch {
-			announced,
-			name: name.to_string(),
-		};
+		let route = RouteWatch::new(announced, name);
 		Ok((broadcast, catalog, route))
 	}
 }
@@ -193,138 +191,6 @@ impl Kind {
 pub enum Subscription {
 	Images(ImageSubscriber),
 	Data(DataSubscriber),
-}
-
-/// Watches the announcement of one subscribed broadcast.
-///
-/// A relay doesn't end a subscription when the broadcast's publisher retracts it: the track
-/// just goes quiet. Nor does it move the subscription when another publisher of the same name
-/// takes over. So a subscription ends on any change to the broadcast's route, and the caller
-/// resubscribes to whatever serves the name next.
-///
-/// That includes [`Updated`](moq_net::announce::Kind::Updated), though moq-net delivers a
-/// re-priced route in place: a takeover by another publisher also arrives as `Updated` (the path
-/// stays covered throughout), and it can't be told apart from a mere re-pricing. Route changes
-/// are rare, so an occasional needless resubscribe is the cheaper mistake.
-pub(crate) struct RouteWatch {
-	announced: moq_net::announce::Consumer,
-	name: String,
-}
-
-impl RouteWatch {
-	/// Resolves on the next update to this broadcast's announcement: retracted, re-announced,
-	/// or re-routed. Never resolves once the origin closes; the track ends then anyway.
-	async fn changed(&mut self) -> moq_net::announce::Kind {
-		while let Some(update) = self.announced.next().await {
-			if update.prefix.as_str() == self.name {
-				return update.kind;
-			}
-		}
-		std::future::pending().await
-	}
-}
-
-/// Reads the frames of one track, group after group, until the track ends or its broadcast's
-/// route changes.
-pub(crate) struct GroupReader {
-	frames: Frames,
-	route: RouteWatch,
-	ended: bool,
-}
-
-impl GroupReader {
-	async fn subscribe(
-		broadcast: &moq_net::broadcast::Consumer,
-		track: &str,
-		skip: bool,
-		route: RouteWatch,
-	) -> Result<Self> {
-		let track = broadcast
-			.track(track)?
-			.subscribe(moq_net::track::Subscription::default())
-			.await?
-			.ordered();
-		Ok(Self {
-			frames: Frames {
-				track,
-				group: None,
-				skip,
-			},
-			route,
-			ended: false,
-		})
-	}
-
-	/// Next frame, or `None` once the track ends or the broadcast's route changes.
-	pub(crate) async fn next_frame(&mut self) -> Result<Option<moq_net::frame::Frame>> {
-		if self.ended {
-			return Ok(None);
-		}
-		tokio::select! {
-			// Frames first: whatever arrived before the route changed (e.g. a last stop command
-			// sent just before the retraction) is still delivered.
-			biased;
-			frame = self.frames.next() => {
-				let frame = frame?;
-				self.ended = frame.is_none();
-				Ok(frame)
-			}
-			kind = self.route.changed() => {
-				tracing::info!(broadcast = self.route.name, ?kind, "broadcast announcement changed, ending the subscription");
-				self.ended = true;
-				Ok(None)
-			}
-		}
-	}
-}
-
-/// The frames of one track, group after group.
-struct Frames {
-	track: moq_net::track::Ordered,
-	group: Option<moq_net::group::Consumer>,
-	/// Jump to a newer group as soon as one arrives, dropping the rest of the current one.
-	skip: bool,
-}
-
-impl Frames {
-	/// Next frame, or `None` once the track ends.
-	async fn next(&mut self) -> Result<Option<moq_net::frame::Frame>> {
-		loop {
-			let Some(group) = self.group.as_mut() else {
-				match self.track.next_group().await? {
-					Some(group) => self.group = Some(group),
-					None => return Ok(None),
-				}
-				continue;
-			};
-
-			let frame = if self.skip {
-				tokio::select! {
-					biased;
-					// A newer group starts with a keyframe (or a complete message), so the rest of
-					// this one can go.
-					next = self.track.next_group() => {
-						match next? {
-							Some(group) => self.group = Some(group),
-							None => return Ok(None),
-						}
-						continue;
-					}
-					frame = group.read_frame() => frame,
-				}
-			} else {
-				group.read_frame().await
-			};
-			match frame {
-				Ok(Some(frame)) => return Ok(Some(frame)),
-				Ok(None) => self.group = None,
-				Err(err) => {
-					tracing::debug!(%err, "group ended early, waiting for the next one");
-					self.group = None;
-				}
-			}
-		}
-	}
 }
 
 /// One encoded video frame received from a broadcast.
