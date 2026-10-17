@@ -1,11 +1,51 @@
 import type { Broadcast } from "@moq/watch";
-import { useMemo, useState } from "react";
+import { Component as ReactComponent, type ReactNode, useMemo, useState } from "react";
 import type { DataTrack } from "../moq/classify";
 import { useDataTrack } from "../moq/useDataTrack";
 import { Panel } from "./Panel";
 import { renderersFor } from "./renderers";
+import type { Renderer } from "./renderers/registry";
 
 const decoder = new TextDecoder();
+
+interface BoundaryProps {
+	/** The message being rendered; a new one clears a failure. */
+	payload: Uint8Array;
+	/** The renderer; switching to another one clears a failure. */
+	view: Renderer;
+	children: ReactNode;
+}
+
+interface BoundaryState {
+	failed: boolean;
+	message?: string;
+	payload: Uint8Array;
+	view: Renderer;
+}
+
+/**
+ * Keeps a renderer that throws on a message (which comes from whoever publishes the broadcast)
+ * from unmounting the whole app: only this panel's body shows the failure. The next message,
+ * or another view, tries again.
+ */
+class RendererBoundary extends ReactComponent<BoundaryProps, BoundaryState> {
+	state: BoundaryState = { failed: false, payload: this.props.payload, view: this.props.view };
+
+	static getDerivedStateFromError(error: unknown): Partial<BoundaryState> {
+		return { failed: true, message: error instanceof Error && typeof error.message === "string" ? error.message : undefined };
+	}
+
+	static getDerivedStateFromProps(props: BoundaryProps, state: BoundaryState): Partial<BoundaryState> | null {
+		if (props.payload === state.payload && props.view === state.view) return null;
+		return { failed: false, message: undefined, payload: props.payload, view: props.view };
+	}
+
+	render() {
+		if (!this.state.failed) return this.props.children;
+		const detail = this.state.message ? `: ${this.state.message}` : "";
+		return <div className="hint">this view failed to render the message{detail}</div>;
+	}
+}
 
 /** Shows the newest message of one moqros data broadcast with a renderer picked by ROS type. */
 export function DataPanel(props: { name: string; broadcast: Broadcast; track: DataTrack; onClose: () => void }) {
@@ -58,13 +98,15 @@ export function DataPanel(props: { name: string; broadcast: Broadcast; track: Da
 				{parsed.error ? (
 					<div className="hint">{parsed.error}</div>
 				) : state.payload && state.received !== undefined && Component ? (
-					<Component
-						name={name}
-						track={track}
-						payload={state.payload}
-						message={parsed.message}
-						received={state.received}
-					/>
+					<RendererBoundary payload={state.payload} view={Component}>
+						<Component
+							name={name}
+							track={track}
+							payload={state.payload}
+							message={parsed.message}
+							received={state.received}
+						/>
+					</RendererBoundary>
 				) : (
 					<div className="hint">waiting for a message…</div>
 				)}

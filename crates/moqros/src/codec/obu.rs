@@ -12,22 +12,28 @@ const OBU_FRAME: u8 = 6;
 /// Iterate the `(type, payload)` of each OBU in a temporal unit, stopping at the first malformed one.
 fn obus(mut data: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
 	std::iter::from_fn(move || {
-		let (&header, rest) = data.split_first()?;
-		let obu_type = (header >> 3) & 0xf;
-		let has_extension = header & 0x04 != 0;
-		let has_size = header & 0x02 != 0;
-		let rest = if has_extension { rest.get(1..)? } else { rest };
-		let (payload, rest) = if has_size {
-			let (size, used) = leb128(rest)?;
-			let rest = &rest[used..];
-			let size = usize::try_from(size).ok().filter(|s| *s <= rest.len())?;
-			rest.split_at(size)
-		} else {
-			(rest, &[][..])
-		};
+		let (obu_type, payload, rest) = split_obu(data)?;
 		data = rest;
 		Some((obu_type, payload))
 	})
+}
+
+/// Split the first OBU off `data` into its type, its payload and the bytes after it.
+fn split_obu(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+	let (&header, rest) = data.split_first()?;
+	let obu_type = (header >> 3) & 0xf;
+	let has_extension = header & 0x04 != 0;
+	let has_size = header & 0x02 != 0;
+	let rest = if has_extension { rest.get(1..)? } else { rest };
+	let (payload, rest) = if has_size {
+		let (size, used) = leb128(rest)?;
+		let rest = &rest[used..];
+		let size = usize::try_from(size).ok().filter(|s| *s <= rest.len())?;
+		rest.split_at(size)
+	} else {
+		(rest, &[][..])
+	};
+	Some((obu_type, payload, rest))
 }
 
 /// Decode an unsigned LEB128 value (at most 8 bytes), returning it and the bytes it used.
@@ -47,6 +53,25 @@ pub(crate) fn sequence_header(data: &[u8]) -> Option<SequenceHeader> {
 	obus(data)
 		.find(|(t, _)| *t == OBU_SEQUENCE_HEADER)
 		.and_then(|(_, payload)| SequenceHeader::parse(payload))
+}
+
+/// Every sequence header in a temporal unit, in order, with `None` for one that doesn't parse.
+///
+/// A decoder applies each sequence header it meets, so bounding the picture size it allocates
+/// for takes all of them, not just the first. libaom also carries on past zero bytes between
+/// OBUs (it allows them after each frame), so these are skipped rather than ending the search.
+#[cfg_attr(not(feature = "av1"), allow(dead_code))]
+pub(crate) fn sequence_headers(mut data: &[u8]) -> impl Iterator<Item = Option<SequenceHeader>> {
+	std::iter::from_fn(move || {
+		loop {
+			let padding = data.iter().take_while(|&&b| b == 0).count();
+			let (obu_type, payload, rest) = split_obu(&data[padding..])?;
+			data = rest;
+			if obu_type == OBU_SEQUENCE_HEADER {
+				return Some(SequenceHeader::parse(payload));
+			}
+		}
+	})
 }
 
 /// Catalog description (`av01.P.LLT.DD`) of a keyframe, read from its sequence header, falling
@@ -377,6 +402,19 @@ pub(crate) mod tests {
 		for len in 0..payload.len() - 1 {
 			assert_eq!(SequenceHeader::parse(&payload[..len]), None, "{len} bytes");
 		}
+	}
+
+	#[test]
+	fn finds_every_sequence_header() {
+		let header = |width, height| SequenceHeader::parse(&sequence_header_payload(0, 8, width, height));
+		let mut data = temporal_unit(0, true);
+		// Zero padding after a frame, then a second sequence header and an unreadable one.
+		data.extend([0, 0]);
+		data.extend(obu(OBU_SEQUENCE_HEADER, &sequence_header_payload(0, 8, 16384, 16384)));
+		data.extend(obu(OBU_SEQUENCE_HEADER, &[0x00]));
+		let headers: Vec<_> = sequence_headers(&data).collect();
+		assert_eq!(headers, vec![header(640, 480), header(16384, 16384), None]);
+		assert_eq!(sequence_headers(&temporal_unit(0, false)).count(), 0);
 	}
 
 	#[test]

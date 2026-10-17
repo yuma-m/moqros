@@ -115,7 +115,9 @@ async fn images(
 	let (track, config, codec) = catalog::select_video(catalog, name)?;
 	tracing::info!(
 		broadcast = name,
-		track = %track,
+		// The track name comes from the remote catalog: record it as a str (quoted
+		// and escaped), not with `%`, so control characters can't forge log lines.
+		track,
 		codec = %config.codec,
 		width = ?config.coded_width,
 		height = ?config.coded_height,
