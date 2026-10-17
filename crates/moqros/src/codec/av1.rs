@@ -182,8 +182,11 @@ impl Av1Decoder {
 
 impl DecoderBackend for Av1Decoder {
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
-		// Check before libaom allocates frame buffers for the declared size.
-		if let Some(header) = obu::sequence_header(data) {
+		// Check before libaom allocates frame buffers for the declared size. libaom applies every
+		// sequence header in the temporal unit, so check each one, and refuse one that can't be
+		// read rather than let libaom size frames from it unchecked.
+		for header in obu::sequence_headers(data) {
+			let header = header.ok_or_else(|| Error::Codec("malformed AV1 sequence header".into()))?;
 			check_size(header.max_width, header.max_height, max_pixels)?;
 		}
 		unsafe {
@@ -304,6 +307,28 @@ mod tests {
 				..
 			})
 		));
+	}
+
+	/// A later sequence header in the same temporal unit is checked too, even past zero padding.
+	#[test]
+	fn rejects_oversized_later_sequence_headers() {
+		let small = obu(1, &sequence_header_payload(0, 8, 64, 48));
+		let large = obu(1, &sequence_header_payload(0, 8, 65536, 65536));
+		for padding in [0, 2] {
+			let mut data = obu(2, &[]);
+			data.extend(&small);
+			data.resize(data.len() + padding, 0);
+			data.extend(&large);
+			let mut decoder = Decoder::new(Codec::Av1).unwrap();
+			assert!(matches!(
+				decoder.decode(&data, std::time::Duration::ZERO),
+				Err(crate::Error::TooLarge {
+					width: 65536,
+					height: 65536,
+					..
+				})
+			));
+		}
 	}
 
 	#[test]
