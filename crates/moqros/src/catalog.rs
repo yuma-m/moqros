@@ -81,13 +81,20 @@ pub(crate) fn data(settings: &DataSettings) -> Result<Catalog> {
 }
 
 /// The first data track of `catalog` moqros can read, JSON before CDR.
+///
+/// A `rosType` that isn't a ROS message type name counts as missing: whoever announces the
+/// broadcast writes it, and it ends up in errors and logs.
 pub(crate) fn find_data(catalog: &Catalog) -> Option<(String, DataSettings)> {
 	let settings = |format, mode: &Mode, extra: &serde_json::Map<String, serde_json::Value>| {
 		Some(DataSettings {
 			format,
 			// A consumer must ignore a track whose mode it doesn't know.
 			mode: mode_from_catalog(mode)?,
-			ros_type: extra.get(ROS_TYPE_KEY).and_then(|t| t.as_str()).map(String::from),
+			ros_type: extra
+				.get(ROS_TYPE_KEY)
+				.and_then(|t| t.as_str())
+				.filter(|t| is_ros_type(t))
+				.map(String::from),
 		})
 	};
 	let json =
@@ -101,6 +108,16 @@ pub(crate) fn find_data(catalog: &Catalog) -> Option<(String, DataSettings)> {
 		.filter(|(_, config)| config.mime.as_deref() == Some(CDR_MIME))
 		.filter_map(|(track, config)| Some((track.clone(), settings(DataFormat::Cdr, &config.mode, &config.extra)?)));
 	json.chain(cdr).next()
+}
+
+/// Whether `name` looks like a ROS message type, e.g. `sensor_msgs/msg/Imu`: two or three
+/// `/`-separated parts, each a letter followed by letters, digits or underscores.
+fn is_ros_type(name: &str) -> bool {
+	let is_part = |part: &str| {
+		let mut chars = part.chars();
+		chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+	};
+	(2..=3).contains(&name.split('/').count()) && name.split('/').all(is_part)
 }
 
 fn mode_to_catalog(mode: DataMode) -> Mode {
@@ -263,5 +280,35 @@ mod tests {
 			Some(("raw".to_string(), settings(DataFormat::Cdr, DataMode::Stream, None)))
 		);
 		assert_eq!(find_data(&Catalog::default()), None);
+	}
+
+	#[test]
+	fn ignores_malformed_ros_types() {
+		let ros_type = |ros_type: &str| {
+			let catalog = catalog(serde_json::json!({
+				"json": { "tracks": { "data": { "mode": "snapshot", "rosType": ros_type } } },
+			}));
+			find_data(&catalog).unwrap().1.ros_type
+		};
+		for valid in [
+			"std_msgs/msg/String",
+			"sensor_msgs/msg/Imu",
+			"pkg2/action/Fib_FeedbackMessage",
+		] {
+			assert_eq!(ros_type(valid).as_deref(), Some(valid));
+		}
+		for invalid in [
+			"",
+			"String",
+			"std_msgs/msg/String\n2026-10-17T00:00:00Z  INFO moqros_cli: forged",
+			"\x1b]52;c;aGk=\x07std_msgs/msg/String",
+			"std_msgs/msg/String ",
+			"/msg/String",
+			"std_msgs//String",
+			"a/b/c/d",
+			"1pkg/msg/String",
+		] {
+			assert_eq!(ros_type(invalid), None, "{invalid:?}");
+		}
 	}
 }
