@@ -188,26 +188,55 @@ pub struct Planes<'a> {
 impl<'a> Planes<'a> {
 	/// Planes of a `width`x`height` picture in a decoder-owned buffer.
 	///
+	/// Fails for a null plane, or a stride that is negative (a flipped image) or narrower than
+	/// the plane, rather than read outside it.
+	///
 	/// # Safety
 	///
-	/// Each pointer must be valid for reads of its stride times its rows (`height` for luma,
-	/// half of it rounded up for chroma) for `'a`.
-	pub(crate) unsafe fn from_raw(width: usize, height: usize, planes: [*const u8; 3], strides: [usize; 3]) -> Self {
-		let rows = [height, height.div_ceil(2), height.div_ceil(2)];
+	/// Each non-null pointer with a stride of at least its plane's width (`width` for luma, half
+	/// of it rounded up for chroma) must be valid for reads of its rows (`height` for luma, half
+	/// of it rounded up for chroma) for `'a`: the stride times all rows but the last, plus the
+	/// plane's width.
+	pub(crate) unsafe fn from_raw(
+		width: usize,
+		height: usize,
+		planes: [*const u8; 3],
+		strides: [i32; 3],
+	) -> Result<Self, Error> {
+		let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
+		let dims = [
+			(width, height),
+			(chroma_width, chroma_height),
+			(chroma_width, chroma_height),
+		];
 		let plane = |i: usize| {
-			(
-				// SAFETY: the caller vouches for every plane.
-				unsafe { std::slice::from_raw_parts(planes[i], strides[i] * rows[i]) },
-				strides[i],
-			)
+			let (plane_width, rows) = dims[i];
+			let stride = usize::try_from(strides[i])
+				.ok()
+				.filter(|&stride| stride >= plane_width)
+				.ok_or_else(|| Error::Codec(format!("invalid stride {} for a {width}px wide picture", strides[i])))?;
+			if rows == 0 || plane_width == 0 {
+				return Ok((&[][..], stride));
+			}
+			if planes[i].is_null() {
+				return Err(Error::Codec("decoder returned a null plane".into()));
+			}
+			let len = stride
+				.checked_mul(rows - 1)
+				.and_then(|n| n.checked_add(plane_width))
+				.filter(|&len| isize::try_from(len).is_ok())
+				.ok_or_else(|| Error::Codec(format!("{width}x{height} picture overflows memory")))?;
+			// SAFETY: the pointer is non-null and its stride is at least its plane's width, so
+			// the caller vouches that it is valid for `len` bytes.
+			Ok((unsafe { std::slice::from_raw_parts(planes[i], len) }, stride))
 		};
-		Self {
+		Ok(Self {
 			width,
 			height,
-			y: plane(0),
-			u: plane(1),
-			v: plane(2),
-		}
+			y: plane(0)?,
+			u: plane(1)?,
+			v: plane(2)?,
+		})
 	}
 }
 
@@ -444,5 +473,31 @@ mod tests {
 		for row in 0..height {
 			assert_eq!(padded[row * 9..row * 9 + 9], full[row * 12..row * 12 + 9], "row {row}");
 		}
+	}
+
+	/// Decoder planes are bounded by their rows, not by stride times rows.
+	#[test]
+	fn raw_planes() {
+		// 3x3 picture: 2x2 chroma, the last row of each plane without padding.
+		let y = [1u8; 4 * 2 + 3];
+		let c = [2u8; 3 + 2];
+		let ptrs = [y.as_ptr(), c.as_ptr(), c.as_ptr()];
+		// SAFETY: each plane is valid for its rows at these strides.
+		let planes = unsafe { Planes::from_raw(3, 3, ptrs, [4, 3, 3]) }.unwrap();
+		assert_eq!((planes.y.0.len(), planes.u.0.len()), (y.len(), c.len()));
+		assert_eq!(yuv_to_rgb8(&planes).len(), 3 * 3 * 3);
+	}
+
+	#[test]
+	fn raw_planes_reject_invalid_layouts() {
+		let y = [0u8; 16];
+		let ptrs = [y.as_ptr(); 3];
+		for strides in [[-4, 2, 2], [3, 2, 2], [4, 1, 2]] {
+			// SAFETY: invalid strides are rejected before any plane is read.
+			assert!(unsafe { Planes::from_raw(4, 4, ptrs, strides) }.is_err(), "{strides:?}");
+		}
+		let ptrs = [y.as_ptr(), std::ptr::null(), y.as_ptr()];
+		// SAFETY: a null plane is rejected before any plane is read.
+		assert!(unsafe { Planes::from_raw(4, 4, ptrs, [4, 2, 2]) }.is_err());
 	}
 }
