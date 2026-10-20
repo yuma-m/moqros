@@ -17,22 +17,54 @@ use crate::{Error, Result};
 /// -8 is in the range WebRTC uses for desktop-class CPUs.
 const CPU_USED: c_int = -8;
 
+/// An initialised libvpx codec context, destroyed when dropped.
+struct Context(vpx::vpx_codec_ctx_t);
+
+// SAFETY: a libvpx context may be used from any thread as long as it isn't shared;
+// `Context` owns it exclusively and all access goes through `&mut self`.
+unsafe impl Send for Context {}
+
+impl Context {
+	/// Initialise a context with `init`, e.g. `vpx_codec_enc_init_ver`.
+	///
+	/// # Safety
+	///
+	/// `init` must leave the context it is given initialised whenever it returns
+	/// `VPX_CODEC_OK`.
+	unsafe fn new(init: impl FnOnce(*mut vpx::vpx_codec_ctx_t) -> vpx::vpx_codec_err_t) -> Result<Self> {
+		let mut ctx = MaybeUninit::<vpx::vpx_codec_ctx_t>::zeroed();
+		check(init(ctx.as_mut_ptr()), None)?;
+		// SAFETY: `init` succeeded, so the caller vouches that it initialised `ctx`.
+		Ok(Self(unsafe { ctx.assume_init() }))
+	}
+
+	/// Fail with libvpx's error (and this context's detail) unless `err` is `VPX_CODEC_OK`.
+	fn check(&self, err: vpx::vpx_codec_err_t) -> Result<()> {
+		check(err, Some(&self.0))
+	}
+}
+
+impl Drop for Context {
+	fn drop(&mut self) {
+		// SAFETY: the context was initialised in `new` and is not used again.
+		unsafe {
+			vpx::vpx_codec_destroy(&mut self.0);
+		}
+	}
+}
+
 pub(crate) struct Vp8Encoder {
-	ctx: vpx::vpx_codec_ctx_t,
+	ctx: Context,
 	width: u32,
 	height: u32,
 	frame_duration: u64,
 }
 
-// SAFETY: a libvpx context may be used from any thread as long as it isn't shared;
-// `Vp8Encoder` owns it exclusively and all access goes through `&mut self`.
-unsafe impl Send for Vp8Encoder {}
-
 impl Vp8Encoder {
 	#[expect(clippy::cast_possible_wrap, reason = "libvpx's ABI version is a small constant")]
 	pub fn new(settings: &EncoderSettings, width: u32, height: u32) -> Result<Self> {
-		// SAFETY: libvpx initialises `cfg` and `ctx` before they are assumed initialised, and `ctx`
-		// is destroyed if configuring it fails.
+		// SAFETY: libvpx initialises `cfg` before it is assumed initialised, and the context once
+		// `vpx_codec_enc_init_ver` succeeds.
 		unsafe {
 			let iface = vpx::vpx_codec_vp8_cx();
 			let mut cfg = MaybeUninit::<vpx::vpx_codec_enc_cfg_t>::zeroed();
@@ -54,18 +86,15 @@ impl Vp8Encoder {
 			cfg.kf_mode = vpx::vpx_kf_mode::VPX_KF_AUTO;
 			cfg.kf_max_dist = settings.gop_frames();
 
-			let mut ctx = MaybeUninit::<vpx::vpx_codec_ctx_t>::zeroed();
-			check(
-				vpx::vpx_codec_enc_init_ver(ctx.as_mut_ptr(), iface, &cfg, 0, vpx::VPX_ENCODER_ABI_VERSION as c_int),
-				None,
-			)?;
-			let mut ctx = ctx.assume_init();
-
-			let ret = vpx::vpx_codec_control_(&mut ctx, vpx::vp8e_enc_control_id::VP8E_SET_CPUUSED as c_int, CPU_USED);
-			if let Err(err) = check(ret, Some(&ctx)) {
-				vpx::vpx_codec_destroy(&mut ctx);
-				return Err(err);
-			}
+			let mut ctx = Context::new(|ctx| {
+				vpx::vpx_codec_enc_init_ver(ctx, iface, &cfg, 0, vpx::VPX_ENCODER_ABI_VERSION as c_int)
+			})?;
+			let err = vpx::vpx_codec_control_(
+				&mut ctx.0,
+				vpx::vp8e_enc_control_id::VP8E_SET_CPUUSED as c_int,
+				CPU_USED,
+			);
+			ctx.check(err)?;
 
 			Ok(Self {
 				ctx,
@@ -79,10 +108,16 @@ impl Vp8Encoder {
 
 impl EncoderBackend for Vp8Encoder {
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
-		debug_assert_eq!(
-			(frame.width(), frame.height()),
-			(self.width as usize, self.height as usize)
-		);
+		// libvpx reads a whole picture of the configured size from the frame's buffer.
+		if (frame.width(), frame.height()) != (self.width as usize, self.height as usize) {
+			return Err(Error::Codec(format!(
+				"{}x{} frame for a {}x{} encoder",
+				frame.width(),
+				frame.height(),
+				self.width,
+				self.height
+			)));
+		}
 		let pts = i64::try_from(pts).map_err(|_| Error::Codec(format!("timestamp {pts} out of range")))?;
 
 		let mut out = BytesMut::new();
@@ -98,7 +133,7 @@ impl EncoderBackend for Vp8Encoder {
 				self.width,
 				self.height,
 				1,
-				frame.data().as_ptr() as *mut u8,
+				frame.data().as_ptr().cast_mut(),
 			);
 			if wrapped.is_null() {
 				return Err(Error::Codec("vpx_img_wrap failed".into()));
@@ -109,21 +144,19 @@ impl EncoderBackend for Vp8Encoder {
 			} else {
 				0
 			};
-			check(
-				vpx::vpx_codec_encode(
-					&mut self.ctx,
-					wrapped,
-					pts,
-					self.frame_duration as _,
-					flags,
-					vpx::VPX_DL_REALTIME.into(),
-				),
-				Some(&self.ctx),
-			)?;
+			let err = vpx::vpx_codec_encode(
+				&mut self.ctx.0,
+				wrapped,
+				pts,
+				self.frame_duration as _,
+				flags,
+				vpx::VPX_DL_REALTIME.into(),
+			);
+			self.ctx.check(err)?;
 
 			let mut iter: vpx::vpx_codec_iter_t = ptr::null();
 			loop {
-				let pkt = vpx::vpx_codec_get_cx_data(&mut self.ctx, &mut iter);
+				let pkt = vpx::vpx_codec_get_cx_data(&mut self.ctx.0, &mut iter);
 				if pkt.is_null() {
 					break;
 				}
@@ -143,67 +176,50 @@ impl EncoderBackend for Vp8Encoder {
 	}
 }
 
-impl Drop for Vp8Encoder {
-	fn drop(&mut self) {
-		// SAFETY: `ctx` was initialised in `new` and is not used again.
-		unsafe {
-			vpx::vpx_codec_destroy(&mut self.ctx);
-		}
-	}
-}
-
 pub(crate) struct Vp8Decoder {
-	ctx: vpx::vpx_codec_ctx_t,
+	ctx: Context,
 }
-
-// SAFETY: see `Vp8Encoder`.
-unsafe impl Send for Vp8Decoder {}
 
 impl Vp8Decoder {
 	#[expect(clippy::cast_possible_wrap, reason = "libvpx's ABI version is a small constant")]
 	pub fn new() -> Result<Self> {
-		// SAFETY: libvpx initialises `ctx` before it is assumed initialised.
-		unsafe {
-			let cfg = vpx::vpx_codec_dec_cfg_t {
-				threads: default_threads(),
-				w: 0,
-				h: 0,
-			};
-			let mut ctx = MaybeUninit::<vpx::vpx_codec_ctx_t>::zeroed();
-			check(
+		let cfg = vpx::vpx_codec_dec_cfg_t {
+			threads: default_threads(),
+			w: 0,
+			h: 0,
+		};
+		// SAFETY: libvpx initialises the context once `vpx_codec_dec_init_ver` succeeds.
+		let ctx = unsafe {
+			Context::new(|ctx| {
 				vpx::vpx_codec_dec_init_ver(
-					ctx.as_mut_ptr(),
+					ctx,
 					vpx::vpx_codec_vp8_dx(),
 					&cfg,
 					0,
 					vpx::VPX_DECODER_ABI_VERSION as c_int,
-				),
-				None,
-			)?;
-			Ok(Self { ctx: ctx.assume_init() })
-		}
+				)
+			})?
+		};
+		Ok(Self { ctx })
 	}
 }
 
 impl DecoderBackend for Vp8Decoder {
-	#[expect(clippy::cast_sign_loss, reason = "libvpx strides are positive")]
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libvpx allocates frame buffers for the declared size.
 		if let Some((width, height)) = keyframe_size(data) {
 			check_size(width, height, max_pixels)?;
 		}
 		let len = c_uint::try_from(data.len()).map_err(|_| Error::Codec("VP8 frame too large".into()))?;
-		// SAFETY: `data` is valid for `len` bytes, and the returned image is valid (with planes of
-		// its stride times its rows) until the next call into the decoder.
+		// SAFETY: `data` is valid for `len` bytes, and the returned image is valid (with planes covering
+		// its rows at its strides) until the next call into the decoder.
 		unsafe {
-			check(
-				vpx::vpx_codec_decode(&mut self.ctx, data.as_ptr(), len, ptr::null_mut(), 0),
-				Some(&self.ctx),
-			)?;
+			let err = vpx::vpx_codec_decode(&mut self.ctx.0, data.as_ptr(), len, ptr::null_mut(), 0);
+			self.ctx.check(err)?;
 
 			// VP8 has no frame reordering: at most one picture per input frame.
 			let mut iter: vpx::vpx_codec_iter_t = ptr::null();
-			let img = vpx::vpx_codec_get_frame(&mut self.ctx, &mut iter);
+			let img = vpx::vpx_codec_get_frame(&mut self.ctx.0, &mut iter);
 			if img.is_null() {
 				return Ok(None);
 			}
@@ -216,18 +232,9 @@ impl DecoderBackend for Vp8Decoder {
 				img.d_w as usize,
 				img.d_h as usize,
 				std::array::from_fn(|i| img.planes[i].cast_const()),
-				std::array::from_fn(|i| img.stride[i] as usize),
-			);
+				[img.stride[0], img.stride[1], img.stride[2]],
+			)?;
 			Ok(Some(rgb8_picture(&planes, max_pixels)?))
-		}
-	}
-}
-
-impl Drop for Vp8Decoder {
-	fn drop(&mut self) {
-		// SAFETY: `ctx` was initialised in `new` and is not used again.
-		unsafe {
-			vpx::vpx_codec_destroy(&mut self.ctx);
 		}
 	}
 }
@@ -320,6 +327,14 @@ mod tests {
 		let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
 		assert_eq!(super::super::vp8_header::keyframe_size(&frame.data), Some((64, 48)));
 		assert_eq!(super::super::vp8_header::keyframe_size(&[0x11, 0x02, 0x00]), None);
+	}
+
+	/// A frame that doesn't match the configured size is refused, not read out of bounds.
+	#[test]
+	fn encoder_rejects_mismatched_frames() {
+		let mut encoder = super::Vp8Encoder::new(&Default::default(), 64, 48).unwrap();
+		let frame = crate::convert::I420::from_image(&tests::test_pattern(32, 24, 0)).unwrap();
+		assert!(super::super::EncoderBackend::encode(&mut encoder, &frame, 0, false).is_err());
 	}
 
 	#[test]

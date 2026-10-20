@@ -18,16 +18,48 @@ use crate::{Error, Result};
 /// desktop-class CPUs and accepted by every libaom 3.x.
 const CPU_USED: c_int = 9;
 
+/// An initialised libaom codec context, destroyed when dropped.
+struct Context(aom::aom_codec_ctx_t);
+
+// SAFETY: a libaom context may be used from any thread as long as it isn't shared;
+// `Context` owns it exclusively and all access goes through `&mut self`.
+unsafe impl Send for Context {}
+
+impl Context {
+	/// Initialise a context with `init`, e.g. `aom_codec_enc_init_ver`.
+	///
+	/// # Safety
+	///
+	/// `init` must leave the context it is given initialised whenever it returns
+	/// `AOM_CODEC_OK`.
+	unsafe fn new(init: impl FnOnce(*mut aom::aom_codec_ctx_t) -> aom::aom_codec_err_t::Type) -> Result<Self> {
+		let mut ctx = MaybeUninit::<aom::aom_codec_ctx_t>::zeroed();
+		check(init(ctx.as_mut_ptr()), None)?;
+		// SAFETY: `init` succeeded, so the caller vouches that it initialised `ctx`.
+		Ok(Self(unsafe { ctx.assume_init() }))
+	}
+
+	/// Fail with libaom's error (and this context's detail) unless `err` is `AOM_CODEC_OK`.
+	fn check(&self, err: aom::aom_codec_err_t::Type) -> Result<()> {
+		check(err, Some(&self.0))
+	}
+}
+
+impl Drop for Context {
+	fn drop(&mut self) {
+		// SAFETY: the context was initialised in `new` and is not used again.
+		unsafe {
+			aom::aom_codec_destroy(&mut self.0);
+		}
+	}
+}
+
 pub(crate) struct Av1Encoder {
-	ctx: aom::aom_codec_ctx_t,
+	ctx: Context,
 	width: u32,
 	height: u32,
 	frame_duration: u64,
 }
-
-// SAFETY: a libaom context may be used from any thread as long as it isn't shared;
-// `Av1Encoder` owns it exclusively and all access goes through `&mut self`.
-unsafe impl Send for Av1Encoder {}
 
 impl Av1Encoder {
 	#[expect(
@@ -35,8 +67,8 @@ impl Av1Encoder {
 		reason = "libaom's ABI version and the tile column count are small values"
 	)]
 	pub fn new(settings: &EncoderSettings, width: u32, height: u32) -> Result<Self> {
-		// SAFETY: libaom initialises `cfg` and `ctx` before they are assumed initialised, and `ctx`
-		// is destroyed if configuring it fails.
+		// SAFETY: libaom initialises `cfg` before it is assumed initialised, and the context once
+		// `aom_codec_enc_init_ver` succeeds.
 		unsafe {
 			let iface = aom::aom_codec_av1_cx();
 			let mut cfg = MaybeUninit::<aom::aom_codec_enc_cfg_t>::zeroed();
@@ -62,12 +94,9 @@ impl Av1Encoder {
 			cfg.kf_mode = aom::aom_kf_mode::AOM_KF_AUTO;
 			cfg.kf_max_dist = settings.gop_frames();
 
-			let mut ctx = MaybeUninit::<aom::aom_codec_ctx_t>::zeroed();
-			check(
-				aom::aom_codec_enc_init_ver(ctx.as_mut_ptr(), iface, &cfg, 0, aom::AOM_ENCODER_ABI_VERSION as c_int),
-				None,
-			)?;
-			let mut ctx = ctx.assume_init();
+			let mut ctx = Context::new(|ctx| {
+				aom::aom_codec_enc_init_ver(ctx, iface, &cfg, 0, aom::AOM_ENCODER_ABI_VERSION as c_int)
+			})?;
 
 			// Tile columns (log2) let row-based multithreading spread one frame over the threads.
 			let tile_columns = threads.max(1).ilog2().min(2) as c_int;
@@ -76,10 +105,8 @@ impl Av1Encoder {
 				(aom::aome_enc_control_id::AV1E_SET_ROW_MT as c_int, 1),
 				(aom::aome_enc_control_id::AV1E_SET_TILE_COLUMNS as c_int, tile_columns),
 			] {
-				if let Err(err) = check(aom::aom_codec_control(&mut ctx, id, value), Some(&ctx)) {
-					aom::aom_codec_destroy(&mut ctx);
-					return Err(err);
-				}
+				let err = aom::aom_codec_control(&mut ctx.0, id, value);
+				ctx.check(err)?;
 			}
 
 			Ok(Self {
@@ -94,10 +121,16 @@ impl Av1Encoder {
 
 impl EncoderBackend for Av1Encoder {
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
-		debug_assert_eq!(
-			(frame.width(), frame.height()),
-			(self.width as usize, self.height as usize)
-		);
+		// libaom reads a whole picture of the configured size from the frame's buffer.
+		if (frame.width(), frame.height()) != (self.width as usize, self.height as usize) {
+			return Err(Error::Codec(format!(
+				"{}x{} frame for a {}x{} encoder",
+				frame.width(),
+				frame.height(),
+				self.width,
+				self.height
+			)));
+		}
 		let pts = i64::try_from(pts).map_err(|_| Error::Codec(format!("timestamp {pts} out of range")))?;
 
 		let mut out = BytesMut::new();
@@ -113,7 +146,7 @@ impl EncoderBackend for Av1Encoder {
 				self.width,
 				self.height,
 				1,
-				frame.data().as_ptr() as *mut u8,
+				frame.data().as_ptr().cast_mut(),
 			);
 			if wrapped.is_null() {
 				return Err(Error::Codec("aom_img_wrap failed".into()));
@@ -124,14 +157,12 @@ impl EncoderBackend for Av1Encoder {
 			} else {
 				0
 			};
-			check(
-				aom::aom_codec_encode(&mut self.ctx, wrapped, pts, self.frame_duration as _, flags),
-				Some(&self.ctx),
-			)?;
+			let err = aom::aom_codec_encode(&mut self.ctx.0, wrapped, pts, self.frame_duration as _, flags);
+			self.ctx.check(err)?;
 
 			let mut iter: aom::aom_codec_iter_t = ptr::null();
 			loop {
-				let pkt = aom::aom_codec_get_cx_data(&mut self.ctx, &mut iter);
+				let pkt = aom::aom_codec_get_cx_data(&mut self.ctx.0, &mut iter);
 				if pkt.is_null() {
 					break;
 				}
@@ -151,52 +182,37 @@ impl EncoderBackend for Av1Encoder {
 	}
 }
 
-impl Drop for Av1Encoder {
-	fn drop(&mut self) {
-		// SAFETY: `ctx` was initialised in `new` and is not used again.
-		unsafe {
-			aom::aom_codec_destroy(&mut self.ctx);
-		}
-	}
-}
-
 pub(crate) struct Av1Decoder {
-	ctx: aom::aom_codec_ctx_t,
+	ctx: Context,
 }
-
-// SAFETY: see `Av1Encoder`.
-unsafe impl Send for Av1Decoder {}
 
 impl Av1Decoder {
 	#[expect(clippy::cast_possible_wrap, reason = "libaom's ABI version is a small constant")]
 	pub fn new() -> Result<Self> {
-		// SAFETY: libaom initialises `ctx` before it is assumed initialised.
-		unsafe {
-			let cfg = aom::aom_codec_dec_cfg_t {
-				threads: default_threads(),
-				w: 0,
-				h: 0,
-				// Output 8-bit streams as 8-bit images even when libaom is built for high bit depth.
-				allow_lowbitdepth: 1,
-			};
-			let mut ctx = MaybeUninit::<aom::aom_codec_ctx_t>::zeroed();
-			check(
+		let cfg = aom::aom_codec_dec_cfg_t {
+			threads: default_threads(),
+			w: 0,
+			h: 0,
+			// Output 8-bit streams as 8-bit images even when libaom is built for high bit depth.
+			allow_lowbitdepth: 1,
+		};
+		// SAFETY: libaom initialises the context once `aom_codec_dec_init_ver` succeeds.
+		let ctx = unsafe {
+			Context::new(|ctx| {
 				aom::aom_codec_dec_init_ver(
-					ctx.as_mut_ptr(),
+					ctx,
 					aom::aom_codec_av1_dx(),
 					&cfg,
 					0,
 					aom::AOM_DECODER_ABI_VERSION as c_int,
-				),
-				None,
-			)?;
-			Ok(Self { ctx: ctx.assume_init() })
-		}
+				)
+			})?
+		};
+		Ok(Self { ctx })
 	}
 }
 
 impl DecoderBackend for Av1Decoder {
-	#[expect(clippy::cast_sign_loss, reason = "libaom strides are positive")]
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libaom allocates frame buffers for the declared size. libaom applies every
 		// sequence header in the temporal unit, so check each one, and refuse one that can't be
@@ -205,17 +221,15 @@ impl DecoderBackend for Av1Decoder {
 			let header = header.ok_or_else(|| Error::Codec("malformed AV1 sequence header".into()))?;
 			check_size(header.max_width, header.max_height, max_pixels)?;
 		}
-		// SAFETY: `data` is valid for its length, and the returned image is valid (with planes of
-		// its stride times its rows) until the next call into the decoder.
+		// SAFETY: `data` is valid for its length, and the returned image is valid (with planes covering
+		// its rows at its strides) until the next call into the decoder.
 		unsafe {
-			check(
-				aom::aom_codec_decode(&mut self.ctx, data.as_ptr(), data.len(), ptr::null_mut()),
-				Some(&self.ctx),
-			)?;
+			let err = aom::aom_codec_decode(&mut self.ctx.0, data.as_ptr(), data.len(), ptr::null_mut());
+			self.ctx.check(err)?;
 
 			// A temporal unit shows at most one frame.
 			let mut iter: aom::aom_codec_iter_t = ptr::null();
-			let img = aom::aom_codec_get_frame(&mut self.ctx, &mut iter);
+			let img = aom::aom_codec_get_frame(&mut self.ctx.0, &mut iter);
 			if img.is_null() {
 				return Ok(None);
 			}
@@ -231,18 +245,9 @@ impl DecoderBackend for Av1Decoder {
 				img.d_w as usize,
 				img.d_h as usize,
 				std::array::from_fn(|i| img.planes[i].cast_const()),
-				std::array::from_fn(|i| img.stride[i] as usize),
-			);
+				[img.stride[0], img.stride[1], img.stride[2]],
+			)?;
 			Ok(Some(rgb8_picture(&planes, max_pixels)?))
-		}
-	}
-}
-
-impl Drop for Av1Decoder {
-	fn drop(&mut self) {
-		// SAFETY: `ctx` was initialised in `new` and is not used again.
-		unsafe {
-			aom::aom_codec_destroy(&mut self.ctx);
 		}
 	}
 }
@@ -365,6 +370,14 @@ mod tests {
 		// libaom picks the level for the picture size: 3.1 for 720p.
 		let frame = encoder.encode(&tests::test_pattern(1280, 720, 1)).unwrap().unwrap();
 		assert_eq!(frame.codec.to_string(), "av01.0.05M.08");
+	}
+
+	/// A frame that doesn't match the configured size is refused, not read out of bounds.
+	#[test]
+	fn encoder_rejects_mismatched_frames() {
+		let mut encoder = super::Av1Encoder::new(&Default::default(), 64, 48).unwrap();
+		let frame = crate::convert::I420::from_image(&tests::test_pattern(32, 24, 0)).unwrap();
+		assert!(super::super::EncoderBackend::encode(&mut encoder, &frame, 0, false).is_err());
 	}
 
 	#[test]

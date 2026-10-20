@@ -148,12 +148,6 @@ impl DecoderBackend for H264Decoder {
 	}
 }
 
-// SAFETY: OpenH264 encoder/decoder instances are single-threaded objects that may move
-// between threads; the wrappers own them exclusively.
-unsafe impl Send for H264Encoder {}
-// SAFETY: as above.
-unsafe impl Send for H264Decoder {}
-
 /// These tests need Cisco's binary: `OPENH264_LIBRARY=... cargo test --features h264`.
 #[cfg(test)]
 mod tests {
