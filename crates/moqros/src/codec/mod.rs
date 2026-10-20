@@ -162,22 +162,37 @@ impl EncoderSettings {
 	pub(crate) fn threads(&self) -> u32 {
 		match self.threads {
 			0 => default_threads(),
-			n => n as u32,
+			n => u32::from(n),
 		}
 	}
 
 	/// Encoder-internal GOP length, kept longer than our time-based interval so the
 	/// forced keyframe is what normally starts a group.
+	#[expect(
+		clippy::cast_possible_truncation,
+		clippy::cast_sign_loss,
+		reason = "float casts saturate"
+	)]
 	pub(crate) fn gop_frames(&self) -> u32 {
 		(self.max_fps * self.keyframe_interval.as_secs_f32() * 2.0)
 			.ceil()
 			.max(1.0) as u32
 	}
+
+	/// Duration of one frame at `max_fps`, in microseconds.
+	#[expect(
+		clippy::cast_possible_truncation,
+		clippy::cast_sign_loss,
+		reason = "float casts saturate"
+	)]
+	pub(crate) fn frame_duration_micros(&self) -> u64 {
+		(1_000_000.0 / self.max_fps.max(1.0)) as u64
+	}
 }
 
 /// Codec worker threads when none are configured: one per core, at most 4.
 pub(crate) fn default_threads() -> u32 {
-	std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32)
+	std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(4).min(4))
 }
 
 /// One encoded frame.
@@ -216,7 +231,9 @@ pub(crate) trait DecoderBackend: Send {
 /// A decoder's output picture as packed `rgb8` `(width, height, pixels)`, failing with
 /// [`Error::TooLarge`] before converting a picture above `max_pixels`.
 pub(crate) fn rgb8_picture(planes: &Planes<'_>, max_pixels: u64) -> Result<(u32, u32, Vec<u8>)> {
-	let (width, height) = (planes.width as u32, planes.height as u32);
+	// A picture too large for `u32` saturates, and then fails the size check.
+	let dim = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+	let (width, height) = (dim(planes.width), dim(planes.height));
 	check_size(width, height, max_pixels)?;
 	Ok((width, height, yuv_to_rgb8(planes)))
 }
@@ -226,7 +243,7 @@ pub const DEFAULT_MAX_PIXELS: u64 = 7680 * 4320;
 
 /// Fail with [`Error::TooLarge`] if a `width`x`height` picture is above `max` pixels.
 pub(crate) fn check_size(width: u32, height: u32, max: u64) -> Result<()> {
-	if width as u64 * height as u64 > max {
+	if u64::from(width) * u64::from(height) > max {
 		return Err(Error::TooLarge { width, height, max });
 	}
 	Ok(())
@@ -301,6 +318,10 @@ impl Encoder {
 	}
 
 	/// Encode one image. Returns `None` when the encoder dropped the frame.
+	#[expect(
+		clippy::cast_possible_truncation,
+		reason = "I420 dimensions come from `u32` image dimensions"
+	)]
 	pub fn encode(&mut self, image: &Image) -> Result<Option<EncodedFrame>> {
 		let yuv = I420::from_image(image)?;
 		let dims = (yuv.width(), yuv.height());
@@ -316,7 +337,7 @@ impl Encoder {
 		// Codecs want strictly increasing presentation times. Keyframes are scheduled on
 		// the same timeline, so capture clock jumps can't stall or flood them.
 		let pts = self.clock.micros(image.timestamp);
-		let interval = self.settings.keyframe_interval.as_micros() as u64;
+		let interval = u64::try_from(self.settings.keyframe_interval.as_micros()).unwrap_or(u64::MAX);
 		let force = self
 			.last_keyframe
 			.is_none_or(|last| pts.saturating_sub(last) >= interval);
@@ -456,6 +477,10 @@ impl Decoder {
 	}
 }
 
+#[expect(
+	clippy::cast_possible_truncation,
+	reason = "I420 dimensions come from `u32` image dimensions"
+)]
 fn create_software_encoder(
 	settings: &EncoderSettings,
 	(width, height): (usize, usize),
@@ -485,11 +510,12 @@ fn unavailable(codec: Codec) -> Error {
 pub(crate) mod tests {
 	use super::*;
 
+	#[expect(clippy::cast_possible_truncation, reason = "the pattern wraps around")]
 	pub(crate) fn test_pattern(w: u32, h: u32, t: u32) -> Image {
 		let rgb: Vec<u8> = (0..h)
 			.flat_map(|y| (0..w).flat_map(move |x| [((x + t * 4) % 256) as u8, (y % 256) as u8, 100]))
 			.collect();
-		Image::new(w, h, PixelFormat::Rgb8, rgb, Duration::from_millis(t as u64 * 33)).unwrap()
+		Image::new(w, h, PixelFormat::Rgb8, rgb, Duration::from_millis(u64::from(t) * 33)).unwrap()
 	}
 
 	/// Shared checks run against every available codec.
@@ -524,7 +550,7 @@ pub(crate) mod tests {
 					.data
 					.iter()
 					.zip(image.data.iter())
-					.map(|(a, b)| a.abs_diff(*b) as u64)
+					.map(|(a, b)| u64::from(a.abs_diff(*b)))
 					.sum::<u64>() / out.data.len() as u64;
 				assert!(err < 12, "{codec}: mean abs error {err}");
 				decoded += 1;
@@ -572,10 +598,10 @@ pub(crate) mod tests {
 		.into_iter()
 		.enumerate()
 		{
-			let (width, height) = (33, 25);
-			let data = vec![128u8; width * height * format.bytes_per_pixel()];
+			let (width, height) = (33u32, 25u32);
+			let data = vec![128u8; (width * height) as usize * format.bytes_per_pixel()];
 			let timestamp = Duration::from_millis(t as u64 * 33);
-			let image = Image::new(width as u32, height as u32, format, data, timestamp).unwrap();
+			let image = Image::new(width, height, format, data, timestamp).unwrap();
 			encoder.force_keyframe();
 			let frame = encoder
 				.encode(&image)

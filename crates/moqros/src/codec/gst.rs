@@ -231,6 +231,10 @@ impl GstEncoder {
 		self.element
 	}
 
+	#[expect(
+		clippy::cast_possible_truncation,
+		reason = "I420 dimensions come from `u32` image dimensions"
+	)]
 	fn start(candidate: Candidate, settings: &EncoderSettings, (width, height): (usize, usize)) -> Result<Self> {
 		let make = |name: &str| {
 			gst::ElementFactory::make(name)
@@ -384,7 +388,7 @@ impl GstEncoder {
 		force_keyframe: bool,
 		timeout: Duration,
 	) -> Result<Option<Bytes>> {
-		let pts = gst::ClockTime::from_nseconds(pts.as_nanos() as u64);
+		let pts = u64::try_from(pts.as_nanos()).map_or(gst::ClockTime::MAX, gst::ClockTime::from_nseconds);
 		if force_keyframe || std::mem::take(&mut self.resync) {
 			let event = gst_video::UpstreamForceKeyUnitEvent::builder()
 				.all_headers(true)

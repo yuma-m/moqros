@@ -15,7 +15,7 @@ pub fn image_from_ros(msg: RosImage) -> Result<Image> {
 	}
 	let format = msg.encoding.parse()?;
 	let stamp = &msg.header.stamp;
-	let timestamp = Duration::new(stamp.sec.max(0) as u64, stamp.nanosec);
+	let timestamp = Duration::new(u64::try_from(stamp.sec).unwrap_or(0), stamp.nanosec);
 	Image::with_step(msg.width, msg.height, format, msg.step, msg.data, timestamp)
 }
 
@@ -32,11 +32,11 @@ pub fn image_to_ros(image: &Image, header: Header) -> RosImage {
 	}
 }
 
-/// A `builtin_interfaces/Time` for the current wall clock.
+/// A `builtin_interfaces/Time` for the current wall clock, saturating past 2038.
 pub fn now_stamp() -> Time {
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
 	Time {
-		sec: now.as_secs() as i32,
+		sec: i32::try_from(now.as_secs()).unwrap_or(i32::MAX),
 		nanosec: now.subsec_nanos(),
 	}
 }
@@ -46,6 +46,7 @@ mod tests {
 	use super::*;
 	use crate::PixelFormat;
 
+	#[expect(clippy::cast_possible_truncation, reason = "the test data wraps around")]
 	fn ros_image(encoding: &str, width: u32, height: u32, step: u32) -> RosImage {
 		RosImage {
 			header: Header {

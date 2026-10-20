@@ -1,0 +1,46 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run with `cargo deny check`.
+
+[graph]
+# Check every feature, so optional codec / ROS dependencies are covered too.
+all-features = true
+
+[advisories]
+ignore = [
+	# rsa (Marvin attack): only reached through moq-auth, a dev-dependency the relay tests use to sign
+	# throwaway tokens. No fixed release exists.
+	{ id = "RUSTSEC-2023-0071", reason = "dev-only via moq-auth; no fixed rsa release" },
+	# paste is unmaintained: a proc-macro r2r uses at build time. Nothing to upgrade to until r2r drops it.
+	{ id = "RUSTSEC-2024-0436", reason = "build-time proc-macro pulled in by r2r" },
+]
+
+[licenses]
+# Every license must be compatible with distributing moqros as MIT OR Apache-2.0.
+allow = [
+	"0BSD",
+	"Apache-2.0",
+	"Apache-2.0 WITH LLVM-exception",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"CC0-1.0",
+	"CDLA-Permissive-2.0",
+	"ISC",
+	"MIT",
+	"MIT-0",
+	# env-libvpx-sys (file-level copyleft; we only link against it).
+	"MPL-2.0",
+	"Unicode-3.0",
+	"Unlicense",
+	"Zlib",
+]
+
+[bans]
+# Duplicate versions are common across the moq / ROS stacks and not worth failing on.
+multiple-versions = "allow"
+wildcards = "deny"
+# Path dependencies within the workspace have no version requirement to check.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

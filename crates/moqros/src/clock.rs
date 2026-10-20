@@ -27,8 +27,8 @@ impl StreamClock {
 
 		let (anchor, base) = *self.anchor.get_or_insert((capture, 0));
 		let mut micros = match capture.checked_sub(anchor) {
-			Some(ahead) => base + ahead.as_micros() as u64,
-			None => base.saturating_sub((anchor - capture).as_micros() as u64),
+			Some(ahead) => base + saturating_micros(ahead),
+			None => base.saturating_sub(saturating_micros(anchor - capture)),
 		};
 		if let Some(last) = self.last
 			&& micros <= last
@@ -38,6 +38,11 @@ impl StreamClock {
 		self.last = Some(micros);
 		micros
 	}
+}
+
+/// `duration` in microseconds, saturating at `u64::MAX`.
+fn saturating_micros(duration: Duration) -> u64 {
+	u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

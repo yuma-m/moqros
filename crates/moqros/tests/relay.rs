@@ -45,6 +45,7 @@ fn start_relay_with(bin: &str, config: impl AsRef<Path>, port: u16) -> Relay {
 	Relay(child)
 }
 
+#[expect(clippy::cast_possible_truncation, reason = "the pattern wraps around")]
 fn frame(width: u32, height: u32, n: u32) -> Image {
 	let data: Vec<u8> = (0..height)
 		.flat_map(|y| (0..width).flat_map(move |x| [((x + n * 8) % 256) as u8, (y % 256) as u8, 200]))
@@ -54,7 +55,7 @@ fn frame(width: u32, height: u32, n: u32) -> Image {
 		height,
 		PixelFormat::Rgb8,
 		data,
-		Duration::from_millis(n as u64 * 33),
+		Duration::from_millis(u64::from(n) * 33),
 	)
 	.unwrap()
 }

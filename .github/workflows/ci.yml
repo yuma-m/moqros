@@ -77,6 +77,21 @@ jobs:
           export OPENH264_LIBRARY MOQROS_RELAY_BIN
           cargo test -p moqros --features h264,av1,hw
 
+  # Dependency hygiene: advisories, licenses and sources (cargo-deny, see deny.toml) and
+  # dependencies no code uses (cargo-shear).
+  deps:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-shear
+      - run: cargo deny --locked check
+      - run: cargo shear
+
   # Same build docs.rs does: no ROS environment, r2r's `doc-only` bindings.
   docs:
     needs: changes
@@ -164,7 +179,7 @@ jobs:
   # `ros (jazzy)`, so the matrix jobs can't be required checks themselves.
   ci:
     if: always()
-    needs: [changes, core, docs, ros]
+    needs: [changes, core, deps, docs, ros]
     runs-on: ubuntu-24.04
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

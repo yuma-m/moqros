@@ -30,8 +30,8 @@ pub(crate) fn video(frame: &EncodedFrame, settings: &EncoderSettings) -> Result<
 	let mut config = VideoConfig::new(frame.codec.clone());
 	config.coded_width = Some(frame.width);
 	config.coded_height = Some(frame.height);
-	config.bitrate = Some(settings.bitrate as u64);
-	config.framerate = Some(settings.max_fps as f64);
+	config.bitrate = Some(u64::from(settings.bitrate));
+	config.framerate = Some(f64::from(settings.max_fps));
 	config.container = Container::Legacy;
 
 	let mut catalog = Catalog::<()>::default();

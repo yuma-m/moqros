@@ -32,6 +32,9 @@ ros = ["dep:r2r", "dep:futures"]
 # Build docs without a ROS environment (docs.rs). Not for real use.
 doc-only = ["ros", "r2r/doc-only"]
 
+[lints]
+workspace = true
+
 [dependencies]
 aom-sys = { workspace = true, optional = true }
 bytes.workspace = true

@@ -123,13 +123,13 @@ pub(crate) struct SequenceHeader {
 impl SequenceHeader {
 	pub fn parse(payload: &[u8]) -> Option<Self> {
 		let mut r = BitReader::new(payload);
-		let profile = r.bits(3)? as u8;
+		let profile = r.byte(3)?;
 		let _still_picture = r.flag()?;
 		let reduced = r.flag()?;
 
 		let (level, high_tier);
 		if reduced {
-			level = r.bits(5)? as u8;
+			level = r.byte(5)?;
 			high_tier = false;
 		} else {
 			let mut buffer_delay_bits = 0;
@@ -151,7 +151,7 @@ impl SequenceHeader {
 			let mut first = None;
 			for _ in 0..operating_points {
 				let _idc = r.bits(12)?;
-				let level = r.bits(5)? as u8;
+				let level = r.byte(5)?;
 				let tier = level > 7 && r.flag()?;
 				first.get_or_insert((level, tier));
 				if decoder_model_info && r.flag()? {
@@ -274,7 +274,12 @@ impl<'a> BitReader<'a> {
 
 	/// Read `n` (at most 32) bits.
 	fn bits(&mut self, n: u32) -> Option<u32> {
-		(0..n).try_fold(0u32, |acc, _| Some(acc << 1 | self.flag()? as u32))
+		(0..n).try_fold(0u32, |acc, _| Some(acc << 1 | u32::from(self.flag()?)))
+	}
+
+	/// Read `n` (at most 8) bits.
+	fn byte(&mut self, n: u32) -> Option<u8> {
+		u8::try_from(self.bits(n)?).ok()
 	}
 
 	fn skip(&mut self, n: u32) -> Option<()> {
@@ -291,7 +296,7 @@ impl<'a> BitReader<'a> {
 		if leading_zeros >= 32 {
 			return Some(u32::MAX);
 		}
-		Some(self.bits(leading_zeros)? + ((1u64 << leading_zeros) - 1) as u32)
+		Some(self.bits(leading_zeros)? + ((1u32 << leading_zeros) - 1))
 	}
 }
 
@@ -327,7 +332,7 @@ pub(crate) mod tests {
 	/// Wrap a payload in an OBU with a size field.
 	pub(crate) fn obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
 		assert!(payload.len() < 128);
-		let mut out = vec![obu_type << 3 | 0x02, payload.len() as u8];
+		let mut out = vec![obu_type << 3 | 0x02, u8::try_from(payload.len()).unwrap()];
 		out.extend_from_slice(payload);
 		out
 	}

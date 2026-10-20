@@ -195,7 +195,7 @@ impl ImageSubscriber {
 		};
 		let frame = hang::container::Frame::decode(frame.payload)?;
 		Ok(Some(VideoFrame {
-			timestamp: Duration::from_micros(frame.timestamp.as_micros() as u64),
+			timestamp: Duration::from_micros(u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX)),
 			keyframe: self.codec.is_keyframe(&frame.payload),
 			data: frame.payload,
 		}))

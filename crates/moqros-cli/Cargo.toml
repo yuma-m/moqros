@@ -37,6 +37,9 @@ path = "src/bin/moqros-sub.rs"
 name = "moqros-bridge"
 path = "src/bin/moqros-bridge.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

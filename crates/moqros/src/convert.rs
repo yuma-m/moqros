@@ -120,7 +120,7 @@ impl I420 {
 					for dx in 0..2 {
 						let x = cx * 2 + dx;
 						let px = &row[x * bpp..];
-						let (pr, pg, pb) = (px[r] as i32, px[g] as i32, px[b] as i32);
+						let (pr, pg, pb) = (i32::from(px[r]), i32::from(px[g]), i32::from(px[b]));
 						y_plane[(cy * 2 + dy) * width + x] = rgb_to_y(pr, pg, pb);
 						sr += pr;
 						sg += pg;
@@ -134,6 +134,7 @@ impl I420 {
 		}
 	}
 
+	#[expect(clippy::cast_possible_truncation, reason = "the result is in 0..=255")]
 	fn fill_mono(&mut self, image: &Image) {
 		let (width, height) = (self.width, self.height);
 		let (y_plane, u_plane, v_plane) = self.planes_mut();
@@ -141,13 +142,14 @@ impl I420 {
 			let row = image.row(y);
 			let dst = &mut y_plane[y * width..(y + 1) * width];
 			for (d, &s) in dst.iter_mut().zip(row) {
-				*d = (16 + ((s as u32 * 219 + 127) / 255)) as u8;
+				*d = (16 + ((u32::from(s) * 219 + 127) / 255)) as u8;
 			}
 		}
 		u_plane.fill(128);
 		v_plane.fill(128);
 	}
 
+	#[expect(clippy::cast_possible_truncation, reason = "the result is in 0..=255")]
 	fn fill_packed_422(&mut self, image: &Image, [y0, u, y1, v]: [usize; 4]) {
 		let (width, height) = (self.width, self.height);
 		let cw = width / 2;
@@ -162,8 +164,8 @@ impl I420 {
 					let base = (cy * 2 + dy) * width + cx * 2;
 					y_plane[base] = mp[y0];
 					y_plane[base + 1] = mp[y1];
-					su += mp[u] as u32;
-					sv += mp[v] as u32;
+					su += u32::from(mp[u]);
+					sv += u32::from(mp[v]);
 				}
 				u_plane[cy * cw + cx] = su.div_ceil(2) as u8;
 				v_plane[cy * cw + cx] = sv.div_ceil(2) as u8;
@@ -192,9 +194,9 @@ impl<'a> Planes<'a> {
 	/// half of it rounded up for chroma) for `'a`.
 	pub(crate) unsafe fn from_raw(width: usize, height: usize, planes: [*const u8; 3], strides: [usize; 3]) -> Self {
 		let rows = [height, height.div_ceil(2), height.div_ceil(2)];
-		// SAFETY: the caller vouches for every plane.
 		let plane = |i: usize| {
 			(
+				// SAFETY: the caller vouches for every plane.
 				unsafe { std::slice::from_raw_parts(planes[i], strides[i] * rows[i]) },
 				strides[i],
 			)
@@ -231,11 +233,21 @@ pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
 }
 
 #[inline]
+#[expect(
+	clippy::cast_possible_truncation,
+	clippy::cast_sign_loss,
+	reason = "the result is in 0..=255"
+)]
 fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
 	(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8
 }
 
 #[inline]
+#[expect(
+	clippy::cast_possible_truncation,
+	clippy::cast_sign_loss,
+	reason = "the result is in 0..=255"
+)]
 fn rgb_to_uv(r: i32, g: i32, b: i32) -> (u8, u8) {
 	let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
 	let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
@@ -243,10 +255,11 @@ fn rgb_to_uv(r: i32, g: i32, b: i32) -> (u8, u8) {
 }
 
 #[inline]
+#[expect(clippy::cast_sign_loss, reason = "the result is in 0..=255")]
 fn yuv_to_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
-	let c = y as i32 - 16;
-	let d = u as i32 - 128;
-	let e = v as i32 - 128;
+	let c = i32::from(y) - 16;
+	let d = i32::from(u) - 128;
+	let e = i32::from(v) - 128;
 	let clamp = |x: i32| x.clamp(0, 255) as u8;
 	[
 		clamp((298 * c + 409 * e + 128) >> 8),
@@ -267,6 +280,7 @@ mod tests {
 
 	/// A smooth gradient survives RGB -> I420 -> RGB with small error.
 	#[test]
+	#[expect(clippy::cast_possible_truncation, reason = "the gradient fits in a byte")]
 	fn rgb_round_trip() {
 		let (w, h) = (16u32, 8u32);
 		let rgb: Vec<u8> = (0..h)

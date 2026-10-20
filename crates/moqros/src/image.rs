@@ -93,6 +93,7 @@ pub struct Image {
 
 impl Image {
 	/// Create a tightly packed image, validating the buffer length.
+	#[expect(clippy::cast_possible_truncation, reason = "at most 4 bytes per pixel")]
 	pub fn new(
 		width: u32,
 		height: u32,

@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_uint};
 use std::ptr;
 
 use bytes::BytesMut;
@@ -29,7 +29,10 @@ pub(crate) struct Vp8Encoder {
 unsafe impl Send for Vp8Encoder {}
 
 impl Vp8Encoder {
+	#[expect(clippy::cast_possible_wrap, reason = "libvpx's ABI version is a small constant")]
 	pub fn new(settings: &EncoderSettings, width: u32, height: u32) -> Result<Self> {
+		// SAFETY: libvpx initialises `cfg` and `ctx` before they are assumed initialised, and `ctx`
+		// is destroyed if configuring it fails.
 		unsafe {
 			let iface = vpx::vpx_codec_vp8_cx();
 			let mut cfg = MaybeUninit::<vpx::vpx_codec_enc_cfg_t>::zeroed();
@@ -68,7 +71,7 @@ impl Vp8Encoder {
 				ctx,
 				width,
 				height,
-				frame_duration: (1_000_000.0 / settings.max_fps.max(1.0)) as u64,
+				frame_duration: settings.frame_duration_micros(),
 			})
 		}
 	}
@@ -76,10 +79,16 @@ impl Vp8Encoder {
 
 impl EncoderBackend for Vp8Encoder {
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
-		debug_assert_eq!((frame.width() as u32, frame.height() as u32), (self.width, self.height));
+		debug_assert_eq!(
+			(frame.width(), frame.height()),
+			(self.width as usize, self.height as usize)
+		);
+		let pts = i64::try_from(pts).map_err(|_| Error::Codec(format!("timestamp {pts} out of range")))?;
 
 		let mut out = BytesMut::new();
 		let mut keyframe = false;
+		// SAFETY: `frame` has the dimensions the encoder was configured with and outlives the
+		// wrapped image; packets are only read until the next call into the encoder.
 		unsafe {
 			let mut img = MaybeUninit::<vpx::vpx_image_t>::zeroed();
 			// libvpx only reads from the wrapped buffer when encoding.
@@ -96,7 +105,7 @@ impl EncoderBackend for Vp8Encoder {
 			}
 
 			let flags = if force_keyframe {
-				vpx::VPX_EFLAG_FORCE_KF as _
+				vpx::VPX_EFLAG_FORCE_KF.into()
 			} else {
 				0
 			};
@@ -104,10 +113,10 @@ impl EncoderBackend for Vp8Encoder {
 				vpx::vpx_codec_encode(
 					&mut self.ctx,
 					wrapped,
-					pts as i64,
+					pts,
 					self.frame_duration as _,
 					flags,
-					vpx::VPX_DL_REALTIME as _,
+					vpx::VPX_DL_REALTIME.into(),
 				),
 				Some(&self.ctx),
 			)?;
@@ -136,6 +145,7 @@ impl EncoderBackend for Vp8Encoder {
 
 impl Drop for Vp8Encoder {
 	fn drop(&mut self) {
+		// SAFETY: `ctx` was initialised in `new` and is not used again.
 		unsafe {
 			vpx::vpx_codec_destroy(&mut self.ctx);
 		}
@@ -150,7 +160,9 @@ pub(crate) struct Vp8Decoder {
 unsafe impl Send for Vp8Decoder {}
 
 impl Vp8Decoder {
+	#[expect(clippy::cast_possible_wrap, reason = "libvpx's ABI version is a small constant")]
 	pub fn new() -> Result<Self> {
+		// SAFETY: libvpx initialises `ctx` before it is assumed initialised.
 		unsafe {
 			let cfg = vpx::vpx_codec_dec_cfg_t {
 				threads: default_threads(),
@@ -174,14 +186,18 @@ impl Vp8Decoder {
 }
 
 impl DecoderBackend for Vp8Decoder {
+	#[expect(clippy::cast_sign_loss, reason = "libvpx strides are positive")]
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libvpx allocates frame buffers for the declared size.
 		if let Some((width, height)) = keyframe_size(data) {
 			check_size(width, height, max_pixels)?;
 		}
+		let len = c_uint::try_from(data.len()).map_err(|_| Error::Codec("VP8 frame too large".into()))?;
+		// SAFETY: `data` is valid for `len` bytes, and the returned image is valid (with planes of
+		// its stride times its rows) until the next call into the decoder.
 		unsafe {
 			check(
-				vpx::vpx_codec_decode(&mut self.ctx, data.as_ptr(), data.len() as _, ptr::null_mut(), 0),
+				vpx::vpx_codec_decode(&mut self.ctx, data.as_ptr(), len, ptr::null_mut(), 0),
 				Some(&self.ctx),
 			)?;
 
@@ -209,6 +225,7 @@ impl DecoderBackend for Vp8Decoder {
 
 impl Drop for Vp8Decoder {
 	fn drop(&mut self) {
+		// SAFETY: `ctx` was initialised in `new` and is not used again.
 		unsafe {
 			vpx::vpx_codec_destroy(&mut self.ctx);
 		}
@@ -219,6 +236,7 @@ fn check(err: vpx::vpx_codec_err_t, ctx: Option<&vpx::vpx_codec_ctx_t>) -> Resul
 	if err == vpx::vpx_codec_err_t::VPX_CODEC_OK {
 		return Ok(());
 	}
+	// SAFETY: libvpx returns static NUL-terminated strings, and `ctx` is a live context.
 	let message = unsafe {
 		let mut message = CStr::from_ptr(vpx::vpx_codec_err_to_string(err))
 			.to_string_lossy()

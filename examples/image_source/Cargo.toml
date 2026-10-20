@@ -10,6 +10,9 @@ publish = false
 name = "image_source"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

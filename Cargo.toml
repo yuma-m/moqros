@@ -10,6 +10,18 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/yuma-m/moqros"
 rust-version = "1.91"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block (FFI into the codec libraries) must explain why it is sound.
+undocumented_unsafe_blocks = "warn"
+# Numeric casts on data from the network must not silently truncate, wrap or lose the sign.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+
 [workspace.dependencies]
 moqros = { path = "crates/moqros", version = "0.6.0" }
 anyhow = "1"
