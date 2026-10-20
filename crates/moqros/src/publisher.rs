@@ -201,7 +201,7 @@ mod tests {
 			..Default::default()
 		});
 		let mut keyframes = 0;
-		for t in 0..moq_net::group::MAX_GROUP_FRAMES as u32 + 100 {
+		for t in 0..u32::try_from(moq_net::group::MAX_GROUP_FRAMES).unwrap() + 100 {
 			publisher
 				.publish(&crate::codec::tests::test_pattern(16, 16, t))
 				.unwrap();

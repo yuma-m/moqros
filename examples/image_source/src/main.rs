@@ -79,12 +79,17 @@ struct VideoSource {
 }
 
 impl VideoSource {
+	#[expect(
+		clippy::cast_possible_truncation,
+		clippy::cast_sign_loss,
+		reason = "float casts saturate"
+	)]
 	fn open(path: &Path, cli: &Cli) -> anyhow::Result<Self> {
 		let (mut width, mut height) = probe(path)?;
 		let mut filters = vec![format!("fps={}", cli.fps)];
 		if let Some(w) = cli.width {
 			// Keep the height even, as H.264 4:2:0 requires.
-			height = ((height as f64 * w as f64 / width as f64 / 2.0).round() as u32) * 2;
+			height = ((f64::from(height) * f64::from(w) / f64::from(width) / 2.0).round() as u32) * 2;
 			width = w & !1;
 			filters.push(format!("scale={width}:{height}"));
 		}

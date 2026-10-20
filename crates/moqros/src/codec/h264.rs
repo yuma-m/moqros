@@ -91,7 +91,7 @@ impl H264Encoder {
 			.max_frame_rate(FrameRate::from_hz(settings.max_fps))
 			.intra_frame_period(IntraFramePeriod::from_num_frames(settings.gop_frames()))
 			.skip_frames(true)
-			.num_threads(settings.threads() as u16);
+			.num_threads(u16::try_from(settings.threads()).unwrap_or(u16::MAX));
 		let inner = Encoder::with_api_config(load_api()?, config).map_err(codec_error)?;
 		Ok(Self { inner })
 	}
@@ -151,6 +151,7 @@ impl DecoderBackend for H264Decoder {
 // SAFETY: OpenH264 encoder/decoder instances are single-threaded objects that may move
 // between threads; the wrappers own them exclusively.
 unsafe impl Send for H264Encoder {}
+// SAFETY: as above.
 unsafe impl Send for H264Decoder {}
 
 /// These tests need Cisco's binary: `OPENH264_LIBRARY=... cargo test --features h264`.

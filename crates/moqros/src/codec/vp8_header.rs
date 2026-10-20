@@ -12,7 +12,7 @@ pub(crate) fn keyframe_size(data: &[u8]) -> Option<(u32, u32)> {
 		return None;
 	}
 	// The top two bits of each are a scaling hint, not part of the size.
-	let dim = |i: usize| (u16::from_le_bytes([data[i], data[i + 1]]) & 0x3fff) as u32;
+	let dim = |i: usize| u32::from(u16::from_le_bytes([data[i], data[i + 1]]) & 0x3fff);
 	Some((dim(6), dim(8)))
 }
 

@@ -30,7 +30,13 @@ pub(crate) struct Av1Encoder {
 unsafe impl Send for Av1Encoder {}
 
 impl Av1Encoder {
+	#[expect(
+		clippy::cast_possible_wrap,
+		reason = "libaom's ABI version and the tile column count are small values"
+	)]
 	pub fn new(settings: &EncoderSettings, width: u32, height: u32) -> Result<Self> {
+		// SAFETY: libaom initialises `cfg` and `ctx` before they are assumed initialised, and `ctx`
+		// is destroyed if configuring it fails.
 		unsafe {
 			let iface = aom::aom_codec_av1_cx();
 			let mut cfg = MaybeUninit::<aom::aom_codec_enc_cfg_t>::zeroed();
@@ -80,7 +86,7 @@ impl Av1Encoder {
 				ctx,
 				width,
 				height,
-				frame_duration: (1_000_000.0 / settings.max_fps.max(1.0)) as u64,
+				frame_duration: settings.frame_duration_micros(),
 			})
 		}
 	}
@@ -88,10 +94,16 @@ impl Av1Encoder {
 
 impl EncoderBackend for Av1Encoder {
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
-		debug_assert_eq!((frame.width() as u32, frame.height() as u32), (self.width, self.height));
+		debug_assert_eq!(
+			(frame.width(), frame.height()),
+			(self.width as usize, self.height as usize)
+		);
+		let pts = i64::try_from(pts).map_err(|_| Error::Codec(format!("timestamp {pts} out of range")))?;
 
 		let mut out = BytesMut::new();
 		let mut keyframe = false;
+		// SAFETY: `frame` has the dimensions the encoder was configured with and outlives the
+		// wrapped image; packets are only read until the next call into the encoder.
 		unsafe {
 			let mut img = MaybeUninit::<aom::aom_image_t>::zeroed();
 			// libaom only reads from the wrapped buffer when encoding.
@@ -108,12 +120,12 @@ impl EncoderBackend for Av1Encoder {
 			}
 
 			let flags = if force_keyframe {
-				aom::AOM_EFLAG_FORCE_KF as aom::aom_enc_frame_flags_t
+				aom::aom_enc_frame_flags_t::from(aom::AOM_EFLAG_FORCE_KF)
 			} else {
 				0
 			};
 			check(
-				aom::aom_codec_encode(&mut self.ctx, wrapped, pts as i64, self.frame_duration as _, flags),
+				aom::aom_codec_encode(&mut self.ctx, wrapped, pts, self.frame_duration as _, flags),
 				Some(&self.ctx),
 			)?;
 
@@ -141,6 +153,7 @@ impl EncoderBackend for Av1Encoder {
 
 impl Drop for Av1Encoder {
 	fn drop(&mut self) {
+		// SAFETY: `ctx` was initialised in `new` and is not used again.
 		unsafe {
 			aom::aom_codec_destroy(&mut self.ctx);
 		}
@@ -155,7 +168,9 @@ pub(crate) struct Av1Decoder {
 unsafe impl Send for Av1Decoder {}
 
 impl Av1Decoder {
+	#[expect(clippy::cast_possible_wrap, reason = "libaom's ABI version is a small constant")]
 	pub fn new() -> Result<Self> {
+		// SAFETY: libaom initialises `ctx` before it is assumed initialised.
 		unsafe {
 			let cfg = aom::aom_codec_dec_cfg_t {
 				threads: default_threads(),
@@ -181,6 +196,7 @@ impl Av1Decoder {
 }
 
 impl DecoderBackend for Av1Decoder {
+	#[expect(clippy::cast_sign_loss, reason = "libaom strides are positive")]
 	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libaom allocates frame buffers for the declared size. libaom applies every
 		// sequence header in the temporal unit, so check each one, and refuse one that can't be
@@ -189,6 +205,8 @@ impl DecoderBackend for Av1Decoder {
 			let header = header.ok_or_else(|| Error::Codec("malformed AV1 sequence header".into()))?;
 			check_size(header.max_width, header.max_height, max_pixels)?;
 		}
+		// SAFETY: `data` is valid for its length, and the returned image is valid (with planes of
+		// its stride times its rows) until the next call into the decoder.
 		unsafe {
 			check(
 				aom::aom_codec_decode(&mut self.ctx, data.as_ptr(), data.len(), ptr::null_mut()),
@@ -222,6 +240,7 @@ impl DecoderBackend for Av1Decoder {
 
 impl Drop for Av1Decoder {
 	fn drop(&mut self) {
+		// SAFETY: `ctx` was initialised in `new` and is not used again.
 		unsafe {
 			aom::aom_codec_destroy(&mut self.ctx);
 		}
@@ -232,6 +251,7 @@ fn check(err: aom::aom_codec_err_t::Type, ctx: Option<&aom::aom_codec_ctx_t>) ->
 	if err == aom::aom_codec_err_t::AOM_CODEC_OK {
 		return Ok(());
 	}
+	// SAFETY: libaom returns static NUL-terminated strings, and `ctx` is a live context.
 	let message = unsafe {
 		let mut message = CStr::from_ptr(aom::aom_codec_err_to_string(err))
 			.to_string_lossy()
