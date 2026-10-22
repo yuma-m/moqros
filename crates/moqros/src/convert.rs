@@ -15,10 +15,12 @@ pub struct I420 {
 }
 
 impl I420 {
+	/// Width in pixels.
 	pub fn width(&self) -> usize {
 		self.width
 	}
 
+	/// Height in pixels.
 	pub fn height(&self) -> usize {
 		self.height
 	}
@@ -28,15 +30,18 @@ impl I420 {
 		&self.data
 	}
 
+	/// The luma plane, `width * height` bytes.
 	pub fn y(&self) -> &[u8] {
 		&self.data[..self.luma_len()]
 	}
 
+	/// The Cb plane, a quarter of the luma plane.
 	pub fn u(&self) -> &[u8] {
 		let (l, c) = (self.luma_len(), self.luma_len() / 4);
 		&self.data[l..l + c]
 	}
 
+	/// The Cr plane, a quarter of the luma plane.
 	pub fn v(&self) -> &[u8] {
 		let (l, c) = (self.luma_len(), self.luma_len() / 4);
 		&self.data[l + c..]
@@ -177,11 +182,15 @@ impl I420 {
 /// Borrowed 4:2:0 planes with arbitrary strides, e.g. a decoder's output picture.
 #[derive(Clone, Copy, Debug)]
 pub struct Planes<'a> {
+	/// Width in pixels.
 	pub width: usize,
+	/// Height in pixels.
 	pub height: usize,
-	/// (plane, stride in bytes)
+	/// Luma plane and its stride in bytes.
 	pub y: (&'a [u8], usize),
+	/// Cb plane and its stride in bytes.
 	pub u: (&'a [u8], usize),
+	/// Cr plane and its stride in bytes.
 	pub v: (&'a [u8], usize),
 }
 

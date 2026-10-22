@@ -17,6 +17,7 @@ use crate::track::{BroadcastWriter, GroupReader, GroupWriter};
 
 /// How each message is serialized on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DataFormat {
 	/// One UTF-8 JSON value per message, readable by any hang consumer (e.g. a browser).
 	Json,
@@ -31,6 +32,7 @@ crate::names::named_enum!(DataFormat, "data format", {
 
 /// How messages map onto MoQ groups.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DataMode {
 	/// Latest value: every message is a group of its own, and a subscriber that falls behind
 	/// skips to the newest one. Suits sensor data and state.
@@ -50,13 +52,16 @@ crate::names::named_enum!(DataMode, "data mode", {
 /// and read back from the catalog by [`DataSubscriber::settings`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataSettings {
+	/// Serialization of each message.
 	pub format: DataFormat,
+	/// How messages map onto MoQ groups.
 	pub mode: DataMode,
 	/// ROS message type, e.g. `sensor_msgs/msg/Imu`.
 	pub ros_type: Option<String>,
 }
 
 impl DataSettings {
+	/// `format` in the default [`DataMode`], without a ROS type.
 	pub fn new(format: DataFormat) -> Self {
 		Self {
 			format,
@@ -100,6 +105,7 @@ impl DataPublisher {
 		self.broadcast.name()
 	}
 
+	/// The settings this track was created with.
 	pub fn settings(&self) -> &DataSettings {
 		&self.settings
 	}
@@ -129,6 +135,7 @@ impl DataPublisher {
 pub struct DataMessage {
 	/// Send time on the publisher's monotonic clock; only differences are meaningful.
 	pub timestamp: Duration,
+	/// The serialized message, in the track's [`DataFormat`].
 	pub payload: Bytes,
 }
 

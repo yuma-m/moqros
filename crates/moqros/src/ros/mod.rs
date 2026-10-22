@@ -68,7 +68,10 @@ pub const ROS_IMAGE_TYPE: &str = "sensor_msgs/msg/Image";
 /// Statistics returned when a bridge stops.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BridgeStats {
+	/// Messages received from the ROS topic.
 	pub received: u64,
+	/// Messages published to the broadcast.
 	pub sent: u64,
+	/// Messages skipped, e.g. images replaced while the encoder was busy.
 	pub dropped: u64,
 }

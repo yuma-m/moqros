@@ -24,6 +24,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+	/// Connect to `url` with TLS verification and no client certificate.
 	pub fn new(url: Url) -> Self {
 		Self {
 			url,

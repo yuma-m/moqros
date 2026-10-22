@@ -35,7 +35,9 @@ pub async fn spawn_moq_to_ros(
 /// The ROS topic [`spawn_moq_to_ros`] republishes a broadcast on.
 #[derive(Debug, Clone)]
 pub struct RosTarget {
+	/// Topic name to publish on.
 	pub topic: String,
+	/// QoS of the ROS publisher.
 	pub qos: QosProfile,
 	/// `header.frame_id` of republished images.
 	pub frame_id: String,
@@ -54,11 +56,13 @@ impl RosTarget {
 		}
 	}
 
+	/// Set [`RosTarget::frame_id`].
 	pub fn with_frame_id(mut self, frame_id: impl Into<String>) -> Self {
 		self.frame_id = frame_id.into();
 		self
 	}
 
+	/// Set [`RosTarget::ros_type`].
 	pub fn with_ros_type(mut self, ros_type: impl Into<String>) -> Self {
 		self.ros_type = Some(ros_type.into());
 		self
