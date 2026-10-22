@@ -88,6 +88,7 @@
 
 // On docs.rs, label feature-gated items with the feature they need.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 
 mod catalog;
 mod client;

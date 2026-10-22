@@ -13,6 +13,7 @@ use crate::Error;
 /// The names mirror the `encoding` strings of `sensor_msgs/Image`
 /// (see `sensor_msgs/image_encodings.hpp`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PixelFormat {
 	/// `rgb8`: 3 bytes per pixel, R G B.
 	Rgb8,
@@ -81,11 +82,15 @@ impl fmt::Display for PixelFormat {
 /// An uncompressed image, equivalent to the payload of a `sensor_msgs/Image`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Image {
+	/// Width in pixels.
 	pub width: u32,
+	/// Height in pixels.
 	pub height: u32,
+	/// Layout of each pixel.
 	pub format: PixelFormat,
 	/// Length of one row in bytes, including any padding.
 	pub step: u32,
+	/// Pixel rows, `step` bytes each.
 	pub data: Bytes,
 	/// Capture time; for ROS images this is `header.stamp` since the epoch.
 	pub timestamp: Duration,

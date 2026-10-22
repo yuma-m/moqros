@@ -36,8 +36,11 @@ pub use h264::set_openh264_library;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Codec {
+	/// VP8 (feature `vp8`, on by default).
 	Vp8,
+	/// H.264 (feature `h264`).
 	H264,
+	/// AV1 (feature `av1`).
 	Av1,
 }
 
@@ -111,6 +114,7 @@ impl Default for Codec {
 /// Intel/AMD GPUs and NVENC (`nvcodec` plugin) on NVIDIA GPUs. Software encoding stays the
 /// fallback, so the codec's own feature is still needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Hardware {
 	/// Always encode in software.
 	Off,
@@ -130,6 +134,7 @@ crate::names::named_enum!(Hardware, "hardware mode", {
 /// Tuning knobs for [`Encoder`].
 #[derive(Debug, Clone)]
 pub struct EncoderSettings {
+	/// Codec to encode with.
 	pub codec: Codec,
 	/// Target bitrate in bits per second.
 	pub bitrate: u32,
@@ -200,9 +205,13 @@ pub(crate) fn default_threads() -> u32 {
 pub struct EncodedFrame {
 	/// VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit (low-overhead OBUs).
 	pub data: Bytes,
+	/// Whether the frame decodes on its own.
 	pub keyframe: bool,
+	/// Picture width in pixels.
 	pub width: u32,
+	/// Picture height in pixels.
 	pub height: u32,
+	/// Timestamp of the encoded [`Image`].
 	pub timestamp: Duration,
 	/// Catalog codec description (for H.264 parsed from the keyframe's SPS, for AV1 from its
 	/// sequence header).
@@ -302,6 +311,7 @@ impl Encoder {
 		})
 	}
 
+	/// The settings this encoder was created with.
 	pub fn settings(&self) -> &EncoderSettings {
 		&self.settings
 	}
@@ -434,6 +444,7 @@ pub struct Decoder {
 }
 
 impl Decoder {
+	/// A decoder for `codec`. Fails if the codec isn't compiled in or can't be loaded.
 	pub fn new(codec: Codec) -> Result<Self> {
 		let inner: Box<dyn DecoderBackend> = match codec {
 			#[cfg(feature = "vp8")]
@@ -452,6 +463,7 @@ impl Decoder {
 		})
 	}
 
+	/// The codec this decoder reads.
 	pub fn codec(&self) -> Codec {
 		self.codec
 	}

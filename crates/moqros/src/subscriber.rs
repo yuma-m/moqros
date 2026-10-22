@@ -153,8 +153,11 @@ async fn data(
 }
 
 /// What [`Subscriber::subscribe`] found in a broadcast.
+#[non_exhaustive]
 pub enum Subscription {
+	/// The broadcast carries decodable video.
 	Images(ImageSubscriber),
+	/// The broadcast carries a data track.
 	Data(DataSubscriber),
 }
 
@@ -163,6 +166,7 @@ pub enum Subscription {
 pub struct VideoFrame {
 	/// Presentation time relative to the start of the broadcast.
 	pub timestamp: Duration,
+	/// Whether the frame decodes on its own.
 	pub keyframe: bool,
 	/// Codec payload (VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit).
 	pub data: Bytes,
