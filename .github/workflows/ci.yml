@@ -179,7 +179,7 @@ jobs:
   # `ros (jazzy)`, so the matrix jobs can't be required checks themselves.
   ci:
     if: always()
-    needs: [changes, core, deps, docs, ros]
+    needs: [changes, core, docs, ros]
     runs-on: ubuntu-24.04
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
