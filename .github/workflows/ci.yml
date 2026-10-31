@@ -30,8 +30,8 @@ jobs:
     outputs:
       code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: dorny/paths-filter@v4.0.3
         id: filter
         with:
           predicate-quantifier: every
@@ -52,11 +52,11 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -77,6 +77,19 @@ jobs:
           export OPENH264_LIBRARY MOQROS_RELAY_BIN
           cargo test -p moqros --features h264,av1,hw
 
+  # .github/workflows/actions.lock covers every action the workflows use and its pins still
+  # verify upstream. Rerun `gh actions-lock` after changing a `uses:` line.
+  lockfile:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: gh extension install github/gh-actions-lock --pin v0.2.0
+      - run: gh actions-lock --verify
+
   # Dependency hygiene: advisories, licenses and sources (cargo-deny, see deny.toml) and
   # dependencies no code uses (cargo-shear).
   deps:
@@ -84,9 +97,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-deny,cargo-shear
       - run: cargo deny --locked check
@@ -98,9 +111,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
       - run: cargo doc -p moqros -p moqros-cli --no-deps --features moqros/h264,moqros/doc-only
@@ -129,13 +142,13 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends curl ca-certificates clang libclang-dev pkg-config python3-pip \
             libaom-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           path: src/moqros
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: src/moqros
           key: ${{ matrix.distro }}
@@ -179,7 +192,7 @@ jobs:
   # `ros (jazzy)`, so the matrix jobs can't be required checks themselves.
   ci:
     if: always()
-    needs: [changes, core, docs, ros]
+    needs: [changes, lockfile, core, docs, ros]
     runs-on: ubuntu-24.04
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

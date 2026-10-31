@@ -1,9 +1,12 @@
 version: 2
+# Every ecosystem waits a few days so fresh releases settle before they're proposed.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       github-actions:
         patterns:
@@ -13,6 +16,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       cargo:
         patterns:
@@ -22,6 +27,8 @@ updates:
     directory: /examples/web
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       npm:
         patterns:
