@@ -8,6 +8,7 @@ workflows:
         - 'dtolnay/rust-toolchain@stable'
     '.github/workflows/ci.yml':
         - 'actions/checkout@v7.0.1'
+        - 'actions/upload-artifact@v7.0.0'
         - 'dorny/paths-filter@v4.0.3'
         - 'dtolnay/rust-toolchain@nightly'
         - 'dtolnay/rust-toolchain@stable'
@@ -38,6 +39,11 @@ dependencies:
         owner_id: 44036562
         repo_id: 189476904
     'actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f':
+        ref: 'v7.0.0'
+        commit: 'sha1-bbbca2ddaa5d8feaa63e36b76fdaad77386f024f'
+        owner_id: 44036562
+        repo_id: 192625955
+    'actions/upload-artifact@v7.0.0':
         ref: 'v7.0.0'
         commit: 'sha1-bbbca2ddaa5d8feaa63e36b76fdaad77386f024f'
         owner_id: 44036562
