@@ -82,8 +82,9 @@ jobs:
           cargo llvm-cov -p moqros --features h264,av1,hw --no-report
       - name: Coverage report
         run: |
-          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+          # --html creates target/llvm-cov/, which --lcov needs to exist.
           cargo llvm-cov report --html
+          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
           {
             echo '## Coverage'
             echo '```'
