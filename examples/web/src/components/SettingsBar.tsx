@@ -15,6 +15,9 @@ export function SettingsBar(props: {
 	const connection = useConnection();
 	const status = useOptionalValue(connection?.status);
 	const error = useOptionalValue(connection?.error);
+	// The reconnect loop reports "disconnected" during each backoff and "connecting" on each
+	// attempt; until it gives up (and sets `error`) it is still trying, so show one steady state.
+	const shown = !connection ? "invalid" : status === "disconnected" && !error ? "connecting" : status;
 
 	const [url, setUrl] = useState(props.url);
 	useEffect(() => setUrl(props.url), [props.url]);
@@ -42,9 +45,9 @@ export function SettingsBar(props: {
 					<input value={url} onChange={(event) => setUrl(event.target.value)} spellCheck={false} />
 				</label>
 				<button type="submit">Connect</button>
-				<span className={`connection connection-${connection ? status : "invalid"}`} title={error?.message}>
-					{connection ? status : "invalid URL"}
-					{error && status !== "connected" ? `: ${error.message}` : ""}
+				<span className={`connection connection-${shown}`} title={error?.message}>
+					{shown === "invalid" ? "invalid URL" : shown}
+					{error && shown !== "connected" ? `: ${error.message}` : ""}
 				</span>
 			</form>
 			<form onSubmit={add}>
