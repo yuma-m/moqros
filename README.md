@@ -398,6 +398,11 @@ cargo test -p moqros
 # Integration test through a real relay:
 cargo install moq-relay
 MOQROS_RELAY_BIN=$(which moq-relay) cargo test -p moqros --test relay
+
+# Code coverage (CI reports it in the `core` job's summary and `coverage` artifact):
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+cargo llvm-cov -p moqros --html  # open target/llvm-cov/html/index.html
 ```
 
 The `ros` feature, `moqros-cli`, and `examples/image_source` need a sourced ROS 2 environment and libclang,

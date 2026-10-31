@@ -46,7 +46,8 @@ jobs:
               - "!examples/web/**"
 
   # ROS-independent core: fmt, clippy, tests (incl. H.264, AV1, the GStreamer backend with software
-  # encoders standing in for hardware ones, and the relay round trip).
+  # encoders standing in for hardware ones, and the relay round trip) with code coverage. The totals
+  # go to the job summary; the HTML report and lcov.info are uploaded as the `coverage` artifact.
   core:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -55,8 +56,11 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2.9.3
+      - uses: taiki-e/install-action@v2.88.1
+        with:
+          tool: cargo-llvm-cov
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -75,7 +79,24 @@ jobs:
           OPENH264_LIBRARY=$(./scripts/fetch_openh264.sh)
           MOQROS_RELAY_BIN=$(command -v moq-relay)
           export OPENH264_LIBRARY MOQROS_RELAY_BIN
-          cargo test -p moqros --features h264,av1,hw
+          cargo llvm-cov -p moqros --features h264,av1,hw --no-report
+      - name: Coverage report
+        run: |
+          cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov report --html
+          {
+            echo '## Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7.0.0
+        with:
+          name: coverage
+          path: |
+            target/llvm-cov/html
+            target/llvm-cov/lcov.info
+          retention-days: 14
 
   # .github/workflows/actions.lock covers every action the workflows use and its pins still
   # verify upstream. Rerun `gh actions-lock` after changing a `uses:` line.
