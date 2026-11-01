@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 documentation = "https://docs.rs/moqros-cli"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["ros2", "moq", "quic", "video", "cli"]
 categories = ["multimedia::video", "command-line-utilities", "science::robotics"]
 

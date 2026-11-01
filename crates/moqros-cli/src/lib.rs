@@ -1,4 +1,9 @@
-//! Shared plumbing for the moqros bridge binaries.
+#![doc = include_str!("../README.md")]
+//!
+//! ## Library
+//!
+//! The library part of this crate is shared plumbing for the bridge binaries, not a stable API.
+//! Use [`moqros`] instead.
 
 mod args;
 mod bridges;
