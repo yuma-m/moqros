@@ -38,7 +38,9 @@ jobs:
           filters: |
             code:
               - "**"
-              - "!**.md"
+              # crates/*/README.md are included in the crate docs.
+              - "!*.md"
+              - "!examples/*/README.md"
               - "!LICENSE-*"
               - "!images/**"
               - "!.dockerignore"

@@ -46,13 +46,18 @@ Only a page that's visible and focused publishes; it retracts the broadcast when
 relay keeps serving the first publisher of a name, so this lets the tab or window in use take over from others
 left open. Bridge the broadcast onto ROS with `moqros-sub` or `moqros-bridge`
 (`--broadcast robot/cmd_vel,topic=/cmd_vel`). The robot should stop on its own when commands stop coming, like the
-[teleop demo](../../README.md#teleop-demo-docker)'s simulator does.
+[teleop demo](../../docker/README.md#teleop-demo)'s simulator does.
 
 ## Relays on other machines
 
 The hosted viewer is served over HTTPS, so the browser only lets it reach an `http://` relay on `localhost`.
 For a relay on another machine, give the relay a real certificate and use an `https://` URL. Some browsers
 ask before a public site may reach a local address.
+
+To sign viewers in, issue them JWTs and add one to the relay URL (`?jwt=…`); see
+[Authentication](../../crates/moqros-cli/README.md#authentication). For a
+[Cloudflare MoQ relay](../../crates/moqros-cli/README.md#cloudflare-moq-relay), use the URL with the
+subscribe-only token.
 
 ## Data renderers
 
@@ -70,7 +75,7 @@ JSON message. Each panel lets you switch between the renderers that match its ty
 
 ## Development
 
-Run the relay and the bridges (e.g. the [Docker sample](../../README.md#end-to-end-sample-docker), without its
+Run the relay and the bridges (e.g. the [Docker sample](../../docker/README.md#end-to-end-sample), without its
 `web` service), then:
 
 ```sh
