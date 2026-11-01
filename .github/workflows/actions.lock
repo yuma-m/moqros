@@ -10,12 +10,12 @@ workflows:
         - 'actions/checkout@v7.0.1'
         - 'actions/upload-artifact@v7.0.2'
         - 'dorny/paths-filter@v4.0.3'
-        - 'dtolnay/rust-toolchain@nightly'
         - 'dtolnay/rust-toolchain@stable'
         - 'swatinem/rust-cache@v2.9.3'
         - 'taiki-e/install-action@v2.88.1'
     '.github/workflows/release.yml':
         - 'actions/checkout@v7.0.1'
+        - 'dtolnay/rust-toolchain@nightly'
         - 'dtolnay/rust-toolchain@stable'
     '.github/workflows/web.yml':
         - 'actions/checkout@v7.0.1'

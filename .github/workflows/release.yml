@@ -44,8 +44,26 @@ jobs:
             echo "release=true" >>"$GITHUB_OUTPUT"
           fi
 
-  tag:
+  # Same build docs.rs does: nightly, `--cfg docsrs`, no ROS environment (r2r's `doc-only`
+  # bindings). Gates the release so a version that won't build on docs.rs isn't published.
+  # A failure caused by a nightly regression can be retried later with "Re-run failed jobs".
+  docs:
     needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
+      - run: cargo doc -p moqros -p moqros-cli --no-deps --features moqros/h264,moqros/doc-only
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  tag:
+    needs: [check, docs]
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-24.04
     permissions:

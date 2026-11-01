@@ -127,20 +127,22 @@ jobs:
       - run: cargo deny --locked check
       - run: cargo shear
 
-  # Same build docs.rs does: no ROS environment, r2r's `doc-only` bindings.
+  # Docs build without a ROS environment (r2r's `doc-only` bindings), on stable so nightly
+  # regressions don't break CI. The exact docs.rs build (nightly, `--cfg docsrs`) runs in
+  # release.yml before publishing.
   docs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.3
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
       - run: cargo doc -p moqros -p moqros-cli --no-deps --features moqros/h264,moqros/doc-only
         env:
-          RUSTDOCFLAGS: --cfg docsrs -D warnings
+          RUSTDOCFLAGS: -D warnings
 
   # Full workspace against a real ROS 2 install, plus the colcon (ament_cargo) package.
   ros:
