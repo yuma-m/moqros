@@ -2,11 +2,13 @@ name: Release
 
 # When a commit on main changes the workspace version (normally the PR opened by
 # bump.yml), tag it, publish moqros and moqros-cli to crates.io and create a
-# GitHub release. If a later job fails, use "Re-run failed jobs".
+# GitHub release. If a later job fails, use "Re-run failed jobs", or, when the fix is a
+# change to this workflow, run it by hand on main.
 on:
   push:
     branches: [main]
     paths: [Cargo.toml]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}
@@ -14,9 +16,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The nightly docs.rs builds with (see "rustc version" on https://docs.rs/crate/<crate>/<version>/builds).
+  # Pinned so a regression in a newer nightly doesn't block a release that docs.rs would build.
+  DOCS_RS_NIGHTLY: nightly-2026-10-29
 
 jobs:
   check:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -44,9 +50,8 @@ jobs:
             echo "release=true" >>"$GITHUB_OUTPUT"
           fi
 
-  # Same build docs.rs does: nightly, `--cfg docsrs`, no ROS environment (r2r's `doc-only`
+  # Same build docs.rs does: its nightly, `--cfg docsrs`, no ROS environment (r2r's `doc-only`
   # bindings). Gates the release so a version that won't build on docs.rs isn't published.
-  # A failure caused by a nightly regression can be retried later with "Re-run failed jobs".
   docs:
     needs: check
     if: needs.check.outputs.release == 'true'
@@ -56,6 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.DOCS_RS_NIGHTLY }}
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvpx-dev libclang-dev pkg-config
       - run: cargo doc -p moqros -p moqros-cli --no-deps --features moqros/h264,moqros/doc-only
