@@ -60,7 +60,7 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.88.1
+      - uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-llvm-cov
       - name: Install system dependencies
@@ -123,7 +123,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2.88.1
+      - uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-deny,cargo-shear
       - run: cargo deny --locked check
