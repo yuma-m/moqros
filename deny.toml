@@ -12,6 +12,9 @@ ignore = [
 	{ id = "RUSTSEC-2023-0071", reason = "dev-only via moq-auth; no fixed rsa release" },
 	# paste is unmaintained: a proc-macro r2r uses at build time. Nothing to upgrade to until r2r drops it.
 	{ id = "RUSTSEC-2024-0436", reason = "build-time proc-macro pulled in by r2r" },
+	# pin-utils is unmaintained: reached only through loom and wasmtimer (moq stack). No replacement
+	# release upstream yet.
+	{ id = "RUSTSEC-2026-0441", reason = "transitive via loom / wasmtimer; no maintained release" },
 ]
 
 [licenses]
