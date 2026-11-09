@@ -8,8 +8,17 @@
 //! - A data broadcast lists one track, [`DATA_TRACK`], in the `json` section ([`DataFormat::Json`])
 //!   or the `binary` section with MIME type [`CDR_MIME`] ([`DataFormat::Cdr`]), plus its
 //!   [`DataMode`] and ROS message type (`rosType`).
+//! - A root `moqros` section ([`MoqrosSection`]) carries what hang's sections have no field for:
+//!   the capture time of timestamp 0 (`captureOrigin`) and the ROS `frameId`. When the capture
+//!   times are wall-clock times since 2020, the capture origin also goes into hang's `clock`.
 
-use hang::catalog::{BinaryConfig, Catalog, Container, JsonConfig, Mode, VideoCodec, VideoConfig};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use hang::catalog::{
+	BinaryConfig, Catalog, Clock, Container, JsonConfig, MOQ_EPOCH_UNIX_MILLIS, Mode, VideoCodec, VideoConfig,
+};
+use hang::moq_net;
+use serde_json::{Map, Value};
 
 use crate::codec::{Codec, EncodedFrame, EncoderSettings};
 use crate::{DataFormat, DataMode, DataSettings, Error, Result};
@@ -25,6 +34,89 @@ pub const CDR_MIME: &str = "application/x-ros2-cdr";
 
 /// Catalog field naming the ROS message type of a data track.
 const ROS_TYPE_KEY: &str = "rosType";
+
+/// The catalog moqros reads and writes: hang's, plus the other root sections, among them
+/// [`MoqrosSection`].
+pub(crate) type MoqrosCatalog = Catalog<Map<String, Value>>;
+
+/// Name of the root section [`MoqrosSection`] lives in.
+const SECTION_KEY: &str = "moqros";
+
+/// Longest `frameId` accepted from a catalog.
+const MAX_FRAME_ID_LEN: usize = 256;
+
+/// The catalog's `moqros` section.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MoqrosSection {
+	/// Capture time of media timestamp 0 in µs, in whatever clock the publisher stamps with
+	/// (see [`StreamClock::origin_micros`](crate::clock::StreamClock::origin_micros)).
+	pub(crate) capture_origin: Option<i64>,
+	/// ROS `frame_id` of the images.
+	pub(crate) frame_id: Option<String>,
+}
+
+impl MoqrosSection {
+	/// Read the section of `catalog`, leniently: whoever announces the broadcast writes it, so
+	/// a malformed field counts as missing rather than failing the catalog.
+	pub(crate) fn read(catalog: &MoqrosCatalog) -> Self {
+		let Some(section) = catalog.ext.get(SECTION_KEY).and_then(Value::as_object) else {
+			return Self::default();
+		};
+		Self {
+			capture_origin: section.get("captureOrigin").and_then(Value::as_i64),
+			frame_id: section
+				.get("frameId")
+				.and_then(Value::as_str)
+				.filter(|id| is_frame_id(id))
+				.map(String::from),
+		}
+	}
+
+	/// Write the section into `catalog`, and the capture origin into hang's `clock` when it is a
+	/// wall-clock time hang can represent.
+	pub(crate) fn write(&self, catalog: &mut MoqrosCatalog) {
+		let mut section = Map::new();
+		if let Some(origin) = self.capture_origin {
+			section.insert("captureOrigin".into(), origin.into());
+		}
+		if let Some(frame_id) = &self.frame_id {
+			section.insert("frameId".into(), frame_id.clone().into());
+		}
+		if section.is_empty() {
+			catalog.ext.remove(SECTION_KEY);
+		} else {
+			catalog.ext.insert(SECTION_KEY.into(), section.into());
+		}
+		catalog.clock = self.capture_origin.and_then(hang_clock);
+	}
+
+	/// The capture time of a frame with media timestamp `pts`: from the `captureOrigin`, or else
+	/// from hang's `clock` of `catalog` (another publisher's), as a time since the Unix epoch.
+	pub(crate) fn capture_time(&self, catalog: &MoqrosCatalog, pts: Duration) -> Option<Duration> {
+		if let Some(origin) = self.capture_origin {
+			return crate::clock::capture_time(origin, pts);
+		}
+		let pts = moq_net::Timestamp::from_micros(u64::try_from(pts.as_micros()).ok()?).ok()?;
+		catalog.clock?.wall_clock(pts).ok()?.duration_since(UNIX_EPOCH).ok()
+	}
+}
+
+/// hang's clock for a capture origin of `origin` µs since the Unix epoch, if it is after
+/// hang's epoch (2020).
+fn hang_clock(origin: i64) -> Option<Clock> {
+	let since_epoch = u64::try_from(origin).ok()?.checked_sub(MOQ_EPOCH_UNIX_MILLIS * 1000)?;
+	// Capture times that far past the present aren't wall-clock times.
+	let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+	if u128::from(u64::try_from(origin).ok()?) > now.as_micros() * 2 {
+		return None;
+	}
+	Clock::new(moq_net::Timestamp::from_micros(since_epoch).ok()?).ok()
+}
+
+/// Whether `id` can be used as a ROS `frame_id`: short, printable, without whitespace.
+fn is_frame_id(id: &str) -> bool {
+	!id.is_empty() && id.len() <= MAX_FRAME_ID_LEN && id.chars().all(|c| c.is_ascii_graphic())
+}
 
 /// The video rendition of a broadcast: the codec of its latest keyframe and its size.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,11 +137,12 @@ impl From<&EncodedFrame> for Rendition {
 }
 
 /// The catalog of a video broadcast with `renditions`, each a track name, what it carries, and the
-/// settings it is encoded with.
+/// settings it is encoded with, and with `section`.
 pub(crate) fn video<'a>(
 	renditions: impl IntoIterator<Item = (&'a str, &'a Rendition, &'a EncoderSettings)>,
-) -> Result<Catalog> {
-	let mut catalog = Catalog::<()>::default();
+	section: &MoqrosSection,
+) -> Result<MoqrosCatalog> {
+	let mut catalog = MoqrosCatalog::default();
 	for (track, rendition, settings) in renditions {
 		let mut config = VideoConfig::new(rendition.codec.clone());
 		config.coded_width = Some(rendition.width);
@@ -59,13 +152,14 @@ pub(crate) fn video<'a>(
 		config.container = Container::Legacy;
 		catalog.video.insert(track, config)?;
 	}
+	section.write(&mut catalog);
 	Ok(catalog)
 }
 
 /// The best video rendition of broadcast `name` whose codec this build can decode: the largest
 /// one, or with `max_height` the largest one at most that tall (the smallest if none is).
-pub(crate) fn select_video<'a>(
-	catalog: &'a Catalog,
+pub(crate) fn select_video<'a, E>(
+	catalog: &'a Catalog<E>,
 	name: &str,
 	max_height: Option<u32>,
 ) -> Result<(&'a str, &'a VideoConfig, Codec)> {
@@ -95,8 +189,8 @@ pub(crate) fn select_video<'a>(
 }
 
 /// The catalog of a data broadcast described by `settings`.
-pub(crate) fn data(settings: &DataSettings) -> Result<Catalog> {
-	let mut catalog = Catalog::<()>::default();
+pub(crate) fn data(settings: &DataSettings, section: &MoqrosSection) -> Result<MoqrosCatalog> {
+	let mut catalog = MoqrosCatalog::default();
 	let mut extra = serde_json::Map::new();
 	if let Some(ros_type) = &settings.ros_type {
 		extra.insert(ROS_TYPE_KEY.into(), ros_type.clone().into());
@@ -116,6 +210,7 @@ pub(crate) fn data(settings: &DataSettings) -> Result<Catalog> {
 			catalog.binary.insert(DATA_TRACK, config)?;
 		}
 	}
+	section.write(&mut catalog);
 	Ok(catalog)
 }
 
@@ -123,7 +218,7 @@ pub(crate) fn data(settings: &DataSettings) -> Result<Catalog> {
 ///
 /// A `rosType` that isn't a ROS message type name counts as missing: whoever announces the
 /// broadcast writes it, and it ends up in errors and logs.
-pub(crate) fn find_data(catalog: &Catalog) -> Option<(String, DataSettings)> {
+pub(crate) fn find_data<E>(catalog: &Catalog<E>) -> Option<(String, DataSettings)> {
 	let settings = |format, mode: &Mode, extra: &serde_json::Map<String, serde_json::Value>| {
 		Some(DataSettings {
 			format,
@@ -183,7 +278,7 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-	pub(crate) fn of(catalog: &Catalog) -> Self {
+	pub(crate) fn of<E>(catalog: &Catalog<E>) -> Self {
 		let decodable = catalog
 			.video
 			.ranked()
@@ -205,7 +300,7 @@ impl Kind {
 mod tests {
 	use super::*;
 
-	fn catalog(json: serde_json::Value) -> Catalog {
+	fn catalog(json: serde_json::Value) -> MoqrosCatalog {
 		serde_json::from_value(json).unwrap()
 	}
 
@@ -267,18 +362,18 @@ mod tests {
 			settings(DataFormat::Cdr, DataMode::Stream, Some("std_msgs/msg/String")),
 			settings(DataFormat::Json, DataMode::Stream, None),
 		] {
-			let catalog: Catalog = serde_json::from_str(&data(&settings).unwrap().to_json().unwrap()).unwrap();
+			let catalog: MoqrosCatalog =
+				serde_json::from_str(&data(&settings, &MoqrosSection::default()).unwrap().to_json().unwrap()).unwrap();
 			assert_eq!(find_data(&catalog), Some((DATA_TRACK.to_string(), settings.clone())));
 		}
 	}
 
 	#[test]
 	fn data_entries() {
-		let catalog = data(&settings(
-			DataFormat::Json,
-			DataMode::Snapshot,
-			Some("std_msgs/msg/String"),
-		))
+		let catalog = data(
+			&settings(DataFormat::Json, DataMode::Snapshot, Some("std_msgs/msg/String")),
+			&MoqrosSection::default(),
+		)
 		.unwrap();
 		let json: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(
@@ -290,11 +385,10 @@ mod tests {
 			})
 		);
 
-		let catalog = data(&settings(
-			DataFormat::Cdr,
-			DataMode::Stream,
-			Some("std_msgs/msg/String"),
-		))
+		let catalog = data(
+			&settings(DataFormat::Cdr, DataMode::Stream, Some("std_msgs/msg/String")),
+			&MoqrosSection::default(),
+		)
 		.unwrap();
 		let json: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(
@@ -320,7 +414,7 @@ mod tests {
 			find_data(&catalog),
 			Some(("raw".to_string(), settings(DataFormat::Cdr, DataMode::Stream, None)))
 		);
-		assert_eq!(find_data(&Catalog::default()), None);
+		assert_eq!(find_data(&MoqrosCatalog::default()), None);
 	}
 
 	#[test]
@@ -369,5 +463,69 @@ mod tests {
 		assert_eq!(track(Some(800)), "video_720p");
 		assert_eq!(track(Some(360)), "video_360p");
 		assert_eq!(track(Some(100)), "video_360p");
+	}
+
+	#[test]
+	fn moqros_section_round_trip() {
+		let settings = settings(DataFormat::Json, DataMode::Snapshot, None);
+		for section in [
+			MoqrosSection::default(),
+			MoqrosSection {
+				capture_origin: Some(-33_001),
+				frame_id: None,
+			},
+			MoqrosSection {
+				capture_origin: Some(1_794_000_000_000_000),
+				frame_id: Some("camera_optical".into()),
+			},
+		] {
+			let json = data(&settings, &section).unwrap().to_json().unwrap();
+			let catalog: MoqrosCatalog = serde_json::from_str(&json).unwrap();
+			assert_eq!(MoqrosSection::read(&catalog), section, "{json}");
+		}
+	}
+
+	#[test]
+	fn capture_times_from_either_clock() {
+		let pts = Duration::from_millis(1500);
+		// Sim time: before hang's epoch, so only in the moqros section.
+		let sim = MoqrosSection {
+			capture_origin: Some(12_000_000),
+			frame_id: None,
+		};
+		let catalog = data(&settings(DataFormat::Json, DataMode::Snapshot, None), &sim).unwrap();
+		assert!(catalog.clock.is_none());
+		assert_eq!(sim.capture_time(&catalog, pts), Some(Duration::from_millis(13_500)));
+
+		// Wall-clock time: also in hang's clock, which another publisher may send on its own.
+		let origin = 1_794_000_000_000_000;
+		let wall = MoqrosSection {
+			capture_origin: Some(origin),
+			frame_id: None,
+		};
+		let mut catalog = data(&settings(DataFormat::Json, DataMode::Snapshot, None), &wall).unwrap();
+		assert!(catalog.clock.is_some());
+		let expected = Some(Duration::from_micros(1_794_000_001_500_000));
+		assert_eq!(wall.capture_time(&catalog, pts), expected);
+		catalog.ext.clear();
+		let section = MoqrosSection::read(&catalog);
+		assert_eq!(section, MoqrosSection::default());
+		assert_eq!(section.capture_time(&catalog, pts), expected);
+		catalog.clock = None;
+		assert_eq!(section.capture_time(&catalog, pts), None);
+	}
+
+	#[test]
+	fn ignores_malformed_moqros_sections() {
+		for section in [
+			serde_json::json!("camera"),
+			serde_json::json!({ "captureOrigin": "12", "frameId": 7 }),
+			serde_json::json!({ "captureOrigin": 1.5, "frameId": "cam\nera" }),
+			serde_json::json!({ "frameId": "" }),
+			serde_json::json!({ "frameId": "x".repeat(MAX_FRAME_ID_LEN + 1) }),
+		] {
+			let catalog = catalog(serde_json::json!({ "moqros": section }));
+			assert_eq!(MoqrosSection::read(&catalog), MoqrosSection::default(), "{section}");
+		}
 	}
 }

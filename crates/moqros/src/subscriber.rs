@@ -4,13 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::Catalog;
 use hang::moq_net;
 
-use crate::catalog::{self, Kind};
+use crate::catalog::{self, Kind, MoqrosCatalog};
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSubscriber};
-use crate::track::{GroupReader, RouteWatch};
+use crate::track::{CatalogWatch, GroupReader, RouteWatch};
 use crate::{ClientConfig, Error, Image, PixelFormat, Result, Session};
 
 /// A connection to a relay used to consume image and data broadcasts.
@@ -69,13 +68,13 @@ impl Subscriber {
 	/// Like [`Subscriber::subscribe_images`], picking the rendition by `options`.
 	pub async fn subscribe_images_with(&self, name: &str, options: &ImageOptions) -> Result<ImageSubscriber> {
 		let (broadcast, catalog, route) = self.catalog(name).await?;
-		images(name, broadcast, &catalog, route, options).await
+		images(name, broadcast, catalog, route, options).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to its data track.
 	pub async fn subscribe_data(&self, name: &str) -> Result<DataSubscriber> {
 		let (broadcast, catalog, route) = self.catalog(name).await?;
-		data(name, broadcast, &catalog, route).await
+		data(name, broadcast, catalog, route).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
@@ -87,11 +86,11 @@ impl Subscriber {
 	/// Like [`Subscriber::subscribe`], picking a video rendition by `options`.
 	pub async fn subscribe_with(&self, name: &str, options: &ImageOptions) -> Result<Subscription> {
 		let (broadcast, catalog, route) = self.catalog(name).await?;
-		match Kind::of(&catalog) {
+		match Kind::of(catalog.catalog()) {
 			Kind::Images => Ok(Subscription::Images(
-				images(name, broadcast, &catalog, route, options).await?,
+				images(name, broadcast, catalog, route, options).await?,
 			)),
-			Kind::Data => Ok(Subscription::Data(data(name, broadcast, &catalog, route).await?)),
+			Kind::Data => Ok(Subscription::Data(data(name, broadcast, catalog, route).await?)),
 			Kind::None => Err(Error::NoTracks(name.to_string())),
 		}
 	}
@@ -108,7 +107,7 @@ impl Subscriber {
 
 	/// Wait for `name` to be announced and read its first catalog. Also returns a watch on
 	/// the announcement, which the subscription ends with.
-	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, Catalog, RouteWatch)> {
+	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, CatalogWatch, RouteWatch)> {
 		let consumer = self.origin.consume();
 		let mut announced = consumer.announced();
 		loop {
@@ -122,21 +121,21 @@ impl Subscriber {
 		}
 
 		let broadcast = consumer.request_broadcast(name).await?;
-		let mut catalog = Catalog::<()>::subscribe(&broadcast).await?;
-		let catalog = catalog.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
+		let mut updates = MoqrosCatalog::subscribe(&broadcast).await?;
+		let first = updates.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
 		let route = RouteWatch::new(announced, name);
-		Ok((broadcast, catalog, route))
+		Ok((broadcast, CatalogWatch::new(updates, first), route))
 	}
 }
 
 async fn images(
 	name: &str,
 	broadcast: moq_net::broadcast::Consumer,
-	catalog: &Catalog,
+	catalog: CatalogWatch,
 	route: RouteWatch,
 	options: &ImageOptions,
 ) -> Result<ImageSubscriber> {
-	let (track, config, codec) = catalog::select_video(catalog, name, options.max_height)?;
+	let (track, config, codec) = catalog::select_video(catalog.catalog(), name, options.max_height)?;
 	tracing::info!(
 		broadcast = name,
 		// The track name comes from the remote catalog: record it as a str (quoted
@@ -160,10 +159,10 @@ async fn images(
 async fn data(
 	name: &str,
 	broadcast: moq_net::broadcast::Consumer,
-	catalog: &Catalog,
+	catalog: CatalogWatch,
 	route: RouteWatch,
 ) -> Result<DataSubscriber> {
-	let (track, settings) = catalog::find_data(catalog).ok_or_else(|| Error::NoData(name.to_string()))?;
+	let (track, settings) = catalog::find_data(catalog.catalog()).ok_or_else(|| Error::NoData(name.to_string()))?;
 	tracing::info!(
 		broadcast = name,
 		track,
@@ -173,7 +172,7 @@ async fn data(
 		"subscribing"
 	);
 	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
-	Ok(DataSubscriber::new(broadcast, reader, settings))
+	Ok(DataSubscriber::new(broadcast, reader, settings, catalog))
 }
 
 /// Broadcasts announced under a prefix, from [`Subscriber::announced`].
@@ -321,17 +320,12 @@ mod tests {
 		let consumer = origin.consume();
 		let announced = consumer.announced();
 		let broadcast = consumer.request_broadcast(name).await.unwrap();
-		let catalog = Catalog::<()>::subscribe(&broadcast)
-			.await
-			.unwrap()
-			.next()
-			.await
-			.unwrap()
-			.unwrap();
+		let mut updates = MoqrosCatalog::subscribe(&broadcast).await.unwrap();
+		let first = updates.next().await.unwrap().unwrap();
 		images(
 			name,
 			broadcast,
-			&catalog,
+			CatalogWatch::new(updates, first),
 			RouteWatch::new(announced, name),
 			&ImageOptions::default(),
 		)

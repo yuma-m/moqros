@@ -4,7 +4,7 @@
 use hang::catalog::PRIORITY;
 use hang::moq_net;
 
-use crate::catalog::{self, Rendition, VIDEO_TRACK};
+use crate::catalog::{self, MoqrosSection, Rendition, VIDEO_TRACK};
 use crate::clock::StreamClock;
 use crate::codec::{EncodedFrame, Encoder, EncoderSettings};
 use crate::convert::I420;
@@ -322,6 +322,7 @@ impl ImagePublisher {
 			self.tracks
 				.iter()
 				.filter_map(|track| Some((track.name.as_str(), track.rendition.as_ref()?, track.encoder.settings()))),
+			&MoqrosSection::default(),
 		)?;
 		self.broadcast.publish_catalog(&catalog)
 	}

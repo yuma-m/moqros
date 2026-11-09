@@ -18,6 +18,11 @@ use moqros::{
 
 struct Relay(Child);
 
+/// Capture time of data message `n` in the relay tests.
+fn capture_time(n: u32) -> Duration {
+	Duration::from_secs(12) + Duration::from_millis(u64::from(n) * 10)
+}
+
 impl Drop for Relay {
 	fn drop(&mut self) {
 		let _ = self.0.kill();
@@ -193,7 +198,11 @@ async fn publish_and_subscribe_data_through_relay() -> anyhow::Result<()> {
 				if stop_rx.try_recv().is_ok() {
 					break;
 				}
-				broadcast.publish(n.to_string())?;
+				// Stream messages carry their capture time (sim time here), snapshots don't.
+				match mode {
+					DataMode::Stream => broadcast.publish_at(capture_time(n), n.to_string())?,
+					_ => broadcast.publish(n.to_string())?,
+				}
 				tokio::time::sleep(Duration::from_millis(10)).await;
 			}
 			Ok(())
@@ -210,7 +219,10 @@ async fn publish_and_subscribe_data_through_relay() -> anyhow::Result<()> {
 			let message = tokio::time::timeout(Duration::from_secs(5), messages.next_message())
 				.await??
 				.expect("broadcast ended early");
-			received.push(std::str::from_utf8(&message.payload)?.parse::<u32>()?);
+			let n = std::str::from_utf8(&message.payload)?.parse::<u32>()?;
+			let expected = (mode == DataMode::Stream).then(|| capture_time(n));
+			assert_eq!(message.capture_time, expected, "{name}: message {n}");
+			received.push(n);
 		}
 		assert!(received.windows(2).all(|w| w[0] < w[1]), "{name}: {received:?}");
 		if mode == DataMode::Stream {
