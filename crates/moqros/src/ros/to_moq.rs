@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 #[cfg(feature = "compressed")]
 use super::compressed_image_from_ros;
 use super::meter::{RateMeter, WarnOnce};
-use super::{BitrateControl, Bridge, QosProfile, image_from_ros};
+use super::{BitrateControl, Bridge, QosProfile, RosImage, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
 /// Forward a ROS image topic into a MoQ broadcast.
@@ -41,6 +41,25 @@ pub fn spawn_ros_to_moq_compressed(
 	spawn_image_bridge(node, topic, qos, broadcast, compressed_image_from_ros)
 }
 
+/// A ROS message carrying an image.
+trait ImageMessage: r2r::WrappedTypesupport + Send + 'static {
+	/// `header.frame_id`.
+	fn frame_id(&self) -> &str;
+}
+
+impl ImageMessage for RosImage {
+	fn frame_id(&self) -> &str {
+		&self.header.frame_id
+	}
+}
+
+#[cfg(feature = "compressed")]
+impl ImageMessage for super::RosCompressedImage {
+	fn frame_id(&self) -> &str {
+		&self.header.frame_id
+	}
+}
+
 /// Forward messages of type `M`, converted by `convert`, into a video broadcast.
 fn spawn_image_bridge<M>(
 	node: &mut r2r::Node,
@@ -50,7 +69,7 @@ fn spawn_image_bridge<M>(
 	convert: fn(M) -> Result<crate::Image>,
 ) -> Result<Bridge>
 where
-	M: r2r::WrappedTypesupport + Send + 'static,
+	M: ImageMessage,
 {
 	let mut stream = node.subscribe::<M>(topic, qos)?;
 	let topic = topic.to_string();
@@ -67,6 +86,7 @@ where
 					if bitrate.has_changed().unwrap_or(false) {
 						broadcast.set_bitrate(*bitrate.borrow_and_update());
 					}
+					broadcast.set_frame_id(msg.frame_id())?;
 					let image = match convert(msg) {
 						Ok(image) => image,
 						Err(err) => {

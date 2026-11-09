@@ -114,7 +114,7 @@ fn hang_clock(origin: i64) -> Option<Clock> {
 }
 
 /// Whether `id` can be used as a ROS `frame_id`: short, printable, without whitespace.
-fn is_frame_id(id: &str) -> bool {
+pub(crate) fn is_frame_id(id: &str) -> bool {
 	!id.is_empty() && id.len() <= MAX_FRAME_ID_LEN && id.chars().all(|c| c.is_ascii_graphic())
 }
 

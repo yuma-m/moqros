@@ -2,13 +2,14 @@
 //! images, or data tracks as the message type they carry.
 
 use clap::Parser;
+use moqros::ros::StampSource;
 use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, Discovery, QosArgs, Relay, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
 	/// Broadcast to subscribe to; repeat for several. Options after the name override
-	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,max_height=480,encoding=bgr8`.
+	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,stamp=receive,max_height=480,encoding=bgr8`.
 	/// Defaults to `image_raw` without `--broadcast-prefix`.
 	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
@@ -29,9 +30,14 @@ struct Cli {
 	#[arg(long)]
 	topic: Option<String>,
 
-	/// `header.frame_id` of the republished images.
-	#[arg(long, default_value = "camera")]
-	frame_id: String,
+	/// `header.frame_id` of the republished images; defaults to the one the publisher announces.
+	#[arg(long)]
+	frame_id: Option<String>,
+
+	/// `header.stamp` of the republished images: `source` uses the capture time the publisher
+	/// announces (falling back to the receive time), `receive` the local receive time.
+	#[arg(long, default_value_t = StampSource::default())]
+	stamp: StampSource,
 
 	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
 	/// the largest.
@@ -67,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
 			cli.broadcast_prefix,
 			cli.topic_template,
 			cli.frame_id.clone(),
+			cli.stamp,
 			cli.max_height,
 			cli.encoding,
 		)?),
@@ -81,7 +88,8 @@ async fn main() -> anyhow::Result<()> {
 			specs,
 			cli.topic,
 			cli.ros_type,
-			&cli.frame_id,
+			cli.frame_id.as_deref(),
+			cli.stamp,
 			cli.max_height,
 			cli.encoding,
 		)?,

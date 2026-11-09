@@ -65,10 +65,14 @@ pub fn image_to_ros(image: &Image, header: Header) -> RosImage {
 
 /// A `builtin_interfaces/Time` for the current wall clock, saturating past 2038.
 pub fn now_stamp() -> Time {
-	let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+	stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default())
+}
+
+/// A `builtin_interfaces/Time` for `time` since the clock's epoch, saturating past 2038.
+pub fn stamp(time: Duration) -> Time {
 	Time {
-		sec: i32::try_from(now.as_secs()).unwrap_or(i32::MAX),
-		nanosec: now.subsec_nanos(),
+		sec: i32::try_from(time.as_secs()).unwrap_or(i32::MAX),
+		nanosec: time.subsec_nanos(),
 	}
 }
 
@@ -132,6 +136,19 @@ mod tests {
 		let image = compressed_image_from_ros(msg).unwrap();
 		assert_eq!((image.width, image.height, image.format), (16, 8, PixelFormat::Rgb8));
 		assert_eq!(image.timestamp, Duration::new(7, 8));
+	}
+
+	#[test]
+	fn stamps_round_trip() {
+		let time = Duration::new(1_794_000_000, 123);
+		assert_eq!(
+			stamp(time),
+			Time {
+				sec: 1_794_000_000,
+				nanosec: 123
+			}
+		);
+		assert_eq!(stamp(Duration::from_secs(u64::MAX)).sec, i32::MAX);
 	}
 
 	#[test]

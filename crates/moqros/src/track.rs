@@ -191,6 +191,16 @@ impl CatalogWatch {
 		&self.catalog
 	}
 
+	/// The `moqros` section of the current catalog.
+	pub(crate) fn section(&self) -> &MoqrosSection {
+		&self.section
+	}
+
+	/// Whether the current catalog maps media timestamps to capture times.
+	pub(crate) fn has_capture_times(&self) -> bool {
+		self.section.capture_origin.is_some() || self.catalog.clock.is_some()
+	}
+
 	/// The capture time of a frame with media timestamp `pts`, by the current catalog.
 	pub(crate) fn capture_time(&self, pts: Duration) -> Option<Duration> {
 		self.section.capture_time(&self.catalog, pts)

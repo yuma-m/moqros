@@ -45,7 +45,10 @@ moqros_sub:
     url: http://localhost:4443/anon
     #   tls_cert: /etc/moqros/robot.pem
     #   tls_key: /etc/moqros/robot.key
-    frame_id: camera
+    # header.frame_id of republished images; the publisher's when unset.
+    #   frame_id: camera
+    # header.stamp of republished images: source (the publisher's capture time) or receive.
+    stamp: source
     # Pixel encoding of republished images: rgb8, bgr8, rgba8, bgra8 or mono8.
     encoding: rgb8
     # Message type to republish a data track as (single broadcast only); taken from its catalog when unset.
