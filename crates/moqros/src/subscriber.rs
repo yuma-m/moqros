@@ -1,5 +1,6 @@
 //! Subscribe to moqros broadcasts: hang VP8/H.264/AV1 video decoded back into images, or data tracks.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -129,7 +130,7 @@ async fn images(
 		_broadcast: broadcast,
 		video,
 		codec,
-		decoder: Decoder::new(codec)?,
+		decoder: Arc::new(Mutex::new(Decoder::new(codec)?)),
 	})
 }
 
@@ -178,7 +179,10 @@ pub struct ImageSubscriber {
 	_broadcast: moq_net::broadcast::Consumer,
 	video: GroupReader,
 	codec: Codec,
-	decoder: Decoder,
+	/// Shared with the blocking task decoding the current frame, which keeps running (and then
+	/// lets go) when [`ImageSubscriber::next_image`] is cancelled, so the decoder stays in step
+	/// with the frames it was fed.
+	decoder: Arc<Mutex<Decoder>>,
 }
 
 impl ImageSubscriber {
@@ -189,7 +193,7 @@ impl ImageSubscriber {
 
 	/// Accept decoded pictures of up to `max_pixels`; see [`Decoder::set_max_pixels`].
 	pub fn set_max_pixels(&mut self, max_pixels: u64) {
-		self.decoder.set_max_pixels(max_pixels);
+		lock(&self.decoder).set_max_pixels(max_pixels);
 	}
 
 	/// Next encoded frame, or `None` once the broadcast ends.
@@ -207,14 +211,76 @@ impl ImageSubscriber {
 
 	/// Next decoded `rgb8` image, or `None` once the broadcast ends.
 	///
+	/// Decoding and color conversion run on tokio's blocking pool, so a large picture doesn't
+	/// stall the other tasks of the runtime.
+	///
 	/// Fails with [`Error::TooLarge`] for a picture above the decoder's
 	/// [`max_pixels`](Decoder::max_pixels).
 	pub async fn next_image(&mut self) -> Result<Option<Image>> {
 		while let Some(frame) = self.next_frame().await? {
-			if let Some(image) = self.decoder.decode(&frame.data, frame.timestamp)? {
+			let decoder = self.decoder.clone();
+			let decoded = tokio::task::spawn_blocking(move || lock(&decoder).decode(&frame.data, frame.timestamp))
+				.await
+				.map_err(|err| Error::Codec(format!("decoder task failed: {err}")))??;
+			if let Some(image) = decoded {
 				return Ok(Some(image));
 			}
 		}
 		Ok(None)
+	}
+}
+
+/// Lock `decoder`, recovering it from a panicked decode: the codec state may be off, but the
+/// next keyframe resets it.
+fn lock(decoder: &Mutex<Decoder>) -> std::sync::MutexGuard<'_, Decoder> {
+	decoder.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::{AtomicBool, Ordering};
+
+	use super::*;
+	use crate::codec::tests::test_pattern;
+	use crate::{EncoderSettings, ImagePublisher};
+
+	/// Subscribe to `name` on `origin` the way [`Subscriber::subscribe_images`] does.
+	async fn subscribe_images(origin: &moq_net::origin::Producer, name: &str) -> ImageSubscriber {
+		let consumer = origin.consume();
+		let announced = consumer.announced();
+		let broadcast = consumer.request_broadcast(name).await.unwrap();
+		let catalog = Catalog::<()>::subscribe(&broadcast)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.unwrap();
+		images(name, broadcast, &catalog, RouteWatch::new(announced, name))
+			.await
+			.unwrap()
+	}
+
+	/// Other tasks of a single-threaded runtime run while a picture decodes.
+	#[tokio::test(flavor = "current_thread")]
+	async fn decoding_yields_to_the_runtime() {
+		if Codec::available().is_empty() {
+			return;
+		}
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = ImagePublisher::new(&origin, "camera", EncoderSettings::default()).unwrap();
+		// The catalog only exists once the first keyframe is out.
+		assert!(publisher.publish(&test_pattern(64, 48, 0)).unwrap());
+		let mut images = subscribe_images(&origin, "camera").await;
+		assert!(publisher.publish(&test_pattern(64, 48, 1)).unwrap());
+
+		let ran = Arc::new(AtomicBool::new(false));
+		tokio::spawn({
+			let ran = ran.clone();
+			async move { ran.store(true, Ordering::Relaxed) }
+		});
+		let image = images.next_image().await.unwrap().expect("a decoded image");
+		assert_eq!((image.width, image.height), (64, 48));
+		assert!(ran.load(Ordering::Relaxed), "the other task never ran while decoding");
 	}
 }
