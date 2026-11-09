@@ -7,7 +7,7 @@ use r2r::std_msgs::msg::Header;
 
 use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
-use super::{Bridge, QosProfile, RosImage, Teardown, image_to_ros, now_stamp};
+use super::{Bridge, QosProfile, RosImage, Teardown, image_into_ros, now_stamp};
 use crate::{
 	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, Result, Subscriber, Subscription,
 };
@@ -275,7 +275,7 @@ async fn republish_images(
 					stamp: now_stamp(),
 					frame_id: frame_id.to_string(),
 				};
-				publisher.publish(&image_to_ros(&image, header))?;
+				publisher.publish(&image_into_ros(image, header))?;
 				stats.sent();
 				meter.tick();
 			}

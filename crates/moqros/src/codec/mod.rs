@@ -277,6 +277,8 @@ pub struct Encoder {
 	/// Stream time (pts) of the last keyframe.
 	last_keyframe: Option<u64>,
 	clock: StreamClock,
+	/// The converted input, reused from frame to frame.
+	yuv: I420,
 }
 
 /// The backend an [`Encoder`] currently encodes with, and what it has produced so far.
@@ -315,6 +317,7 @@ impl Encoder {
 			hardware: None,
 			last_keyframe: None,
 			clock: StreamClock::default(),
+			yuv: I420::default(),
 		})
 	}
 
@@ -361,7 +364,12 @@ impl Encoder {
 
 	/// Encode one image. Returns `None` when the encoder dropped the frame.
 	pub fn encode(&mut self, image: &Image) -> Result<Option<EncodedFrame>> {
-		self.encode_yuv(&I420::from_image(image)?, image.timestamp)
+		self.yuv.fill_from_image(image)?;
+		// Taken out for the call, which borrows the encoder.
+		let yuv = std::mem::take(&mut self.yuv);
+		let frame = self.encode_yuv(&yuv, image.timestamp);
+		self.yuv = yuv;
+		frame
 	}
 
 	/// Encode one converted picture captured at `timestamp`.

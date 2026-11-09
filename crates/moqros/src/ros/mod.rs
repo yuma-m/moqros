@@ -56,7 +56,7 @@ mod to_moq;
 pub use bridge::{BitrateControl, Bridge, BridgeStats, Teardown};
 #[cfg(feature = "compressed")]
 pub use convert::compressed_image_from_ros;
-pub use convert::{image_from_ros, image_to_ros, now_stamp};
+pub use convert::{image_from_ros, image_into_ros, image_to_ros, now_stamp};
 pub use from_moq::{MoqToRos, RosTarget, spawn_moq_to_ros};
 pub use graph::{topic_type, wait_for_topic_type};
 pub use r2r;

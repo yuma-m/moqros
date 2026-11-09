@@ -1,13 +1,22 @@
 //! Color conversion between [`Image`] pixel formats and planar I420 (YUV 4:2:0).
 //!
-//! Uses BT.601 limited-range integer math, which is what VP8/H.264 decoders (and browsers)
-//! assume when the bitstream carries no color description.
+//! Uses BT.601 limited range, which is what VP8/H.264 decoders (and browsers) assume when the
+//! bitstream carries no color description. RGB conversions run on yuvutils-rs's SIMD kernels.
+
+use yuvutils_rs::{BufferStoreMut, YuvConversionMode, YuvPlanarImage, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
 
 use crate::{Error, Image, PixelFormat};
 
+/// A picture dimension or stride as yuvutils-rs takes it. Image dimensions come from `u32`.
+#[expect(clippy::cast_possible_truncation, reason = "image dimensions come from u32")]
+fn dim(n: usize) -> u32 {
+	n as u32
+}
+
 /// A tightly packed I420 frame with even dimensions: the Y plane, then U, then V,
-/// in one contiguous buffer (the layout `vpx_img_wrap` expects).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// in one contiguous buffer (the layout `vpx_img_wrap` expects). The default is an empty 0x0
+/// frame, to [fill](I420::fill_from_image).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct I420 {
 	width: usize,
 	height: usize,
@@ -102,6 +111,14 @@ impl I420 {
 	///
 	/// 4:2:0 video needs even dimensions, so an odd trailing row or column is cropped.
 	pub fn from_image(image: &Image) -> Result<Self, Error> {
+		let mut out = Self::default();
+		out.fill_from_image(image)?;
+		Ok(out)
+	}
+
+	/// Convert `image` into this frame, reusing its buffer; see [`I420::from_image`]. After an
+	/// error the frame holds no meaningful picture.
+	pub fn fill_from_image(&mut self, image: &Image) -> Result<(), Error> {
 		image.validate()?;
 		let width = image.width as usize & !1;
 		let height = image.height as usize & !1;
@@ -112,60 +129,60 @@ impl I420 {
 			)));
 		}
 
-		let mut out = Self {
-			width,
-			height,
-			data: vec![0; width * height * 3 / 2],
-		};
-
+		self.width = width;
+		self.height = height;
+		// Every byte is written below, so only growth needs initializing.
+		self.data.resize(width * height * 3 / 2, 0);
 		match image.format {
-			PixelFormat::Rgb8 => out.fill_rgb(image, 3, [0, 1, 2]),
-			PixelFormat::Bgr8 => out.fill_rgb(image, 3, [2, 1, 0]),
-			PixelFormat::Rgba8 => out.fill_rgb(image, 4, [0, 1, 2]),
-			PixelFormat::Bgra8 => out.fill_rgb(image, 4, [2, 1, 0]),
-			PixelFormat::Mono8 => out.fill_mono(image),
+			PixelFormat::Rgb8 | PixelFormat::Bgr8 | PixelFormat::Rgba8 | PixelFormat::Bgra8 => self.fill_rgb(image)?,
+			PixelFormat::Mono8 => self.fill_mono(image),
 			// Offsets of (Y0, U, Y1, V) inside each 4-byte macropixel.
-			PixelFormat::Yuyv => out.fill_packed_422(image, [0, 1, 2, 3]),
-			PixelFormat::Uyvy => out.fill_packed_422(image, [1, 0, 3, 2]),
+			PixelFormat::Yuyv => self.fill_packed_422(image, [0, 1, 2, 3]),
+			PixelFormat::Uyvy => self.fill_packed_422(image, [1, 0, 3, 2]),
 		}
-
-		Ok(out)
+		Ok(())
 	}
 
-	fn fill_rgb(&mut self, image: &Image, bpp: usize, [r, g, b]: [usize; 3]) {
+	/// Fill from packed RGB, RGBA, BGR or BGRA.
+	fn fill_rgb(&mut self, image: &Image) -> Result<(), Error> {
 		let (width, height) = (self.width, self.height);
-		let cw = width / 2;
-		let (y_plane, u_plane, v_plane) = self.planes_mut();
-		for cy in 0..height / 2 {
-			let rows = [image.row(cy * 2), image.row(cy * 2 + 1)];
-			for cx in 0..cw {
-				let (mut sr, mut sg, mut sb) = (0i32, 0i32, 0i32);
-				for (dy, row) in rows.iter().enumerate() {
-					for dx in 0..2 {
-						let x = cx * 2 + dx;
-						let px = &row[x * bpp..];
-						let (pr, pg, pb) = (i32::from(px[r]), i32::from(px[g]), i32::from(px[b]));
-						y_plane[(cy * 2 + dy) * width + x] = rgb_to_y(pr, pg, pb);
-						sr += pr;
-						sg += pg;
-						sb += pb;
-					}
-				}
-				let (u, v) = rgb_to_uv((sr + 2) >> 2, (sg + 2) >> 2, (sb + 2) >> 2);
-				u_plane[cy * cw + cx] = u;
-				v_plane[cy * cw + cx] = v;
-			}
-		}
+		let (y, u, v) = self.planes_mut();
+		let mut planar = YuvPlanarImageMut {
+			y_plane: BufferStoreMut::Borrowed(y),
+			y_stride: dim(width),
+			u_plane: BufferStoreMut::Borrowed(u),
+			u_stride: dim(width / 2),
+			v_plane: BufferStoreMut::Borrowed(v),
+			v_stride: dim(width / 2),
+			width: dim(width),
+			height: dim(height),
+		};
+		let convert = match image.format {
+			PixelFormat::Rgb8 => yuvutils_rs::rgb_to_yuv420,
+			PixelFormat::Bgr8 => yuvutils_rs::bgr_to_yuv420,
+			PixelFormat::Rgba8 => yuvutils_rs::rgba_to_yuv420,
+			PixelFormat::Bgra8 => yuvutils_rs::bgra_to_yuv420,
+			other => unreachable!("{other} isn't packed RGB"),
+		};
+		// Only the rows that are kept: an odd last one is cropped.
+		let rows = &image.data[..image.step as usize * height];
+		convert(
+			&mut planar,
+			rows,
+			image.step,
+			YuvRange::Limited,
+			YuvStandardMatrix::Bt601,
+			YuvConversionMode::Balanced,
+		)
+		.map_err(|err| Error::InvalidImage(format!("color conversion: {err}")))
 	}
 
 	#[expect(clippy::cast_possible_truncation, reason = "the result is in 0..=255")]
 	fn fill_mono(&mut self, image: &Image) {
-		let (width, height) = (self.width, self.height);
+		let width = self.width;
 		let (y_plane, u_plane, v_plane) = self.planes_mut();
-		for y in 0..height {
-			let row = image.row(y);
-			let dst = &mut y_plane[y * width..(y + 1) * width];
-			for (d, &s) in dst.iter_mut().zip(row) {
+		for (y, dst) in y_plane.chunks_exact_mut(width).enumerate() {
+			for (d, &s) in dst.iter_mut().zip(&image.row(y)[..width]) {
 				*d = (16 + ((u32::from(s) * 219 + 127) / 255)) as u8;
 			}
 		}
@@ -175,24 +192,37 @@ impl I420 {
 
 	#[expect(clippy::cast_possible_truncation, reason = "the result is in 0..=255")]
 	fn fill_packed_422(&mut self, image: &Image, [y0, u, y1, v]: [usize; 4]) {
-		let (width, height) = (self.width, self.height);
+		let width = self.width;
 		let cw = width / 2;
 		let (y_plane, u_plane, v_plane) = self.planes_mut();
-		for cy in 0..height / 2 {
-			let rows = [image.row(cy * 2), image.row(cy * 2 + 1)];
-			for cx in 0..cw {
-				let mut su = 0u32;
-				let mut sv = 0u32;
-				for (dy, row) in rows.iter().enumerate() {
-					let mp = &row[cx * 4..cx * 4 + 4];
-					let base = (cy * 2 + dy) * width + cx * 2;
-					y_plane[base] = mp[y0];
-					y_plane[base + 1] = mp[y1];
-					su += u32::from(mp[u]);
-					sv += u32::from(mp[v]);
-				}
-				u_plane[cy * cw + cx] = su.div_ceil(2) as u8;
-				v_plane[cy * cw + cx] = sv.div_ceil(2) as u8;
+		let rows = y_plane
+			.chunks_exact_mut(width * 2)
+			.zip(u_plane.chunks_exact_mut(cw))
+			.zip(v_plane.chunks_exact_mut(cw));
+		for (cy, ((y_rows, u_row), v_row)) in rows.enumerate() {
+			let (y_top, y_bottom) = y_rows.split_at_mut(width);
+			let src0 = &image.row(cy * 2)[..width * 2];
+			let src1 = &image.row(cy * 2 + 1)[..width * 2];
+			let blocks = src0
+				.as_chunks::<4>()
+				.0
+				.iter()
+				.zip(src1.as_chunks::<4>().0.iter())
+				.zip(
+					y_top
+						.as_chunks_mut::<2>()
+						.0
+						.iter_mut()
+						.zip(y_bottom.as_chunks_mut::<2>().0.iter_mut()),
+				)
+				.zip(u_row.iter_mut().zip(v_row.iter_mut()));
+			for (((top, bottom), (yt, yb)), (du, dv)) in blocks {
+				yt[0] = top[y0];
+				yt[1] = top[y1];
+				yb[0] = bottom[y0];
+				yb[1] = bottom[y1];
+				*du = (u32::from(top[u]) + u32::from(bottom[u])).div_ceil(2) as u8;
+				*dv = (u32::from(top[v]) + u32::from(bottom[v])).div_ceil(2) as u8;
 			}
 		}
 	}
@@ -297,49 +327,50 @@ impl<'a> Planes<'a> {
 }
 
 /// Convert planar 4:2:0 into packed `rgb8`.
+///
+/// # Panics
+///
+/// If the planes are shorter than their strides and the picture size say.
 pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
 	let (width, height) = (src.width, src.height);
-	let ((y_plane, ys), (u_plane, us), (v_plane, vs)) = (src.y, src.u, src.v);
-
 	let mut out = vec![0u8; width * height * 3];
-	for row in 0..height {
-		let y_row = &y_plane[row * ys..];
-		let u_row = &u_plane[(row / 2) * us..];
-		let v_row = &v_plane[(row / 2) * vs..];
-		let dst = &mut out[row * width * 3..(row + 1) * width * 3];
-		for col in 0..width {
-			let [r, g, b] = yuv_to_rgb(y_row[col], u_row[col / 2], v_row[col / 2]);
-			dst[col * 3] = r;
-			dst[col * 3 + 1] = g;
-			dst[col * 3 + 2] = b;
+	if width == 0 || height == 0 {
+		return out;
+	}
+	// yuvutils-rs 0.8.3 pairs the last row of an odd-height picture with the wrong chroma row,
+	// so that row is converted here.
+	let even = height & !1;
+	if even > 0 {
+		let planar = YuvPlanarImage {
+			y_plane: src.y.0,
+			y_stride: dim(src.y.1),
+			u_plane: src.u.0,
+			u_stride: dim(src.u.1),
+			v_plane: src.v.0,
+			v_stride: dim(src.v.1),
+			width: dim(width),
+			height: dim(even),
+		};
+		yuvutils_rs::yuv420_to_rgb(
+			&planar,
+			&mut out[..width * even * 3],
+			dim(width * 3),
+			YuvRange::Limited,
+			YuvStandardMatrix::Bt601,
+		)
+		.expect("the planes cover the picture");
+	}
+	if even < height {
+		let y_row = &src.y.0[even * src.y.1..];
+		let u_row = &src.u.0[(even / 2) * src.u.1..];
+		let v_row = &src.v.0[(even / 2) * src.v.1..];
+		for (x, rgb) in out[even * width * 3..].as_chunks_mut::<3>().0.iter_mut().enumerate() {
+			*rgb = yuv_to_rgb(y_row[x], u_row[x / 2], v_row[x / 2]);
 		}
 	}
 	out
 }
 
-#[inline]
-#[expect(
-	clippy::cast_possible_truncation,
-	clippy::cast_sign_loss,
-	reason = "the result is in 0..=255"
-)]
-fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
-	(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8
-}
-
-#[inline]
-#[expect(
-	clippy::cast_possible_truncation,
-	clippy::cast_sign_loss,
-	reason = "the result is in 0..=255"
-)]
-fn rgb_to_uv(r: i32, g: i32, b: i32) -> (u8, u8) {
-	let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-	let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-	(u as u8, v as u8)
-}
-
-#[inline]
 #[expect(clippy::cast_sign_loss, reason = "the result is in 0..=255")]
 fn yuv_to_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
 	let c = i32::from(y) - 16;
@@ -425,8 +456,9 @@ mod tests {
 			([0, 0, 255], [41, 240, 110]),
 		] {
 			let frame = i420(2, 2, PixelFormat::Rgb8, rgb.repeat(4));
-			assert_eq!(frame.y(), &[yuv[0]; 4], "{rgb:?}");
-			assert_eq!((frame.u(), frame.v()), (&[yuv[1]][..], &[yuv[2]][..]), "{rgb:?}");
+			assert!(max_diff(frame.y(), &[yuv[0]; 4]) <= 1, "{rgb:?}: {:?}", frame.y());
+			assert!(max_diff(frame.u(), &[yuv[1]]) <= 1, "{rgb:?}: {:?}", frame.u());
+			assert!(max_diff(frame.v(), &[yuv[2]]) <= 1, "{rgb:?}: {:?}", frame.v());
 		}
 	}
 
@@ -527,7 +559,9 @@ mod tests {
 		let full = yuv_to_rgb8(&tight.planes());
 		assert_eq!(padded.len(), width * height * 3);
 		for row in 0..height {
-			assert_eq!(padded[row * 9..row * 9 + 9], full[row * 12..row * 12 + 9], "row {row}");
+			// The last row of an odd-height picture is converted apart, rounding a little differently.
+			let (padded, full) = (&padded[row * 9..row * 9 + 9], &full[row * 12..row * 12 + 9]);
+			assert!(max_diff(padded, full) <= 2, "row {row}: {padded:?} vs {full:?}");
 		}
 	}
 
@@ -575,5 +609,83 @@ mod tests {
 		let scaled = frame.downscale(4, 2);
 		assert!(scaled.y().iter().all(|&y| y == frame.y()[0]), "{:?}", scaled.y());
 		assert_eq!(scaled.data().len(), 4 * 2 * 3 / 2);
+	}
+
+	#[test]
+	fn converts_odd_widths_to_rgb() {
+		// 3x2 luma, 2x1 chroma: the last column has a chroma sample of its own.
+		let (y, u, v) = ([16, 128, 235, 16, 128, 235], [128, 90], [128, 240]);
+		let planes = Planes {
+			width: 3,
+			height: 2,
+			y: (&y, 3),
+			u: (&u, 2),
+			v: (&v, 2),
+		};
+		let rgb = yuv_to_rgb8(&planes);
+		assert_eq!(rgb.len(), 3 * 2 * 3);
+		for (i, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
+			let (row, col) = (i / 3, i % 3);
+			let expected = yuv_to_rgb(y[row * 3 + col], u[col / 2], v[col / 2]);
+			assert!(max_diff(pixel, &expected) <= 2, "pixel {i}: {pixel:?} vs {expected:?}");
+		}
+	}
+
+	/// BT.601 limited-range RGB -> YUV, one pixel at a time.
+	#[expect(
+		clippy::cast_possible_truncation,
+		clippy::cast_sign_loss,
+		reason = "the result is in 0..=255"
+	)]
+	fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+		(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8
+	}
+
+	#[expect(
+		clippy::cast_possible_truncation,
+		clippy::cast_sign_loss,
+		reason = "the result is in 0..=255"
+	)]
+	fn rgb_to_uv(r: i32, g: i32, b: i32) -> (u8, u8) {
+		let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+		let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+		(u as u8, v as u8)
+	}
+
+	/// The SIMD conversions agree with the per-pixel BT.601 formulas: within 1 to YUV, and
+	/// within 2 back to RGB.
+	#[test]
+	#[expect(clippy::cast_possible_truncation, reason = "the pattern wraps around")]
+	fn agrees_with_the_reference_formulas() {
+		let (w, h) = (64usize, 32usize);
+		let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 256) as u8).collect();
+		let frame = i420(dim(w), dim(h), PixelFormat::Rgb8, rgb.clone());
+		for (i, &y) in frame.y().iter().enumerate() {
+			let p = &rgb[i * 3..i * 3 + 3];
+			let expected = rgb_to_y(i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+			assert!(y.abs_diff(expected) <= 1, "y {i}: {y} vs {expected}");
+		}
+		for (i, (&u, &v)) in frame.u().iter().zip(frame.v()).enumerate() {
+			let (cx, cy) = (i % (w / 2), i / (w / 2));
+			let sum = |c: usize| -> i32 {
+				[(0, 0), (1, 0), (0, 1), (1, 1)]
+					.iter()
+					.map(|(dx, dy)| i32::from(rgb[((cy * 2 + dy) * w + cx * 2 + dx) * 3 + c]))
+					.sum()
+			};
+			let (eu, ev) = rgb_to_uv((sum(0) + 2) >> 2, (sum(1) + 2) >> 2, (sum(2) + 2) >> 2);
+			assert!(
+				u.abs_diff(eu) <= 1 && v.abs_diff(ev) <= 1,
+				"uv {i}: {u},{v} vs {eu},{ev}"
+			);
+		}
+
+		let back = yuv_to_rgb8(&frame.planes());
+		for (i, pixel) in back.as_chunks::<3>().0.iter().enumerate() {
+			let (x, y) = (i % w, i / w);
+			let ci = (y / 2) * (w / 2) + x / 2;
+			let expected = yuv_to_rgb(frame.y()[i], frame.u()[ci], frame.v()[ci]);
+			assert!(max_diff(pixel, &expected) <= 2, "rgb {i}: {pixel:?} vs {expected:?}");
+		}
 	}
 }
