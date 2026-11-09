@@ -14,7 +14,7 @@ use bytes::Bytes;
 use hang::catalog::VideoCodec;
 
 use crate::clock::StreamClock;
-use crate::convert::{I420, Planes, yuv_to_rgb8};
+use crate::convert::{I420, Planes, yuv_to_packed};
 use crate::{Error, Image, PixelFormat, Result};
 
 mod annexb;
@@ -239,19 +239,19 @@ pub(crate) trait EncoderBackend: Send {
 
 /// A codec implementation behind [`Decoder`].
 pub(crate) trait DecoderBackend: Send {
-	/// Decode one frame into packed `rgb8` `(width, height, pixels)` (see [`rgb8_picture`]),
+	/// Decode one frame into packed `format` `(width, height, pixels)` (see [`packed_picture`]),
 	/// failing with [`Error::TooLarge`] for pictures above `max_pixels`.
-	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>>;
+	fn decode(&mut self, data: &[u8], max_pixels: u64, format: PixelFormat) -> Result<Option<(u32, u32, Vec<u8>)>>;
 }
 
-/// A decoder's output picture as packed `rgb8` `(width, height, pixels)`, failing with
+/// A decoder's output picture as packed `format` `(width, height, pixels)`, failing with
 /// [`Error::TooLarge`] before converting a picture above `max_pixels`.
-pub(crate) fn rgb8_picture(planes: &Planes<'_>, max_pixels: u64) -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn packed_picture(planes: &Planes<'_>, max_pixels: u64, format: PixelFormat) -> Result<(u32, u32, Vec<u8>)> {
 	// A picture too large for `u32` saturates, and then fails the size check.
 	let dim = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
 	let (width, height) = (dim(planes.width), dim(planes.height));
 	check_size(width, height, max_pixels)?;
-	Ok((width, height, yuv_to_rgb8(planes)))
+	Ok((width, height, yuv_to_packed(planes, format)?))
 }
 
 /// Default for [`Decoder::set_max_pixels`]: 8K UHD (7680x4320).
@@ -485,6 +485,7 @@ pub struct Decoder {
 	codec: Codec,
 	inner: Box<dyn DecoderBackend>,
 	max_pixels: u64,
+	output: PixelFormat,
 }
 
 impl Decoder {
@@ -504,6 +505,7 @@ impl Decoder {
 			codec,
 			inner,
 			max_pixels: DEFAULT_MAX_PIXELS,
+			output: PixelFormat::Rgb8,
 		})
 	}
 
@@ -522,14 +524,29 @@ impl Decoder {
 		self.max_pixels = max_pixels;
 	}
 
+	/// The pixel format of decoded images.
+	pub fn output_format(&self) -> PixelFormat {
+		self.output
+	}
+
+	/// Decode into `format` images (`rgb8` by default): `rgb8`, `bgr8`, `rgba8`, `bgra8` or
+	/// `mono8` (the luma only). Fails with [`Error::InvalidSettings`] for the 4:2:2 formats.
+	pub fn set_output_format(&mut self, format: PixelFormat) -> Result<()> {
+		if matches!(format, PixelFormat::Uyvy | PixelFormat::Yuyv) {
+			return Err(Error::InvalidSettings(format!("can't decode into {format}")));
+		}
+		self.output = format;
+		Ok(())
+	}
+
 	/// Decode one frame. Returns `None` if no picture is ready yet (e.g. while waiting for a keyframe).
 	///
 	/// Fails with [`Error::TooLarge`] for a picture above [`Decoder::max_pixels`].
 	pub fn decode(&mut self, data: &[u8], timestamp: Duration) -> Result<Option<Image>> {
-		let Some((width, height, rgb)) = self.inner.decode(data, self.max_pixels)? else {
+		let Some((width, height, pixels)) = self.inner.decode(data, self.max_pixels, self.output)? else {
 			return Ok(None);
 		};
-		Ok(Some(Image::new(width, height, PixelFormat::Rgb8, rgb, timestamp)?))
+		Ok(Some(Image::new(width, height, self.output, pixels, timestamp)?))
 	}
 }
 
@@ -815,6 +832,50 @@ pub(crate) mod tests {
 		}
 		let frame = encode(1_000).expect("forced keyframes aren't dropped");
 		assert!(frame.keyframe, "a second passed since the first keyframe");
+	}
+
+	/// Decoders produce every packed format, and refuse the 4:2:2 ones.
+	#[test]
+	fn decodes_into_each_output_format() {
+		let Some(&codec) = Codec::available().first() else {
+			return;
+		};
+		if codec == Codec::H264 && std::env::var_os("OPENH264_LIBRARY").is_none() {
+			return;
+		}
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			hardware: Hardware::Off,
+			..Default::default()
+		})
+		.unwrap();
+		let frame = encoder.encode(&test_pattern(64, 48, 0)).unwrap().unwrap();
+		let rgb = Decoder::new(codec)
+			.unwrap()
+			.decode(&frame.data, frame.timestamp)
+			.unwrap()
+			.unwrap();
+		for format in [
+			PixelFormat::Bgr8,
+			PixelFormat::Rgba8,
+			PixelFormat::Bgra8,
+			PixelFormat::Mono8,
+		] {
+			let mut decoder = Decoder::new(codec).unwrap();
+			decoder.set_output_format(format).unwrap();
+			assert_eq!(decoder.output_format(), format);
+			let image = decoder.decode(&frame.data, frame.timestamp).unwrap().unwrap();
+			assert_eq!((image.width, image.height, image.format), (64, 48, format));
+			if format == PixelFormat::Bgr8 {
+				assert_eq!((image.data[0], image.data[2]), (rgb.data[2], rgb.data[0]));
+			}
+		}
+		let mut decoder = Decoder::new(codec).unwrap();
+		assert!(matches!(
+			decoder.set_output_format(PixelFormat::Uyvy),
+			Err(Error::InvalidSettings(_))
+		));
+		assert_eq!(decoder.output_format(), PixelFormat::Rgb8);
 	}
 
 	#[test]

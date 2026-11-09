@@ -212,7 +212,8 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
   it generated. With `IDL_PACKAGE_FILTER` set, list every package you need (the Docker image includes
   `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `rosgraph_msgs`, and `diagnostic_msgs`).
 
-`moqros-sub` handles both kinds of broadcast: it republishes video as `rgb8` images, and data tracks as their
+`moqros-sub` handles both kinds of broadcast: it republishes video as `rgb8` images (`--encoding` or
+`encoding=` picks `bgr8`, `rgba8`, `bgra8` or `mono8` instead, e.g. for OpenCV), and data tracks as their
 message type. It fails if a broadcast comes back carrying something different from before.
 
 ## Security

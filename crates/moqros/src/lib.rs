@@ -116,7 +116,7 @@ pub use client::{ClientConfig, Session, broadcast_name_for_topic, connect_both};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
 pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
-pub use convert::{I420, Planes, yuv_to_rgb8};
+pub use convert::{I420, Planes, yuv_to_packed, yuv_to_rgb8};
 pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};

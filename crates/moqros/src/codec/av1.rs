@@ -9,10 +9,10 @@ use aom_sys as aom;
 use bytes::BytesMut;
 
 use super::{
-	DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, obu, rgb8_picture,
+	DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, obu, packed_picture,
 };
 use crate::convert::{I420, Planes};
-use crate::{Error, Result};
+use crate::{Error, PixelFormat, Result};
 
 /// Speed/quality trade-off of libaom's real-time mode; 9 is fast enough for live video on
 /// desktop-class CPUs and accepted by every libaom 3.x.
@@ -237,7 +237,7 @@ impl Av1Decoder {
 }
 
 impl DecoderBackend for Av1Decoder {
-	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
+	fn decode(&mut self, data: &[u8], max_pixels: u64, format: PixelFormat) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libaom allocates frame buffers for the declared size. libaom applies every
 		// sequence header in the temporal unit, so check each one, and refuse one that can't be
 		// read rather than let libaom size frames from it unchecked.
@@ -271,7 +271,7 @@ impl DecoderBackend for Av1Decoder {
 				std::array::from_fn(|i| img.planes[i].cast_const()),
 				[img.stride[0], img.stride[1], img.stride[2]],
 			)?;
-			Ok(Some(rgb8_picture(&planes, max_pixels)?))
+			Ok(Some(packed_picture(&planes, max_pixels, format)?))
 		}
 	}
 }

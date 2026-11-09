@@ -17,7 +17,7 @@ struct Cli {
 	topic: Vec<TopicSpec>,
 
 	/// Broadcast to republish on ROS (MoQ -> ROS); repeat for several. Options as in
-	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam,max_height=480`.
+	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam,max_height=480,encoding=bgr8`.
 	/// The topic defaults to `/moqros/<broadcast>`, or `/moqros/image` for a lone broadcast.
 	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
@@ -40,6 +40,10 @@ struct Cli {
 	/// the largest.
 	#[arg(long)]
 	max_height: Option<u32>,
+
+	/// Pixel encoding of the republished images: `rgb8`, `bgr8`, `rgba8`, `bgra8` or `mono8`.
+	#[arg(long, default_value = "rgb8", value_parser = moqros_cli::parse_encoding)]
+	encoding: moqros::PixelFormat,
 
 	#[command(flatten)]
 	encoder: EncoderArgs,
@@ -68,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let broadcasts = match cli.broadcast.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id, cli.max_height)?,
+		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id, cli.max_height, cli.encoding)?,
 	};
 	moqros_cli::check_no_loop(&topics, &broadcasts, None)?;
 

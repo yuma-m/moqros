@@ -8,7 +8,7 @@ use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, Discovery, QosArgs, Re
 #[command(version, about)]
 struct Cli {
 	/// Broadcast to subscribe to; repeat for several. Options after the name override
-	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,max_height=480`.
+	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,max_height=480,encoding=bgr8`.
 	/// Defaults to `image_raw` without `--broadcast-prefix`.
 	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
@@ -23,7 +23,7 @@ struct Cli {
 	#[arg(long, default_value = moqros_cli::DEFAULT_TOPIC_TEMPLATE)]
 	topic_template: String,
 
-	/// Topic to publish on: decoded `rgb8` images for video, or the data track's messages.
+	/// Topic to publish on: decoded images for video, or the data track's messages.
 	/// Single broadcast only; defaults to `/moqros/image` for one broadcast, and to
 	/// `/moqros/<broadcast>` for each of several.
 	#[arg(long)]
@@ -37,6 +37,10 @@ struct Cli {
 	/// the largest.
 	#[arg(long)]
 	max_height: Option<u32>,
+
+	/// Pixel encoding of the republished images: `rgb8`, `bgr8`, `rgba8`, `bgra8` or `mono8`.
+	#[arg(long, default_value = "rgb8", value_parser = moqros_cli::parse_encoding)]
+	encoding: moqros::PixelFormat,
 
 	/// Message type to republish a data track as; defaults to the type its catalog names.
 	/// Single broadcast only.
@@ -64,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
 			cli.topic_template,
 			cli.frame_id.clone(),
 			cli.max_height,
+			cli.encoding,
 		)?),
 	};
 	let specs = match (cli.broadcast.is_empty(), &discovery) {
@@ -72,7 +77,14 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let broadcasts = match specs.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(specs, cli.topic, cli.ros_type, &cli.frame_id, cli.max_height)?,
+		false => moqros_cli::sub_broadcasts(
+			specs,
+			cli.topic,
+			cli.ros_type,
+			&cli.frame_id,
+			cli.max_height,
+			cli.encoding,
+		)?,
 	};
 
 	cli.relay.warn_if_insecure();

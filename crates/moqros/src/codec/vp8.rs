@@ -9,9 +9,11 @@ use bytes::BytesMut;
 use vpx_sys as vpx;
 
 use super::vp8_header::keyframe_size;
-use super::{DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, rgb8_picture};
+use super::{
+	DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, check_size, default_threads, packed_picture,
+};
 use crate::convert::{I420, Planes};
-use crate::{Error, Result};
+use crate::{Error, PixelFormat, Result};
 
 /// Speed/quality trade-off; negative values select real-time mode in libvpx.
 /// -8 is in the range WebRTC uses for desktop-class CPUs.
@@ -229,7 +231,7 @@ impl Vp8Decoder {
 }
 
 impl DecoderBackend for Vp8Decoder {
-	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
+	fn decode(&mut self, data: &[u8], max_pixels: u64, format: PixelFormat) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// Check before libvpx allocates frame buffers for the declared size.
 		if let Some((width, height)) = keyframe_size(data) {
 			check_size(width, height, max_pixels)?;
@@ -258,7 +260,7 @@ impl DecoderBackend for Vp8Decoder {
 				std::array::from_fn(|i| img.planes[i].cast_const()),
 				[img.stride[0], img.stride[1], img.stride[2]],
 			)?;
-			Ok(Some(rgb8_picture(&planes, max_pixels)?))
+			Ok(Some(packed_picture(&planes, max_pixels, format)?))
 		}
 	}
 }
