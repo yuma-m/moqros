@@ -18,5 +18,6 @@ pub use bridges::{Bridges, Relay, run_bridges};
 pub use params::{init, strip_ros_args};
 pub use runtime::{SharedNode, Spinner, init_logging, shutdown_signal, spawn_spinner};
 pub use spec::{
-	BroadcastSpec, DEFAULT_SUB_TOPIC, PubTopic, SubBroadcast, TopicSpec, check_no_loop, pub_topics, sub_broadcasts,
+	BroadcastSpec, DEFAULT_SUB_TOPIC, DEFAULT_TOPIC_TEMPLATE, Discovery, PubTopic, SubBroadcast, TopicSpec,
+	check_no_loop, pub_topics, sub_broadcasts,
 };

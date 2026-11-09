@@ -166,6 +166,10 @@ that name a single topic or broadcast (`--type`, and the other side's name) are 
 moqros-bridge --topic /camera/image_raw --topic /odom,format=json --broadcast cmd_vel,topic=/cmd_vel
 ```
 
+`moqros-sub --broadcast-prefix robots` also republishes every broadcast announced under `robots/` (now or later),
+on `/moqros/<broadcast>` (`--topic-template '/remote/{name}'` names it otherwise). A broadcast whose name doesn't
+make a plain topic name (e.g. `robots/r-2/camera`) is skipped with a warning; see [Security](#security).
+
 Each topic becomes a broadcast of its own. `--type` and `--broadcast` of `moqros-pub`, and `--topic` and
 `--type` of `moqros-sub`, name a single topic, so they only work with one `--topic` or `--broadcast`. Video
 topics start at once. A data topic without a `type` starts when it appears in the ROS graph. `moqros-sub`
@@ -217,6 +221,10 @@ Keep these in mind before you connect the bridges to a relay beyond localhost:
   as ROS messages. On a relay with anonymous publishing, someone else can publish under the same name and
   inject messages into your ROS graph, e.g. `geometry_msgs/msg/Twist` on a command topic. Broadcast names
   aren't secret: subscribers can list what's announced under a path.
+- **`--broadcast-prefix` lets publishers create topics.** Every broadcast announced under the prefix becomes a
+  ROS topic on this node, named after the broadcast and typed by its catalog. Only names that make plain topic
+  names (letters, digits, `_` and `/`) are used, and each broadcast and topic is taken once, but use a prefix
+  only on a relay where you trust everyone who may publish under it.
 - **Decoded pictures are capped.** A few bytes of bitstream can declare a huge picture, so `moqros-sub`
   rejects pictures above 8K UHD (7680×4320 pixels) instead of allocating them, and resubscribes.
 - **`http://` relay URLs trust the network.** QUIC always encrypts the stream, but with an `http://` URL the

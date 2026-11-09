@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 		video: cli.encoder.broadcast_settings(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
+		discovery: None,
 	};
 	moqros_cli::run_bridges(node, Relay::publisher(publisher), bridges).await
 }

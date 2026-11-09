@@ -96,6 +96,16 @@ impl Subscriber {
 		}
 	}
 
+	/// Follow the broadcasts announced under `prefix` (whole path segments: `robots` covers
+	/// `robots/a/camera` but not `robots2`; an empty prefix covers every broadcast), including the
+	/// ones announced already.
+	pub fn announced(&self, prefix: &str) -> Announcements {
+		Announcements {
+			announced: self.origin.consume().announced(),
+			prefix: prefix.trim_matches('/').to_string(),
+		}
+	}
+
 	/// Wait for `name` to be announced and read its first catalog. Also returns a watch on
 	/// the announcement, which the subscription ends with.
 	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, Catalog, RouteWatch)> {
@@ -164,6 +174,31 @@ async fn data(
 	);
 	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
 	Ok(DataSubscriber::new(broadcast, reader, settings))
+}
+
+/// Broadcasts announced under a prefix, from [`Subscriber::announced`].
+pub struct Announcements {
+	announced: moq_net::announce::Consumer,
+	prefix: String,
+}
+
+impl Announcements {
+	/// The name of the next broadcast announced (or announced again) under the prefix, or `None`
+	/// once the connection is gone for good. Names come from whoever announces them.
+	pub async fn next(&mut self) -> Option<String> {
+		while let Some(update) = self.announced.next().await {
+			let name = update.prefix.as_str();
+			if update.kind.is_active() && is_under(name, &self.prefix) {
+				return Some(name.to_string());
+			}
+		}
+		None
+	}
+}
+
+/// Whether the broadcast `name` is under `prefix`, by whole path segments.
+fn is_under(name: &str, prefix: &str) -> bool {
+	prefix.is_empty() || name == prefix || name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Which video rendition [`Subscriber::subscribe_images_with`] picks, among those whose codec
@@ -296,6 +331,35 @@ mod tests {
 		)
 		.await
 		.unwrap()
+	}
+
+	#[test]
+	fn matches_prefixes_by_segment() {
+		assert!(is_under("robots/a/camera", "robots"));
+		assert!(is_under("robots/a/camera", "robots/a"));
+		assert!(is_under("robots", "robots"));
+		assert!(is_under("anything", ""));
+		assert!(!is_under("robots2/camera", "robots"));
+		assert!(!is_under("robot", "robots"));
+	}
+
+	/// Broadcasts already announced, and later ones, come back when under the prefix.
+	#[tokio::test]
+	async fn follows_announcements_under_a_prefix() {
+		let origin = moq_tokio::origin::spawn();
+		let first = origin.create_broadcast("robots/a/camera").unwrap();
+		first.announce(Default::default()).unwrap();
+		// What `Subscriber::announced("robots/")` returns.
+		let mut announced = Announcements {
+			announced: origin.consume().announced(),
+			prefix: "robots".into(),
+		};
+		let other = origin.create_broadcast("robots2/camera").unwrap();
+		other.announce(Default::default()).unwrap();
+		let second = origin.create_broadcast("robots/b/camera").unwrap();
+		second.announce(Default::default()).unwrap();
+		assert_eq!(announced.next().await.as_deref(), Some("robots/a/camera"));
+		assert_eq!(announced.next().await.as_deref(), Some("robots/b/camera"));
 	}
 
 	/// Other tasks of a single-threaded runtime run while a picture decodes.

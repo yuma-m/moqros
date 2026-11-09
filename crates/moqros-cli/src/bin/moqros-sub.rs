@@ -2,15 +2,26 @@
 //! images, or data tracks as the message type they carry.
 
 use clap::Parser;
-use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, QosArgs, Relay, RelayArgs, init_logging};
+use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, Discovery, QosArgs, Relay, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
 	/// Broadcast to subscribe to; repeat for several. Options after the name override
 	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,max_height=480`.
-	#[arg(long, default_value = "image_raw")]
+	/// Defaults to `image_raw` without `--broadcast-prefix`.
+	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
+
+	/// Also republish every broadcast announced under this prefix (whole path segments), on
+	/// the topic `--topic-template` names; repeat for several. Broadcast names come from whoever
+	/// announces them: ones that don't make plain topic names are skipped.
+	#[arg(long)]
+	broadcast_prefix: Vec<String>,
+
+	/// Topic of a broadcast found by `--broadcast-prefix`, `{name}` standing for its name.
+	#[arg(long, default_value = moqros_cli::DEFAULT_TOPIC_TEMPLATE)]
+	topic_template: String,
 
 	/// Topic to publish on: decoded `rgb8` images for video, or the data track's messages.
 	/// Single broadcast only; defaults to `/moqros/image` for one broadcast, and to
@@ -46,7 +57,23 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
 	init_logging();
 	let (cli, node) = moqros_cli::init::<Cli>("moqros_sub")?;
-	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id, cli.max_height)?;
+	let discovery = match cli.broadcast_prefix.is_empty() {
+		true => None,
+		false => Some(Discovery::new(
+			cli.broadcast_prefix,
+			cli.topic_template,
+			cli.frame_id.clone(),
+			cli.max_height,
+		)?),
+	};
+	let specs = match (cli.broadcast.is_empty(), &discovery) {
+		(true, None) => vec!["image_raw".parse().expect("a valid spec")],
+		_ => cli.broadcast,
+	};
+	let broadcasts = match specs.is_empty() {
+		true => Vec::new(),
+		false => moqros_cli::sub_broadcasts(specs, cli.topic, cli.ros_type, &cli.frame_id, cli.max_height)?,
+	};
 
 	cli.relay.warn_if_insecure();
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
@@ -57,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
 		video: Default::default(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
+		discovery,
 	};
 	moqros_cli::run_bridges(node, Relay::subscriber(subscriber), bridges).await
 }

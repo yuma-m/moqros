@@ -118,7 +118,7 @@ pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, D
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
 pub use publisher::{ImageBroadcastSettings, ImagePublisher, Publisher, RenditionSettings};
-pub use subscriber::{ImageOptions, ImageSubscriber, Subscriber, Subscription, VideoFrame};
+pub use subscriber::{Announcements, ImageOptions, ImageSubscriber, Subscriber, Subscription, VideoFrame};
 
 /// Re-exported so applications can name hang/moq types without version skew.
 pub use hang;
