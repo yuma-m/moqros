@@ -12,8 +12,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use moqros::{
-	ClientConfig, Codec, DataFormat, DataMode, DataSettings, EncoderSettings, Image, PixelFormat, Publisher,
-	Subscriber, Subscription,
+	ClientConfig, Codec, DataFormat, DataMode, DataSettings, EncoderSettings, Image, ImageBroadcastSettings,
+	ImageOptions, PixelFormat, Publisher, RenditionSettings, Subscriber, Subscription,
 };
 
 struct Relay(Child);
@@ -93,10 +93,16 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 	let name = format!("test/image-{codec}");
 	let mut broadcast = publisher.create_image_broadcast(
 		&name,
-		EncoderSettings {
-			codec,
-			keyframe_interval: Duration::from_millis(200),
-			..Default::default()
+		ImageBroadcastSettings {
+			encoder: EncoderSettings {
+				codec,
+				keyframe_interval: Duration::from_millis(200),
+				..Default::default()
+			},
+			renditions: vec![RenditionSettings {
+				height: 60,
+				bitrate: 200_000,
+			}],
 		},
 	)?;
 
@@ -132,6 +138,18 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 		received.windows(2).all(|w| w[0] < w[1]),
 		"{codec}: timestamps increase: {received:?}"
 	);
+
+	// The smaller rendition, for a subscriber that wants at most 100 rows.
+	let options = ImageOptions::default().with_max_height(100);
+	let mut small = tokio::time::timeout(
+		Duration::from_secs(10),
+		subscriber.subscribe_images_with(&name, &options),
+	)
+	.await??;
+	let image = tokio::time::timeout(Duration::from_secs(5), small.next_image())
+		.await??
+		.expect("broadcast ended early");
+	assert_eq!((image.width, image.height), (80, 60), "{codec}");
 
 	stop_tx.send(()).ok();
 	pub_task.await??;

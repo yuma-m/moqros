@@ -8,7 +8,9 @@ use r2r::std_msgs::msg::Header;
 use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
 use super::{Bridge, QosProfile, RosImage, Teardown, image_to_ros, now_stamp};
-use crate::{DataFormat, DataSettings, DataSubscriber, Error, ImageSubscriber, Result, Subscriber, Subscription};
+use crate::{
+	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, Result, Subscriber, Subscription,
+};
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
 /// `rgb8` images, or the messages of a data track.
@@ -74,16 +76,24 @@ impl RosTarget {
 pub struct MoqToRos {
 	subscriber: Subscriber,
 	broadcast: String,
+	options: ImageOptions,
 	first: Subscription,
 }
 
 impl MoqToRos {
 	/// Subscribe to `broadcast`, retrying until it is announced and readable.
 	pub async fn subscribe(subscriber: Subscriber, broadcast: &str) -> Self {
-		let first = subscribe(&subscriber, broadcast).await;
+		Self::subscribe_with(subscriber, broadcast, ImageOptions::default()).await
+	}
+
+	/// Like [`MoqToRos::subscribe`], picking a video rendition by `options`, also when
+	/// resubscribing.
+	pub async fn subscribe_with(subscriber: Subscriber, broadcast: &str, options: ImageOptions) -> Self {
+		let first = subscribe(&subscriber, broadcast, &options).await;
 		Self {
 			subscriber,
 			broadcast: broadcast.to_string(),
+			options,
 			first,
 		}
 	}
@@ -130,7 +140,15 @@ impl MoqToRos {
 		let slot = released.clone();
 		let bridge = Bridge::spawn(|stats| async move {
 			let mut output = output;
-			let result = republish(self.subscriber, self.broadcast, self.first, &mut output, stats).await;
+			let result = republish(
+				self.subscriber,
+				self.broadcast,
+				self.options,
+				self.first,
+				&mut output,
+				stats,
+			)
+			.await;
 			*slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(output);
 			result
 		});
@@ -143,9 +161,9 @@ impl MoqToRos {
 }
 
 /// Subscribe to `broadcast`, retrying until it is announced and readable.
-async fn subscribe(subscriber: &Subscriber, broadcast: &str) -> Subscription {
+async fn subscribe(subscriber: &Subscriber, broadcast: &str, options: &ImageOptions) -> Subscription {
 	loop {
-		match subscriber.subscribe(broadcast).await {
+		match subscriber.subscribe_with(broadcast, options).await {
 			Ok(subscription) => return subscription,
 			Err(err) => {
 				tracing::warn!(%err, broadcast, "subscribe failed, retrying");
@@ -185,6 +203,7 @@ impl RosOutput {
 async fn republish(
 	subscriber: Subscriber,
 	broadcast: String,
+	options: ImageOptions,
 	first: Subscription,
 	output: &mut RosOutput,
 	stats: StatsSender,
@@ -193,7 +212,7 @@ async fn republish(
 	loop {
 		let subscription = match first.take() {
 			Some(subscription) => subscription,
-			None => subscribe(&subscriber, &broadcast).await,
+			None => subscribe(&subscriber, &broadcast, &options).await,
 		};
 
 		let ended = match (subscription, &mut *output) {

@@ -20,7 +20,7 @@ pub struct Bridges {
 	pub topics: Vec<PubTopic>,
 	pub broadcasts: Vec<SubBroadcast>,
 	/// For video topics.
-	pub encoder: moqros::EncoderSettings,
+	pub video: moqros::ImageBroadcastSettings,
 	pub qos: QosProfile,
 	/// How often to publish the bridges' statistics on `/diagnostics`, if at all.
 	pub diagnostics_period: Option<Duration>,
@@ -78,7 +78,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	let Bridges {
 		topics,
 		broadcasts,
-		mut encoder,
+		mut video,
 		qos,
 		diagnostics_period,
 	} = bridges;
@@ -129,7 +129,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 
 	loop {
 		if let Some(publisher) = &relay.publisher {
-			for (topic, bridge) in pending.start_ready(&node, publisher, &encoder, &qos, &mut restarts)? {
+			for (topic, bridge) in pending.start_ready(&node, publisher, &video, &qos, &mut restarts)? {
 				let stats = bridge.watch_stats();
 				if let Some((diagnostics, _)) = &mut diagnostics {
 					diagnostics.running(
@@ -170,7 +170,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 				match runtime_bitrate(&name, &value) {
 					Some(Ok(bitrate)) => {
 						tracing::info!(bitrate, "changing the video bitrate");
-						encoder.bitrate = bitrate;
+						video.encoder.bitrate = bitrate;
 						for control in bitrates.values() {
 							control.set(bitrate);
 						}
@@ -272,7 +272,12 @@ async fn subscribe_after(
 	delay: Duration,
 ) -> (MoqToRos, SubBroadcast) {
 	tokio::time::sleep(delay).await;
-	(MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast)
+	let mut options = moqros::ImageOptions::default();
+	options.max_height = broadcast.max_height;
+	(
+		MoqToRos::subscribe_with(subscriber, &broadcast.broadcast, options).await,
+		broadcast,
+	)
 }
 
 /// Log why the bridge of `kind` `name` stopped.
@@ -365,7 +370,7 @@ impl PendingTopics {
 		&mut self,
 		node: &SharedNode,
 		publisher: &moqros::Publisher,
-		encoder: &moqros::EncoderSettings,
+		video: &moqros::ImageBroadcastSettings,
 		qos: &QosProfile,
 		restarts: &mut Restarts,
 	) -> anyhow::Result<Vec<(PubTopic, Bridge)>> {
@@ -377,7 +382,7 @@ impl PendingTopics {
 				self.topics.push(pending);
 				continue;
 			}
-			match node.with(|node| start_pub_topic(node, publisher, &pending.topic, encoder, qos.clone())) {
+			match node.with(|node| start_pub_topic(node, publisher, &pending.topic, video, qos.clone())) {
 				Ok(Some(bridge)) => started.push((pending.topic, bridge)),
 				Ok(None) => {
 					waiting.push(pending.topic.topic.clone());
@@ -406,12 +411,12 @@ fn start_pub_topic(
 	node: &mut r2r::Node,
 	publisher: &moqros::Publisher,
 	topic: &PubTopic,
-	encoder: &moqros::EncoderSettings,
+	video: &moqros::ImageBroadcastSettings,
 	qos: QosProfile,
 ) -> anyhow::Result<Option<Bridge>> {
 	let bridge = match topic.format.data() {
 		None => {
-			let images = publisher.create_image_broadcast(&topic.broadcast, encoder.clone())?;
+			let images = publisher.create_image_broadcast(&topic.broadcast, video.clone())?;
 			moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?
 		}
 		Some(format) => {

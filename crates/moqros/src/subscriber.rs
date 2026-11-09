@@ -63,8 +63,13 @@ impl Subscriber {
 	/// Wait for `name` to be announced, then subscribe to its best video rendition
 	/// whose codec this build can decode.
 	pub async fn subscribe_images(&self, name: &str) -> Result<ImageSubscriber> {
+		self.subscribe_images_with(name, &ImageOptions::default()).await
+	}
+
+	/// Like [`Subscriber::subscribe_images`], picking the rendition by `options`.
+	pub async fn subscribe_images_with(&self, name: &str, options: &ImageOptions) -> Result<ImageSubscriber> {
 		let (broadcast, catalog, route) = self.catalog(name).await?;
-		images(name, broadcast, &catalog, route).await
+		images(name, broadcast, &catalog, route, options).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to its data track.
@@ -76,9 +81,16 @@ impl Subscriber {
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
 	/// if this build can decode it, otherwise its data track.
 	pub async fn subscribe(&self, name: &str) -> Result<Subscription> {
+		self.subscribe_with(name, &ImageOptions::default()).await
+	}
+
+	/// Like [`Subscriber::subscribe`], picking a video rendition by `options`.
+	pub async fn subscribe_with(&self, name: &str, options: &ImageOptions) -> Result<Subscription> {
 		let (broadcast, catalog, route) = self.catalog(name).await?;
 		match Kind::of(&catalog) {
-			Kind::Images => Ok(Subscription::Images(images(name, broadcast, &catalog, route).await?)),
+			Kind::Images => Ok(Subscription::Images(
+				images(name, broadcast, &catalog, route, options).await?,
+			)),
 			Kind::Data => Ok(Subscription::Data(data(name, broadcast, &catalog, route).await?)),
 			Kind::None => Err(Error::NoTracks(name.to_string())),
 		}
@@ -112,8 +124,9 @@ async fn images(
 	broadcast: moq_net::broadcast::Consumer,
 	catalog: &Catalog,
 	route: RouteWatch,
+	options: &ImageOptions,
 ) -> Result<ImageSubscriber> {
-	let (track, config, codec) = catalog::select_video(catalog, name)?;
+	let (track, config, codec) = catalog::select_video(catalog, name, options.max_height)?;
 	tracing::info!(
 		broadcast = name,
 		// The track name comes from the remote catalog: record it as a str (quoted
@@ -151,6 +164,24 @@ async fn data(
 	);
 	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
 	Ok(DataSubscriber::new(broadcast, reader, settings))
+}
+
+/// Which video rendition [`Subscriber::subscribe_images_with`] picks, among those whose codec
+/// this build can decode. The rendition is picked once, from the catalog at subscription time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImageOptions {
+	/// The tallest picture wanted: the largest rendition at most this tall, or the smallest if
+	/// none is. `None` picks the largest.
+	pub max_height: Option<u32>,
+}
+
+impl ImageOptions {
+	/// Set [`ImageOptions::max_height`].
+	pub fn with_max_height(mut self, max_height: u32) -> Self {
+		self.max_height = Some(max_height);
+		self
+	}
 }
 
 /// What [`Subscriber::subscribe`] found in a broadcast.
@@ -256,9 +287,15 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap();
-		images(name, broadcast, &catalog, RouteWatch::new(announced, name))
-			.await
-			.unwrap()
+		images(
+			name,
+			broadcast,
+			&catalog,
+			RouteWatch::new(announced, name),
+			&ImageOptions::default(),
+		)
+		.await
+		.unwrap()
 	}
 
 	/// Other tasks of a single-threaded runtime run while a picture decodes.

@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 	let bridges = Bridges {
 		topics,
 		broadcasts: Vec::new(),
-		encoder: cli.encoder.settings(),
+		video: cli.encoder.broadcast_settings(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
 	};

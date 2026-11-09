@@ -3,12 +3,13 @@
 //! This is the wire format other hang clients have to agree on, notably the web viewer
 //! (`examples/web/src/moq/classify.ts` decides video vs. data the same way [`Kind::of`] does).
 //!
-//! - A video broadcast lists one rendition, [`VIDEO_TRACK`], in the hang "legacy" container.
+//! - A video broadcast lists its full-size rendition, [`VIDEO_TRACK`], and any smaller ones
+//!   (`video_<height>p`), in the hang "legacy" container.
 //! - A data broadcast lists one track, [`DATA_TRACK`], in the `json` section ([`DataFormat::Json`])
 //!   or the `binary` section with MIME type [`CDR_MIME`] ([`DataFormat::Cdr`]), plus its
 //!   [`DataMode`] and ROS message type (`rosType`).
 
-use hang::catalog::{BinaryConfig, Catalog, Container, JsonConfig, Mode, VideoConfig};
+use hang::catalog::{BinaryConfig, Catalog, Container, JsonConfig, Mode, VideoCodec, VideoConfig};
 
 use crate::codec::{Codec, EncodedFrame, EncoderSettings};
 use crate::{DataFormat, DataMode, DataSettings, Error, Result};
@@ -25,33 +26,71 @@ pub const CDR_MIME: &str = "application/x-ros2-cdr";
 /// Catalog field naming the ROS message type of a data track.
 const ROS_TYPE_KEY: &str = "rosType";
 
-/// The catalog of a video broadcast whose latest keyframe is `frame`.
-pub(crate) fn video(frame: &EncodedFrame, settings: &EncoderSettings) -> Result<Catalog> {
-	let mut config = VideoConfig::new(frame.codec.clone());
-	config.coded_width = Some(frame.width);
-	config.coded_height = Some(frame.height);
-	config.bitrate = Some(u64::from(settings.bitrate));
-	config.framerate = Some(f64::from(settings.max_fps));
-	config.container = Container::Legacy;
+/// The video rendition of a broadcast: the codec of its latest keyframe and its size.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Rendition {
+	pub(crate) codec: VideoCodec,
+	pub(crate) width: u32,
+	pub(crate) height: u32,
+}
 
+impl From<&EncodedFrame> for Rendition {
+	fn from(frame: &EncodedFrame) -> Self {
+		Self {
+			codec: frame.codec.clone(),
+			width: frame.width,
+			height: frame.height,
+		}
+	}
+}
+
+/// The catalog of a video broadcast with `renditions`, each a track name, what it carries, and the
+/// settings it is encoded with.
+pub(crate) fn video<'a>(
+	renditions: impl IntoIterator<Item = (&'a str, &'a Rendition, &'a EncoderSettings)>,
+) -> Result<Catalog> {
 	let mut catalog = Catalog::<()>::default();
-	catalog.video.insert(VIDEO_TRACK, config)?;
+	for (track, rendition, settings) in renditions {
+		let mut config = VideoConfig::new(rendition.codec.clone());
+		config.coded_width = Some(rendition.width);
+		config.coded_height = Some(rendition.height);
+		config.bitrate = Some(u64::from(settings.bitrate));
+		config.framerate = Some(f64::from(settings.max_fps));
+		config.container = Container::Legacy;
+		catalog.video.insert(track, config)?;
+	}
 	Ok(catalog)
 }
 
-/// The best video rendition of broadcast `name` whose codec this build can decode.
-pub(crate) fn select_video<'a>(catalog: &'a Catalog, name: &str) -> Result<(&'a str, &'a VideoConfig, Codec)> {
-	let mut renditions = catalog.video.ranked().peekable();
-	if renditions.peek().is_none() {
+/// The best video rendition of broadcast `name` whose codec this build can decode: the largest
+/// one, or with `max_height` the largest one at most that tall (the smallest if none is).
+pub(crate) fn select_video<'a>(
+	catalog: &'a Catalog,
+	name: &str,
+	max_height: Option<u32>,
+) -> Result<(&'a str, &'a VideoConfig, Codec)> {
+	if catalog.video.renditions.is_empty() {
 		return Err(Error::NoVideo(name.to_string()));
 	}
 	let mut offered = Vec::new();
-	renditions
-		.find_map(|(track, config)| {
+	let decodable: Vec<_> = catalog
+		.video
+		.ranked()
+		.filter_map(|(track, config)| {
 			offered.push(config.codec.to_string());
 			let codec = Codec::from_catalog(&config.codec).filter(|c| c.is_available())?;
 			Some((track.as_str(), config, codec))
 		})
+		.collect();
+	let fits = |(_, config, _): &&(&str, &VideoConfig, Codec)| {
+		max_height.is_none_or(|max| config.coded_height.is_some_and(|height| height <= max))
+	};
+	// Ranked largest first.
+	decodable
+		.iter()
+		.find(fits)
+		.or(decodable.last())
+		.copied()
 		.ok_or_else(|| Error::UnsupportedCodec(offered.join(", ")))
 }
 
@@ -214,9 +253,11 @@ mod tests {
 	#[test]
 	fn reports_the_video_codecs_on_offer() {
 		let empty = catalog(serde_json::json!({}));
-		assert!(matches!(select_video(&empty, "cam"), Err(Error::NoVideo(name)) if name == "cam"));
+		assert!(matches!(select_video(&empty, "cam", None), Err(Error::NoVideo(name)) if name == "cam"));
 		let vp9 = catalog(serde_json::json!({ "video": { "renditions": { "video": { "codec": "vp09.00.10.08" } } } }));
-		assert!(matches!(select_video(&vp9, "cam"), Err(Error::UnsupportedCodec(codecs)) if codecs == "vp09.00.10.08"));
+		assert!(
+			matches!(select_video(&vp9, "cam", None), Err(Error::UnsupportedCodec(codecs)) if codecs == "vp09.00.10.08")
+		);
 	}
 
 	#[test]
@@ -310,5 +351,23 @@ mod tests {
 		] {
 			assert_eq!(ros_type(invalid), None, "{invalid:?}");
 		}
+	}
+
+	#[test]
+	fn selects_renditions_by_height() {
+		let rendition =
+			|height| serde_json::json!({ "codec": "vp8", "codedWidth": height * 16 / 9, "codedHeight": height });
+		let catalog = catalog(serde_json::json!({ "video": { "renditions": {
+			"video": rendition(1080), "video_360p": rendition(360), "video_720p": rendition(720),
+		} } }));
+		if !Codec::Vp8.is_available() {
+			return;
+		}
+		let track = |max_height| select_video(&catalog, "cam", max_height).unwrap().0;
+		assert_eq!(track(None), "video");
+		assert_eq!(track(Some(1080)), "video");
+		assert_eq!(track(Some(800)), "video_720p");
+		assert_eq!(track(Some(360)), "video_360p");
+		assert_eq!(track(Some(100)), "video_360p");
 	}
 }

@@ -127,6 +127,23 @@ pub struct EncoderArgs {
 	/// Maximum keyframe (MoQ group) interval of the video in milliseconds.
 	#[arg(long, default_value_t = 2000)]
 	pub keyframe_interval_ms: u64,
+
+	/// A smaller rendition of each video, as `HEIGHTp@BITRATE` (e.g. `360p@500000`); repeat for
+	/// several. Viewers pick the one that suits them.
+	#[arg(id = "rendition", long = "rendition", value_parser = parse_rendition)]
+	pub renditions: Vec<moqros::RenditionSettings>,
+}
+
+/// Parse `HEIGHT[p]@BITRATE`, e.g. `360p@500000`.
+fn parse_rendition(spec: &str) -> Result<moqros::RenditionSettings, String> {
+	let invalid = || format!("expected HEIGHTp@BITRATE (e.g. 360p@500000), got {spec:?}");
+	let (height, bitrate) = spec.split_once('@').ok_or_else(invalid)?;
+	let height: u32 = height.trim().trim_end_matches('p').parse().map_err(|_| invalid())?;
+	let bitrate: u32 = bitrate.trim().parse().map_err(|_| invalid())?;
+	if height < 2 || bitrate == 0 {
+		return Err(invalid());
+	}
+	Ok(moqros::RenditionSettings { height, bitrate })
 }
 
 impl EncoderArgs {
@@ -138,6 +155,14 @@ impl EncoderArgs {
 			keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
 			hardware: self.hw,
 			..Default::default()
+		}
+	}
+
+	/// The settings of every rendition.
+	pub fn broadcast_settings(&self) -> moqros::ImageBroadcastSettings {
+		moqros::ImageBroadcastSettings {
+			encoder: self.settings(),
+			renditions: self.renditions.clone(),
 		}
 	}
 }
@@ -154,5 +179,29 @@ pub struct DiagnosticsArgs {
 impl DiagnosticsArgs {
 	pub fn period(&self) -> Option<Duration> {
 		(self.diagnostics_period_ms > 0).then(|| Duration::from_millis(self.diagnostics_period_ms))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parses_renditions() {
+		let rendition = |height, bitrate| moqros::RenditionSettings { height, bitrate };
+		assert_eq!(parse_rendition("360p@500000"), Ok(rendition(360, 500_000)));
+		assert_eq!(parse_rendition("720@2000000"), Ok(rendition(720, 2_000_000)));
+		for bad in [
+			"360p",
+			"@500000",
+			"360p@",
+			"p@1",
+			"1p@100",
+			"360p@0",
+			"360p@1.5M",
+			"-360p@1",
+		] {
+			assert!(parse_rendition(bad).is_err(), "{bad}");
+		}
 	}
 }
