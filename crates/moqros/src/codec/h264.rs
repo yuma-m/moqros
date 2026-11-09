@@ -176,6 +176,13 @@ mod tests {
 	}
 
 	#[test]
+	fn bitrate_changes() {
+		if available() {
+			tests::bitrate_changes(Codec::H264);
+		}
+	}
+
+	#[test]
 	fn catalog_codec_from_sps() {
 		if available() {
 			let mut encoder = super::super::Encoder::new(super::super::EncoderSettings {

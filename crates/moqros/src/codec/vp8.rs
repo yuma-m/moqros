@@ -55,6 +55,8 @@ impl Drop for Context {
 
 pub(crate) struct Vp8Encoder {
 	ctx: Context,
+	/// The configuration the encoder runs with, to change it later.
+	cfg: Config,
 	width: u32,
 	height: u32,
 	frame_duration: u64,
@@ -79,7 +81,7 @@ impl Vp8Encoder {
 			cfg.g_lag_in_frames = 0;
 			cfg.g_error_resilient = vpx::VPX_ERROR_RESILIENT_DEFAULT;
 			cfg.rc_end_usage = vpx::vpx_rc_mode::VPX_CBR;
-			cfg.rc_target_bitrate = (settings.bitrate / 1000).max(1);
+			cfg.rc_target_bitrate = kbps(settings.bitrate);
 			cfg.rc_min_quantizer = 4;
 			cfg.rc_max_quantizer = 56;
 			cfg.rc_dropframe_thresh = 0;
@@ -98,6 +100,7 @@ impl Vp8Encoder {
 
 			Ok(Self {
 				ctx,
+				cfg: Config(cfg),
 				width,
 				height,
 				frame_duration: settings.frame_duration_micros(),
@@ -106,7 +109,28 @@ impl Vp8Encoder {
 	}
 }
 
+/// An encoder configuration.
+struct Config(vpx::vpx_codec_enc_cfg_t);
+
+// SAFETY: the configuration is plain data; its only pointers (two-pass statistics) stay null.
+unsafe impl Send for Config {}
+
+/// A bitrate in bit/s as libvpx takes it, in kbit/s.
+fn kbps(bitrate: u32) -> u32 {
+	(bitrate / 1000).max(1)
+}
+
 impl EncoderBackend for Vp8Encoder {
+	fn set_bitrate(&mut self, bitrate: u32) -> Result<bool> {
+		let mut cfg = self.cfg.0;
+		cfg.rc_target_bitrate = kbps(bitrate);
+		// SAFETY: the context is initialised, and `cfg` is its configuration with another bitrate.
+		let err = unsafe { vpx::vpx_codec_enc_config_set(&mut self.ctx.0, &cfg) };
+		self.ctx.check(err)?;
+		self.cfg.0 = cfg;
+		Ok(true)
+	}
+
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		// libvpx reads a whole picture of the configured size from the frame's buffer.
 		if (frame.width(), frame.height()) != (self.width as usize, self.height as usize) {
@@ -272,6 +296,11 @@ mod tests {
 	#[test]
 	fn keyframes() {
 		tests::keyframes(Codec::Vp8);
+	}
+
+	#[test]
+	fn bitrate_changes() {
+		tests::bitrate_changes(Codec::Vp8);
 	}
 
 	#[test]

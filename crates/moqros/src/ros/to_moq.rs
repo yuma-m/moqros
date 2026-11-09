@@ -7,14 +7,15 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
 use super::meter::{RateMeter, WarnOnce};
-use super::{Bridge, QosProfile, RosImage, image_from_ros};
+use super::{BitrateControl, Bridge, QosProfile, RosImage, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
 /// Forward a ROS image topic into a MoQ broadcast.
 ///
 /// Encoding runs on a dedicated blocking thread. When it can't keep up, a
 /// pending image is replaced by the newest one so latency stays bounded.
-/// The returned [`Bridge`] resolves when the topic stream or the broadcast ends.
+/// The returned [`Bridge`] resolves when the topic stream or the broadcast ends; its
+/// [`bitrate_control`](Bridge::bitrate_control) changes the bitrate while it runs.
 pub fn spawn_ros_to_moq(
 	node: &mut r2r::Node,
 	topic: &str,
@@ -23,8 +24,9 @@ pub fn spawn_ros_to_moq(
 ) -> Result<Bridge> {
 	let mut stream = node.subscribe::<RosImage>(topic, qos)?;
 	let topic = topic.to_string();
+	let (bitrate_control, mut bitrate) = BitrateControl::new(broadcast.settings().bitrate);
 
-	Ok(Bridge::spawn(|stats| async move {
+	let bridge = Bridge::spawn(|stats| async move {
 		let slot = Arc::new(LatestSlot::default());
 		let encoder = tokio::task::spawn_blocking({
 			let slot = slot.clone();
@@ -32,6 +34,9 @@ pub fn spawn_ros_to_moq(
 			move || -> Result<()> {
 				let mut warned = WarnOnce::default();
 				while let Some(msg) = slot.take() {
+					if bitrate.has_changed().unwrap_or(false) {
+						broadcast.set_bitrate(*bitrate.borrow_and_update());
+					}
 					let image = match image_from_ros(msg) {
 						Ok(image) => image,
 						Err(err) => {
@@ -67,7 +72,8 @@ pub fn spawn_ros_to_moq(
 		}
 		drop(slot);
 		encoder.await.expect("encoder thread panicked")
-	}))
+	});
+	Ok(bridge.with_bitrate_control(bitrate_control))
 }
 
 /// A single-element mailbox where a new value replaces the pending one.

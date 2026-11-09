@@ -56,6 +56,8 @@ impl Drop for Context {
 
 pub(crate) struct Av1Encoder {
 	ctx: Context,
+	/// The configuration the encoder runs with, to change it later.
+	cfg: Config,
 	width: u32,
 	height: u32,
 	frame_duration: u64,
@@ -87,7 +89,7 @@ impl Av1Encoder {
 			cfg.g_lag_in_frames = 0;
 			cfg.g_error_resilient = 0;
 			cfg.rc_end_usage = aom::aom_rc_mode::AOM_CBR;
-			cfg.rc_target_bitrate = (settings.bitrate / 1000).max(1);
+			cfg.rc_target_bitrate = kbps(settings.bitrate);
 			cfg.rc_min_quantizer = 4;
 			cfg.rc_max_quantizer = 56;
 			cfg.rc_dropframe_thresh = 0;
@@ -111,6 +113,7 @@ impl Av1Encoder {
 
 			Ok(Self {
 				ctx,
+				cfg: Config(cfg),
 				width,
 				height,
 				frame_duration: settings.frame_duration_micros(),
@@ -119,7 +122,28 @@ impl Av1Encoder {
 	}
 }
 
+/// An encoder configuration.
+struct Config(aom::aom_codec_enc_cfg_t);
+
+// SAFETY: the configuration is plain data; its only pointers (two-pass statistics) stay null.
+unsafe impl Send for Config {}
+
+/// A bitrate in bit/s as libaom takes it, in kbit/s.
+fn kbps(bitrate: u32) -> u32 {
+	(bitrate / 1000).max(1)
+}
+
 impl EncoderBackend for Av1Encoder {
+	fn set_bitrate(&mut self, bitrate: u32) -> Result<bool> {
+		let mut cfg = self.cfg.0;
+		cfg.rc_target_bitrate = kbps(bitrate);
+		// SAFETY: the context is initialised, and `cfg` is its configuration with another bitrate.
+		let err = unsafe { aom::aom_codec_enc_config_set(&mut self.ctx.0, &cfg) };
+		self.ctx.check(err)?;
+		self.cfg.0 = cfg;
+		Ok(true)
+	}
+
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>> {
 		// libaom reads a whole picture of the configured size from the frame's buffer.
 		if (frame.width(), frame.height()) != (self.width as usize, self.height as usize) {
@@ -286,6 +310,11 @@ mod tests {
 	#[test]
 	fn keyframes() {
 		tests::keyframes(Codec::Av1);
+	}
+
+	#[test]
+	fn bitrate_changes() {
+		tests::bitrate_changes(Codec::Av1);
 	}
 
 	#[test]

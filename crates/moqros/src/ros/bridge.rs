@@ -36,6 +36,7 @@ pub struct Bridge {
 	task: JoinHandle<Result<BridgeStats>>,
 	stats: watch::Receiver<BridgeStats>,
 	teardown: Teardown,
+	bitrate: Option<BitrateControl>,
 }
 
 impl Bridge {
@@ -55,7 +56,18 @@ impl Bridge {
 			task,
 			stats,
 			teardown: Teardown::default(),
+			bitrate: None,
 		}
+	}
+
+	pub(crate) fn with_bitrate_control(mut self, bitrate: BitrateControl) -> Self {
+		self.bitrate = Some(bitrate);
+		self
+	}
+
+	/// What changes the bitrate of a video bridge while it runs; `None` for other bridges.
+	pub fn bitrate_control(&self) -> Option<BitrateControl> {
+		self.bitrate.clone()
 	}
 
 	pub(crate) fn with_teardown(mut self, teardown: Teardown) -> Self {
@@ -95,6 +107,29 @@ impl Future for Bridge {
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		Pin::new(&mut self.task).poll(cx)
+	}
+}
+
+/// Changes the target bitrate of a running video [`Bridge`] (see
+/// [`ImagePublisher::set_bitrate`](crate::ImagePublisher::set_bitrate)).
+#[derive(Clone, Debug)]
+pub struct BitrateControl(watch::Sender<u32>);
+
+impl BitrateControl {
+	/// A control starting at `bitrate`, and the receiving end the bridge polls.
+	pub(crate) fn new(bitrate: u32) -> (Self, watch::Receiver<u32>) {
+		let (sender, receiver) = watch::channel(bitrate);
+		(Self(sender), receiver)
+	}
+
+	/// Aim for `bitrate` bit/s from the next image on.
+	pub fn set(&self, bitrate: u32) {
+		self.0.send_replace(bitrate);
+	}
+
+	/// The bitrate last set.
+	pub fn get(&self) -> u32 {
+		*self.0.borrow()
 	}
 }
 

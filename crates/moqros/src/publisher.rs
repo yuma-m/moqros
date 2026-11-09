@@ -107,6 +107,21 @@ impl ImagePublisher {
 		self.broadcast.name()
 	}
 
+	/// The encoder settings, with the bitrate last set.
+	pub fn settings(&self) -> &EncoderSettings {
+		self.encoder.settings()
+	}
+
+	/// Aim for `bitrate` bit/s from the next image on; see [`Encoder::set_bitrate`]. The catalog
+	/// announces it from the next keyframe.
+	pub fn set_bitrate(&mut self, bitrate: u32) {
+		if bitrate != self.encoder.settings().bitrate {
+			self.encoder.set_bitrate(bitrate);
+			// Republished with the next keyframe.
+			self.rendition = None;
+		}
+	}
+
 	/// Encode and send one image. Returns whether a frame was written.
 	///
 	/// Encoding is CPU bound; call this from a blocking-friendly thread when

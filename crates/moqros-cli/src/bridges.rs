@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail, ensure};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use moqros::ros::{Bridge, MoqToRos, QosProfile, r2r};
+use moqros::ros::{BitrateControl, Bridge, MoqToRos, QosProfile, r2r};
 use tokio::task::JoinError;
 
+use crate::args::Format;
 use crate::diagnostics::Diagnostics;
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
 use crate::spec::{PubTopic, SubBroadcast};
@@ -77,7 +78,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	let Bridges {
 		topics,
 		broadcasts,
-		encoder,
+		mut encoder,
 		qos,
 		diagnostics_period,
 	} = bridges;
@@ -106,8 +107,15 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 		.collect();
 	let mut pub_bridges = FuturesUnordered::new();
 	let mut sub_bridges = FuturesUnordered::new();
+	let has_video = topics.iter().any(|topic| topic.format == Format::Video);
 	let mut pending = PendingTopics::new(topics);
 	let mut restarts = Restarts::default();
+	// Parameter changes need the spinner, which only runs with topics; only video topics take any.
+	let mut parameters = match has_video {
+		true => Some(node.with(watch_parameters)?),
+		false => None,
+	};
+	let mut bitrates: HashMap<String, BitrateControl> = HashMap::new();
 	let mut diagnostics = diagnostics_period.and_then(|period| match node.with(Diagnostics::new) {
 		Ok(diagnostics) => Some((diagnostics, tokio::time::interval(period))),
 		Err(err) => {
@@ -129,6 +137,9 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 						&format!("ROS -> MoQ {}", topic.format.name()),
 						stats.clone(),
 					);
+				}
+				if let Some(control) = bridge.bitrate_control() {
+					bitrates.insert(topic.topic.clone(), control);
 				}
 				pub_bridges.push(async move { (topic, stats, bridge.await) });
 			}
@@ -153,6 +164,19 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 							bail!("nothing left to bridge: no broadcast could be republished");
 						}
 					}
+				}
+			}
+			Some((name, value)) = next_parameter(&mut parameters) => {
+				match runtime_bitrate(&name, &value) {
+					Some(Ok(bitrate)) => {
+						tracing::info!(bitrate, "changing the video bitrate");
+						encoder.bitrate = bitrate;
+						for control in bitrates.values() {
+							control.set(bitrate);
+						}
+					}
+					Some(Err(err)) => tracing::warn!(%err, "ignoring the new bitrate"),
+					None => tracing::warn!(parameter = name, "only `bitrate` changes at runtime; restart the node to apply this parameter"),
 				}
 			}
 			Some((topic, stats, res)) = pub_bridges.next() => {
@@ -196,6 +220,38 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			}
 		}
 	}
+}
+
+/// Changes to the node's ROS parameters, through its `set_parameters` service.
+type ParameterChanges = std::pin::Pin<Box<dyn futures::Stream<Item = (String, r2r::ParameterValue)> + Send>>;
+
+/// Serve the node's parameter services, returning the changes they make.
+fn watch_parameters(node: &mut r2r::Node) -> anyhow::Result<ParameterChanges> {
+	let (serve, changes) = node
+		.make_parameter_handler()
+		.context("failed to serve ROS parameters")?;
+	tokio::spawn(serve);
+	Ok(Box::pin(changes))
+}
+
+/// The next parameter change. Never resolves without parameter services.
+async fn next_parameter(parameters: &mut Option<ParameterChanges>) -> Option<(String, r2r::ParameterValue)> {
+	match parameters {
+		Some(changes) => changes.next().await,
+		None => std::future::pending().await,
+	}
+}
+
+/// The new bitrate if parameter `name` is the bitrate, or why `value` isn't one; `None` for other
+/// parameters.
+fn runtime_bitrate(name: &str, value: &r2r::ParameterValue) -> Option<Result<u32, String>> {
+	(name == "bitrate").then(|| match value {
+		r2r::ParameterValue::Integer(bitrate) => u32::try_from(*bitrate)
+			.ok()
+			.filter(|&bitrate| bitrate > 0)
+			.ok_or_else(|| format!("{bitrate} is not a bitrate in bit/s")),
+		other => Err(format!("{other:?} is not an integer")),
+	})
 }
 
 /// The diagnostics, once their next report is due. Never resolves without diagnostics.
@@ -409,6 +465,17 @@ fn spawn_sub_broadcast(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn reads_runtime_bitrates() {
+		use r2r::ParameterValue::{Double, Integer};
+		assert_eq!(runtime_bitrate("bitrate", &Integer(500_000)), Some(Ok(500_000)));
+		assert!(matches!(runtime_bitrate("bitrate", &Integer(0)), Some(Err(_))));
+		assert!(matches!(runtime_bitrate("bitrate", &Integer(-1)), Some(Err(_))));
+		assert!(matches!(runtime_bitrate("bitrate", &Integer(1 << 40)), Some(Err(_))));
+		assert!(matches!(runtime_bitrate("bitrate", &Double(5e5)), Some(Err(_))));
+		assert_eq!(runtime_bitrate("fps", &Integer(10)), None);
+	}
 
 	#[test]
 	fn restart_delays_back_off_and_reset() {
