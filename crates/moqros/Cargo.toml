@@ -17,7 +17,9 @@ features = ["h264", "doc-only"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["vp8"]
+default = ["vp8", "compressed"]
+# Decode JPEG and PNG images (sensor_msgs/CompressedImage) with pure-Rust decoders.
+compressed = ["dep:png", "dep:zune-jpeg"]
 # VP8 via the system libvpx (royalty-free). Needs libvpx + pkg-config + libclang at build time.
 vp8 = ["dep:env-libvpx-sys"]
 # AV1 via the system libaom (royalty-free). Needs libaom + pkg-config + libclang at build time.
@@ -45,6 +47,7 @@ gstreamer-video = { workspace = true, optional = true }
 hang.workspace = true
 moq-tokio.workspace = true
 openh264 = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
 env-libvpx-sys = { workspace = true, optional = true }
 r2r = { workspace = true, optional = true }
 serde_json.workspace = true
@@ -52,6 +55,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+zune-jpeg = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true

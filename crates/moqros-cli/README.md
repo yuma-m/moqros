@@ -171,8 +171,8 @@ on `/moqros/<broadcast>` (`--topic-template '/remote/{name}'` names it otherwise
 make a plain topic name (e.g. `robots/r-2/camera`) is skipped with a warning; see [Security](#security).
 
 Each topic becomes a broadcast of its own. `--type` and `--broadcast` of `moqros-pub`, and `--topic` and
-`--type` of `moqros-sub`, name a single topic, so they only work with one `--topic` or `--broadcast`. Video
-topics start at once. A data topic without a `type` starts when it appears in the ROS graph. `moqros-sub`
+`--type` of `moqros-sub`, name a single topic, so they only work with one `--topic` or `--broadcast`. A
+topic without a `type` starts when it appears in the ROS graph, which tells its type. `moqros-sub`
 waits for all its broadcasts at once, and starts each one when it's announced. It skips a broadcast whose
 topic it can't create (e.g. a message type this build has no bindings for), and goes on with the rest.
 A topic or broadcast that stops or fails later is restarted on its own, one second later at first and up to
@@ -182,7 +182,9 @@ relay connection gives up, or when a topic can't be started at all (e.g. an unav
 ## Other message types
 
 `moqros-pub --format json|cdr` publishes a topic of any message type. The default, `--format video`, is for
-`sensor_msgs/msg/Image`.
+`sensor_msgs/msg/Image` and `sensor_msgs/msg/CompressedImage` (JPEG or PNG, e.g. image_transport's
+`/camera/image_raw/compressed`), which is decoded before it's encoded as video. `compressedDepth` images aren't
+supported.
 
 ```sh
 moqros-pub --topic /imu --format json                  # the type is looked up in the ROS graph

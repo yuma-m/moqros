@@ -54,11 +54,15 @@ mod meter;
 mod to_moq;
 
 pub use bridge::{BitrateControl, Bridge, BridgeStats, Teardown};
+#[cfg(feature = "compressed")]
+pub use convert::compressed_image_from_ros;
 pub use convert::{image_from_ros, image_to_ros, now_stamp};
 pub use from_moq::{MoqToRos, RosTarget, spawn_moq_to_ros};
 pub use graph::{topic_type, wait_for_topic_type};
 pub use r2r;
 pub use r2r::QosProfile;
+#[cfg(feature = "compressed")]
+pub use to_moq::spawn_ros_to_moq_compressed;
 pub use to_moq::{spawn_ros_to_moq, spawn_ros_to_moq_data};
 
 /// The ROS message type moqros encodes as video.
@@ -66,3 +70,9 @@ pub type RosImage = r2r::sensor_msgs::msg::Image;
 
 /// Type name of [`RosImage`], as ROS graph queries report it.
 pub const ROS_IMAGE_TYPE: &str = "sensor_msgs/msg/Image";
+
+/// The compressed image message moqros decodes and encodes as video (feature `compressed`).
+pub type RosCompressedImage = r2r::sensor_msgs::msg::CompressedImage;
+
+/// Type name of [`RosCompressedImage`], as ROS graph queries report it.
+pub const ROS_COMPRESSED_IMAGE_TYPE: &str = "sensor_msgs/msg/CompressedImage";

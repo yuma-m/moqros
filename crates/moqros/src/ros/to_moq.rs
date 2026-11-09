@@ -6,8 +6,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
+#[cfg(feature = "compressed")]
+use super::compressed_image_from_ros;
 use super::meter::{RateMeter, WarnOnce};
-use super::{BitrateControl, Bridge, QosProfile, RosImage, image_from_ros};
+use super::{BitrateControl, Bridge, QosProfile, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
 /// Forward a ROS image topic into a MoQ broadcast.
@@ -20,14 +22,42 @@ pub fn spawn_ros_to_moq(
 	node: &mut r2r::Node,
 	topic: &str,
 	qos: QosProfile,
-	mut broadcast: ImagePublisher,
+	broadcast: ImagePublisher,
 ) -> Result<Bridge> {
-	let mut stream = node.subscribe::<RosImage>(topic, qos)?;
+	spawn_image_bridge(node, topic, qos, broadcast, image_from_ros)
+}
+
+/// Forward a ROS `sensor_msgs/CompressedImage` topic (JPEG or PNG) into a MoQ broadcast,
+/// decoding each image before encoding it as video (feature `compressed`).
+///
+/// Decoding runs on the encoding thread; otherwise this works like [`spawn_ros_to_moq`].
+#[cfg(feature = "compressed")]
+pub fn spawn_ros_to_moq_compressed(
+	node: &mut r2r::Node,
+	topic: &str,
+	qos: QosProfile,
+	broadcast: ImagePublisher,
+) -> Result<Bridge> {
+	spawn_image_bridge(node, topic, qos, broadcast, compressed_image_from_ros)
+}
+
+/// Forward messages of type `M`, converted by `convert`, into a video broadcast.
+fn spawn_image_bridge<M>(
+	node: &mut r2r::Node,
+	topic: &str,
+	qos: QosProfile,
+	mut broadcast: ImagePublisher,
+	convert: fn(M) -> Result<crate::Image>,
+) -> Result<Bridge>
+where
+	M: r2r::WrappedTypesupport + Send + 'static,
+{
+	let mut stream = node.subscribe::<M>(topic, qos)?;
 	let topic = topic.to_string();
 	let (bitrate_control, mut bitrate) = BitrateControl::new(broadcast.settings().bitrate);
 
 	let bridge = Bridge::spawn(|stats| async move {
-		let slot = Arc::new(LatestSlot::default());
+		let slot = Arc::new(LatestSlot::<M>::default());
 		let encoder = tokio::task::spawn_blocking({
 			let slot = slot.clone();
 			let stats = stats.clone();
@@ -37,7 +67,7 @@ pub fn spawn_ros_to_moq(
 					if bitrate.has_changed().unwrap_or(false) {
 						broadcast.set_bitrate(*bitrate.borrow_and_update());
 					}
-					let image = match image_from_ros(msg) {
+					let image = match convert(msg) {
 						Ok(image) => image,
 						Err(err) => {
 							stats.dropped();

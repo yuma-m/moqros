@@ -16,8 +16,8 @@ struct Cli {
 	#[arg(long)]
 	broadcast: Option<String>,
 
-	/// How to send the topics: `video` encodes `sensor_msgs/msg/Image`; `json` and `cdr`
-	/// forward any message type as data.
+	/// How to send the topics: `video` encodes `sensor_msgs/msg/Image` or
+	/// `CompressedImage`; `json` and `cdr` forward any message type as data.
 	#[arg(long, value_enum, default_value_t = Format::Video)]
 	format: Format,
 

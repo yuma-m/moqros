@@ -14,9 +14,26 @@ pub fn image_from_ros(msg: RosImage) -> Result<Image> {
 		return Err(Error::UnsupportedEncoding(format!("{} (big endian)", msg.encoding)));
 	}
 	let format = msg.encoding.parse()?;
-	let stamp = &msg.header.stamp;
-	let timestamp = Duration::new(u64::try_from(stamp.sec).unwrap_or(0), stamp.nanosec);
+	let timestamp = stamp_duration(&msg.header.stamp);
 	Image::with_step(msg.width, msg.height, format, msg.step, msg.data, timestamp)
+}
+
+/// Decode a `sensor_msgs/CompressedImage` (JPEG or PNG) into an [`Image`] (feature `compressed`);
+/// see [`Image::from_compressed`]. Pictures above [`DEFAULT_MAX_PIXELS`](crate::DEFAULT_MAX_PIXELS)
+/// are rejected.
+#[cfg(feature = "compressed")]
+pub fn compressed_image_from_ros(msg: super::RosCompressedImage) -> Result<Image> {
+	Image::from_compressed(
+		&msg.format,
+		&msg.data,
+		stamp_duration(&msg.header.stamp),
+		crate::DEFAULT_MAX_PIXELS,
+	)
+}
+
+/// `stamp` as a time since the epoch, clamping times before it.
+fn stamp_duration(stamp: &Time) -> Duration {
+	Duration::new(u64::try_from(stamp.sec).unwrap_or(0), stamp.nanosec)
 }
 
 /// Convert an [`Image`] into a `sensor_msgs/Image` with the given header.
@@ -80,6 +97,22 @@ mod tests {
 		assert_eq!(back.encoding, "bgr8");
 		assert_eq!((back.width, back.height, back.step, back.is_bigendian), (2, 2, 8, 0));
 		assert_eq!(back.data, ros_image("bgr8", 2, 2, 8).data);
+	}
+
+	#[cfg(feature = "compressed")]
+	#[test]
+	fn converts_compressed_images() {
+		let msg = super::super::RosCompressedImage {
+			header: Header {
+				stamp: Time { sec: 7, nanosec: 8 },
+				frame_id: "camera".into(),
+			},
+			format: "rgb8; jpeg compressed bgr8".into(),
+			data: include_bytes!("../../tests/fixtures/red_blue_16x8.jpg").to_vec(),
+		};
+		let image = compressed_image_from_ros(msg).unwrap();
+		assert_eq!((image.width, image.height, image.format), (16, 8, PixelFormat::Rgb8));
+		assert_eq!(image.timestamp, Duration::new(7, 8));
 	}
 
 	#[test]
