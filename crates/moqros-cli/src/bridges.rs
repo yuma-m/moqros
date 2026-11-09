@@ -68,7 +68,7 @@ impl Relay {
 /// topic can't be created (e.g. a message type without bindings) is skipped.
 ///
 /// A bridge that stops or fails is restarted on its own, after a delay that grows while it
-/// keeps failing (see [`Restarts`]), so one broken topic or broadcast doesn't take the others
+/// keeps failing (up to 30 seconds), so one broken topic or broadcast doesn't take the others
 /// down.
 pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> anyhow::Result<()> {
 	let Bridges {
