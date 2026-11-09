@@ -25,6 +25,7 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rosgraph_msgs</depend>
+  <depend>diagnostic_msgs</depend>
 
   <!-- launch/moqros.launch.py -->
   <exec_depend>launch_ros</exec_depend>

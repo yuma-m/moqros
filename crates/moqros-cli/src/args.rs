@@ -65,6 +65,14 @@ pub enum Format {
 }
 
 impl Format {
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::Video => "video",
+			Self::Json => "json",
+			Self::Cdr => "cdr",
+		}
+	}
+
 	/// The data track format, or `None` for video.
 	pub fn data(self) -> Option<moqros::DataFormat> {
 		match self {
@@ -131,5 +139,20 @@ impl EncoderArgs {
 			hardware: self.hw,
 			..Default::default()
 		}
+	}
+}
+
+/// Diagnostics flags.
+#[derive(Debug, Clone, Args)]
+pub struct DiagnosticsArgs {
+	/// Period in milliseconds of the bridge statistics published on `/diagnostics`
+	/// (`diagnostic_msgs/msg/DiagnosticArray`); 0 turns them off.
+	#[arg(long, default_value_t = 1000)]
+	pub diagnostics_period_ms: u64,
+}
+
+impl DiagnosticsArgs {
+	pub fn period(&self) -> Option<Duration> {
+		(self.diagnostics_period_ms > 0).then(|| Duration::from_millis(self.diagnostics_period_ms))
 	}
 }

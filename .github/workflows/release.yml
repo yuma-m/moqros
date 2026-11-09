@@ -95,7 +95,7 @@ jobs:
     permissions:
       contents: read
     env:
-      IDL_PACKAGE_FILTER: std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs
+      IDL_PACKAGE_FILTER: std_msgs;sensor_msgs;geometry_msgs;rosgraph_msgs;diagnostic_msgs
     defaults:
       run:
         shell: bash

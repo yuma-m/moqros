@@ -4,7 +4,9 @@
 
 use anyhow::ensure;
 use clap::Parser;
-use moqros_cli::{Bridges, BroadcastSpec, EncoderArgs, Format, QosArgs, Relay, RelayArgs, TopicSpec, init_logging};
+use moqros_cli::{
+	Bridges, BroadcastSpec, DiagnosticsArgs, EncoderArgs, Format, QosArgs, Relay, RelayArgs, TopicSpec, init_logging,
+};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -42,6 +44,9 @@ struct Cli {
 
 	#[command(flatten)]
 	qos: QosArgs,
+
+	#[command(flatten)]
+	diagnostics: DiagnosticsArgs,
 }
 
 #[tokio::main]
@@ -76,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
 		broadcasts,
 		encoder: cli.encoder.settings(),
 		qos: cli.qos.profile(),
+		diagnostics_period: cli.diagnostics.period(),
 	};
 	moqros_cli::run_bridges(node, Relay::both(publisher, subscriber), bridges).await
 }

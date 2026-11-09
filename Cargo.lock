@@ -2492,6 +2492,7 @@ dependencies = [
  "clap",
  "futures",
  "moqros",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

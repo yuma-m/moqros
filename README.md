@@ -52,7 +52,7 @@ camera. See [docker/README.md](docker/README.md) for both demos.
 
 ```sh
 source /opt/ros/jazzy/setup.bash
-IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs" cargo install moqros-cli
+IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs;diagnostic_msgs" cargo install moqros-cli
 
 moqros-pub --url http://localhost:4443/anon --topic /camera/image_raw --topic /odom,format=json
 moqros-sub --url http://localhost:4443/anon --broadcast camera/image_raw --topic /remote/image
@@ -114,7 +114,7 @@ because r2r generates its bindings at build time. Use the Docker `build` stage, 
 
 ```sh
 source /opt/ros/jazzy/setup.bash
-IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs" cargo build --workspace
+IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs;diagnostic_msgs" cargo build --workspace
 ```
 
 ## License

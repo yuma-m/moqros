@@ -7,12 +7,13 @@
 
 mod args;
 mod bridges;
+mod diagnostics;
 mod params;
 mod runtime;
 mod spec;
 mod url;
 
-pub use args::{EncoderArgs, Format, QosArgs, RelayArgs};
+pub use args::{DiagnosticsArgs, EncoderArgs, Format, QosArgs, RelayArgs};
 pub use bridges::{Bridges, Relay, run_bridges};
 pub use params::{init, strip_ros_args};
 pub use runtime::{SharedNode, Spinner, init_logging, shutdown_signal, spawn_spinner};

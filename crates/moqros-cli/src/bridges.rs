@@ -9,6 +9,7 @@ use futures::stream::FuturesUnordered;
 use moqros::ros::{Bridge, MoqToRos, QosProfile, r2r};
 use tokio::task::JoinError;
 
+use crate::diagnostics::Diagnostics;
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
 use crate::spec::{PubTopic, SubBroadcast};
 
@@ -20,6 +21,8 @@ pub struct Bridges {
 	/// For video topics.
 	pub encoder: moqros::EncoderSettings,
 	pub qos: QosProfile,
+	/// How often to publish the bridges' statistics on `/diagnostics`, if at all.
+	pub diagnostics_period: Option<Duration>,
 }
 
 /// The relay connection of a bridge node: a publisher for its topics, a subscriber for its
@@ -76,6 +79,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 		broadcasts,
 		encoder,
 		qos,
+		diagnostics_period,
 	} = bridges;
 	ensure!(
 		topics.is_empty() || relay.publisher.is_some(),
@@ -104,6 +108,13 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	let mut sub_bridges = FuturesUnordered::new();
 	let mut pending = PendingTopics::new(topics);
 	let mut restarts = Restarts::default();
+	let mut diagnostics = diagnostics_period.and_then(|period| match node.with(Diagnostics::new) {
+		Ok(diagnostics) => Some((diagnostics, tokio::time::interval(period))),
+		Err(err) => {
+			tracing::warn!(%err, "not publishing diagnostics; build with diagnostic_msgs in IDL_PACKAGE_FILTER");
+			None
+		}
+	});
 	// Created once, so a signal arriving while the loop body runs isn't missed.
 	let shutdown = shutdown_signal();
 	tokio::pin!(shutdown);
@@ -112,6 +123,13 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 		if let Some(publisher) = &relay.publisher {
 			for (topic, bridge) in pending.start_ready(&node, publisher, &encoder, &qos, &mut restarts)? {
 				let stats = bridge.watch_stats();
+				if let Some((diagnostics, _)) = &mut diagnostics {
+					diagnostics.running(
+						&topic.topic,
+						&format!("ROS -> MoQ {}", topic.format.name()),
+						stats.clone(),
+					);
+				}
 				pub_bridges.push(async move { (topic, stats, bridge.await) });
 			}
 		}
@@ -121,6 +139,9 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 				match node.with(|node| spawn_sub_broadcast(ready, node, &broadcast, qos.clone())) {
 					Ok(mut bridge) => {
 						let stats = bridge.watch_stats();
+						if let Some((diagnostics, _)) = &mut diagnostics {
+							diagnostics.running(&broadcast.broadcast, "MoQ -> ROS", stats.clone());
+						}
 						let teardown = bridge.take_teardown();
 						sub_bridges.push(async move { (broadcast, stats, teardown, bridge.await) });
 					}
@@ -137,6 +158,9 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			Some((topic, stats, res)) = pub_bridges.next() => {
 				let stats = *stats.borrow();
 				log_stopped("topic", &topic.topic, &stats, res);
+				if let Some((diagnostics, _)) = &mut diagnostics {
+					diagnostics.restarting(&topic.topic);
+				}
 				let delay = restarts.next(&format!("topic {}", topic.topic), stats.sent > 0);
 				tracing::info!(topic = topic.topic, ?delay, "restarting the topic bridge");
 				pending.restart(topic, delay);
@@ -144,6 +168,9 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			Some((broadcast, stats, teardown, res)) = sub_bridges.next() => {
 				let stats = *stats.borrow();
 				log_stopped("broadcast", &broadcast.broadcast, &stats, res);
+				if let Some((diagnostics, _)) = &mut diagnostics {
+					diagnostics.restarting(&broadcast.broadcast);
+				}
 				node.with(|node| teardown.run(node));
 				let delay = restarts.next(&format!("broadcast {}", broadcast.broadcast), stats.sent > 0);
 				tracing::info!(broadcast = broadcast.broadcast, ?delay, "restarting the broadcast bridge");
@@ -152,6 +179,11 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 				}
 			}
 			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
+			Some(diagnostics) = next_report(&mut diagnostics) => {
+				if let Err(err) = diagnostics.publish() {
+					tracing::warn!(%err, "publishing diagnostics failed");
+				}
+			}
 			// E.g. the relay refused the session: nothing would ever be announced.
 			res = relay.session.closed() => return res.context("relay connection closed"),
 			err = spinner.failed() => return Err(err),
@@ -163,6 +195,17 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 				return Ok(());
 			}
 		}
+	}
+}
+
+/// The diagnostics, once their next report is due. Never resolves without diagnostics.
+async fn next_report(diagnostics: &mut Option<(Diagnostics, tokio::time::Interval)>) -> Option<&mut Diagnostics> {
+	match diagnostics {
+		Some((diagnostics, interval)) => {
+			interval.tick().await;
+			Some(diagnostics)
+		}
+		None => std::future::pending().await,
 	}
 }
 
