@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use r2r::std_msgs::msg::Header;
-use tokio::task::JoinHandle;
 
+use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
-use super::{QosProfile, RosImage, image_to_ros, now_stamp};
+use super::{Bridge, QosProfile, RosImage, image_to_ros, now_stamp};
 use crate::{DataFormat, DataSettings, DataSubscriber, Error, ImageSubscriber, Result, Subscriber, Subscription};
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
@@ -28,7 +28,7 @@ pub async fn spawn_moq_to_ros(
 	subscriber: Subscriber,
 	broadcast: &str,
 	target: RosTarget,
-) -> Result<JoinHandle<Result<()>>> {
+) -> Result<Bridge> {
 	MoqToRos::subscribe(subscriber, broadcast).await.spawn(node, target)
 }
 
@@ -101,7 +101,7 @@ impl MoqToRos {
 	}
 
 	/// Create the ROS publisher for `target` and start republishing; see [`spawn_moq_to_ros`].
-	pub fn spawn(self, node: &mut r2r::Node, target: RosTarget) -> Result<JoinHandle<Result<()>>> {
+	pub fn spawn(self, node: &mut r2r::Node, target: RosTarget) -> Result<Bridge> {
 		let RosTarget {
 			topic,
 			qos,
@@ -124,12 +124,9 @@ impl MoqToRos {
 				}
 			}
 		};
-		Ok(tokio::spawn(republish(
-			self.subscriber,
-			self.broadcast,
-			self.first,
-			output,
-		)))
+		Ok(Bridge::spawn(|stats| {
+			republish(self.subscriber, self.broadcast, self.first, output, stats)
+		}))
 	}
 }
 
@@ -169,6 +166,7 @@ async fn republish(
 	broadcast: String,
 	first: Subscription,
 	mut output: RosOutput,
+	stats: StatsSender,
 ) -> Result<()> {
 	let mut first = Some(first);
 	loop {
@@ -177,16 +175,15 @@ async fn republish(
 			None => subscribe(&subscriber, &broadcast).await,
 		};
 
-		let mut count = 0u64;
 		let ended = match (subscription, &mut output) {
 			(Subscription::Images(images), RosOutput::Images { publisher, frame_id }) => {
-				republish_images(images, publisher, frame_id, &mut count).await?
+				republish_images(images, publisher, frame_id, &stats).await?
 			}
 			(Subscription::Data(data), RosOutput::Data { publisher, catalog }) => {
 				if let Some((from, to)) = data_changed(catalog, data.settings()) {
 					return Err(Error::BroadcastChanged { broadcast, from, to });
 				}
-				republish_data(data, publisher, catalog.format, &mut count).await
+				republish_data(data, publisher, catalog.format, &stats).await
 			}
 			(Subscription::Images(_), RosOutput::Data { .. }) => {
 				return Err(Error::BroadcastChanged {
@@ -200,9 +197,10 @@ async fn republish(
 			}
 		};
 
+		let sent = stats.snapshot().sent;
 		match ended {
-			None => tracing::info!(broadcast, count, "broadcast ended, waiting for it to return"),
-			Some(err) => tracing::warn!(%err, broadcast, count, "subscription failed, resubscribing"),
+			None => tracing::info!(broadcast, sent, "broadcast ended, waiting for it to return"),
+			Some(err) => tracing::warn!(%err, broadcast, sent, "subscription failed, resubscribing"),
 		}
 	}
 }
@@ -226,18 +224,19 @@ async fn republish_images(
 	mut images: ImageSubscriber,
 	publisher: &mut r2r::Publisher<RosImage>,
 	frame_id: &str,
-	count: &mut u64,
+	stats: &StatsSender,
 ) -> Result<Option<Error>> {
 	let mut meter = RateMeter::new("MoQ -> ROS");
 	loop {
 		match images.next_image().await {
 			Ok(Some(image)) => {
+				stats.received();
 				let header = Header {
 					stamp: now_stamp(),
 					frame_id: frame_id.to_string(),
 				};
 				publisher.publish(&image_to_ros(&image, header))?;
-				*count += 1;
+				stats.sent();
 				meter.tick();
 			}
 			Ok(None) => return Ok(None),
@@ -253,7 +252,7 @@ async fn republish_data(
 	mut data: DataSubscriber,
 	publisher: &mut r2r::PublisherUntyped,
 	format: DataFormat,
-	count: &mut u64,
+	stats: &StatsSender,
 ) -> Option<Error> {
 	let mut meter = RateMeter::new("MoQ -> ROS");
 	let mut warned = WarnOnce::default();
@@ -263,6 +262,7 @@ async fn republish_data(
 			Ok(None) => return None,
 			Err(err) => return Some(err),
 		};
+		stats.received();
 		let published = match format {
 			DataFormat::Json => serde_json::from_slice(&message.payload)
 				.map_err(Error::from)
@@ -271,10 +271,11 @@ async fn republish_data(
 		};
 		match published {
 			Ok(()) => {
-				*count += 1;
+				stats.sent();
 				meter.tick();
 			}
 			Err(err) => {
+				stats.dropped();
 				if warned.first() {
 					tracing::warn!(%err, "skipping message");
 				}

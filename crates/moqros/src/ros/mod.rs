@@ -46,12 +46,14 @@
 //! Data bridges handle message types at runtime through r2r's untyped API, so they
 //! support the message types r2r generated bindings for when it was built.
 
+mod bridge;
 mod convert;
 mod from_moq;
 mod graph;
 mod meter;
 mod to_moq;
 
+pub use bridge::{Bridge, BridgeStats};
 pub use convert::{image_from_ros, image_to_ros, now_stamp};
 pub use from_moq::{MoqToRos, RosTarget, spawn_moq_to_ros};
 pub use graph::{topic_type, wait_for_topic_type};
@@ -64,14 +66,3 @@ pub type RosImage = r2r::sensor_msgs::msg::Image;
 
 /// Type name of [`RosImage`], as ROS graph queries report it.
 pub const ROS_IMAGE_TYPE: &str = "sensor_msgs/msg/Image";
-
-/// Statistics returned when a bridge stops.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BridgeStats {
-	/// Messages received from the ROS topic.
-	pub received: u64,
-	/// Messages published to the broadcast.
-	pub sent: u64,
-	/// Messages skipped, e.g. images replaced while the encoder was busy.
-	pub dropped: u64,
-}
