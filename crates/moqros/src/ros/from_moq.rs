@@ -1,12 +1,13 @@
 //! MoQ broadcasts -> ROS topics.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use r2r::std_msgs::msg::Header;
 
 use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
-use super::{Bridge, QosProfile, RosImage, image_to_ros, now_stamp};
+use super::{Bridge, QosProfile, RosImage, Teardown, image_to_ros, now_stamp};
 use crate::{DataFormat, DataSettings, DataSubscriber, Error, ImageSubscriber, Result, Subscriber, Subscription};
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
@@ -124,9 +125,20 @@ impl MoqToRos {
 				}
 			}
 		};
-		Ok(Bridge::spawn(|stats| {
-			republish(self.subscriber, self.broadcast, self.first, output, stats)
-		}))
+		// The task hands its publisher back when it stops, for the teardown to destroy.
+		let released = Arc::new(Mutex::new(None));
+		let slot = released.clone();
+		let bridge = Bridge::spawn(|stats| async move {
+			let mut output = output;
+			let result = republish(self.subscriber, self.broadcast, self.first, &mut output, stats).await;
+			*slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(output);
+			result
+		});
+		Ok(bridge.with_teardown(Teardown::new(move |node| {
+			if let Some(output) = released.lock().unwrap_or_else(|err| err.into_inner()).take() {
+				output.destroy(node);
+			}
+		})))
 	}
 }
 
@@ -159,13 +171,22 @@ enum RosOutput {
 	},
 }
 
+impl RosOutput {
+	fn destroy(self, node: &mut r2r::Node) {
+		match self {
+			Self::Images { publisher, .. } => node.destroy_publisher(publisher),
+			Self::Data { publisher, .. } => node.destroy_publisher_untyped(publisher),
+		}
+	}
+}
+
 /// Feed `output` from `broadcast` forever, starting with `first` and resubscribing
 /// whenever the broadcast ends.
 async fn republish(
 	subscriber: Subscriber,
 	broadcast: String,
 	first: Subscription,
-	mut output: RosOutput,
+	output: &mut RosOutput,
 	stats: StatsSender,
 ) -> Result<()> {
 	let mut first = Some(first);
@@ -175,7 +196,7 @@ async fn republish(
 			None => subscribe(&subscriber, &broadcast).await,
 		};
 
-		let ended = match (subscription, &mut output) {
+		let ended = match (subscription, &mut *output) {
 			(Subscription::Images(images), RosOutput::Images { publisher, frame_id }) => {
 				republish_images(images, publisher, frame_id, &stats).await?
 			}
