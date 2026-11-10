@@ -29,6 +29,8 @@ moqros_pub:
     fps: 30.0
     keyframe_interval_ms: 2000
     reliable: false
+    # Bridge statistics on /diagnostics; 0 turns them off.
+    diagnostics_period_ms: 1000
 
 moqros_sub:
   ros__parameters:

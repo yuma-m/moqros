@@ -26,7 +26,7 @@ With cargo:
 
 ```sh
 source /opt/ros/jazzy/setup.bash
-IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs" cargo install moqros-cli
+IDL_PACKAGE_FILTER="std_msgs;sensor_msgs;geometry_msgs;nav_msgs;rosgraph_msgs;diagnostic_msgs" cargo install moqros-cli
 ```
 
 As a ROS 2 package with colcon (`crates/moqros-cli` has an `ament_cargo` `package.xml`):
@@ -67,6 +67,12 @@ VP8 is always available.
 - **Shutdown:** on SIGINT or SIGTERM (`docker stop`, systemd), both bridges close the relay session before
   exiting, so the relay ends their broadcasts right away and a restarted `moqros-pub` can announce them again.
 - **Logging:** both bridges log their message rate every 10 s (`message rate`).
+- **Diagnostics:** every bridge node publishes one `diagnostic_msgs/msg/DiagnosticStatus` per topic and broadcast
+  on `/diagnostics` each second (`--diagnostics-period-ms`, 0 turns it off), with the message counts and rate.
+  A bridge that has received nothing for 5 s, or dropped more than half of its messages since the last report,
+  is a warning; one waiting to restart is an error. View it with `rqt_robot_monitor` or
+  `ros2 topic echo /diagnostics`. It needs bindings for `diagnostic_msgs` (include it in `IDL_PACKAGE_FILTER`);
+  without them the node logs a warning and runs without diagnostics.
 - **Codec:** `moqros-pub --codec vp8|av1|h264`. AV1 needs the `av1` feature. H.264 needs the `h264` feature and
   Cisco's OpenH264 binary:
 
@@ -190,7 +196,7 @@ moqros-sub --broadcast imu --topic /moqros/imu         # format and type come fr
   into the catalog, so `moqros-sub` republishes with the same type (`--type` overrides it).
 - **Supported types:** r2r generates message bindings at build time, and the data bridges only handle types
   it generated. With `IDL_PACKAGE_FILTER` set, list every package you need (the Docker image includes
-  `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, and `rosgraph_msgs`).
+  `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `rosgraph_msgs`, and `diagnostic_msgs`).
 
 `moqros-sub` handles both kinds of broadcast: it republishes video as `rgb8` images, and data tracks as their
 message type. It fails if a broadcast comes back carrying something different from before.

@@ -2,7 +2,7 @@
 //! images, or data tracks as the message type they carry.
 
 use clap::Parser;
-use moqros_cli::{Bridges, BroadcastSpec, QosArgs, Relay, RelayArgs, init_logging};
+use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, QosArgs, Relay, RelayArgs, init_logging};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -32,6 +32,9 @@ struct Cli {
 
 	#[command(flatten)]
 	qos: QosArgs,
+
+	#[command(flatten)]
+	diagnostics: DiagnosticsArgs,
 }
 
 #[tokio::main]
@@ -48,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 		broadcasts,
 		encoder: Default::default(),
 		qos: cli.qos.profile(),
+		diagnostics_period: cli.diagnostics.period(),
 	};
 	moqros_cli::run_bridges(node, Relay::subscriber(subscriber), bridges).await
 }
