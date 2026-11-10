@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use futures::StreamExt;
-use moqros::ros::{MoqToRos, QosProfile, r2r};
-use tokio::task::JoinHandle;
+use moqros::ros::{Bridge, MoqToRos, QosProfile, r2r};
 
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
 use crate::spec::{PubTopic, SubBroadcast};
@@ -131,7 +130,8 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 				return Ok(());
 			}
 			Some((broadcast, res)) = sub_bridges.next() => {
-				res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
+				let stats = res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
+				tracing::info!(broadcast, ?stats, "broadcast bridge ended");
 				return Ok(());
 			}
 			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
@@ -148,9 +148,6 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 		}
 	}
 }
-
-/// A running ROS -> MoQ bridge task.
-type PubBridge = JoinHandle<moqros::Result<moqros::ros::BridgeStats>>;
 
 /// Topics to publish that haven't started yet, because their type isn't known.
 struct PendingTopics {
@@ -176,7 +173,7 @@ impl PendingTopics {
 		publisher: &moqros::Publisher,
 		encoder: &moqros::EncoderSettings,
 		qos: &QosProfile,
-	) -> anyhow::Result<Vec<(String, PubBridge)>> {
+	) -> anyhow::Result<Vec<(String, Bridge)>> {
 		let mut started = Vec::new();
 		let mut waiting = Vec::new();
 		for topic in std::mem::take(&mut self.topics) {
@@ -204,7 +201,7 @@ fn start_pub_topic(
 	topic: &PubTopic,
 	encoder: &moqros::EncoderSettings,
 	qos: QosProfile,
-) -> anyhow::Result<Option<PubBridge>> {
+) -> anyhow::Result<Option<Bridge>> {
 	let bridge = match topic.format.data() {
 		None => {
 			let images = publisher.create_image_broadcast(&topic.broadcast, encoder.clone())?;
@@ -236,16 +233,13 @@ fn start_pub_topic(
 	Ok(Some(bridge))
 }
 
-/// A running MoQ -> ROS bridge task.
-type SubBridge = JoinHandle<moqros::Result<()>>;
-
 /// Create the ROS publisher for a subscribed broadcast and start republishing it.
 fn spawn_sub_broadcast(
 	ready: moqros::ros::MoqToRos,
 	node: &mut r2r::Node,
 	broadcast: &SubBroadcast,
 	qos: QosProfile,
-) -> moqros::Result<SubBridge> {
+) -> moqros::Result<Bridge> {
 	let target = moqros::ros::RosTarget {
 		topic: broadcast.topic.clone(),
 		qos,

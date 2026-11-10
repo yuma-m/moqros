@@ -5,62 +5,60 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use tokio::task::JoinHandle;
 
 use super::meter::{RateMeter, WarnOnce};
-use super::{BridgeStats, QosProfile, RosImage, image_from_ros};
+use super::{Bridge, QosProfile, RosImage, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
 /// Forward a ROS image topic into a MoQ broadcast.
 ///
 /// Encoding runs on a dedicated blocking thread. When it can't keep up, a
 /// pending image is replaced by the newest one so latency stays bounded.
-/// The returned task resolves when the topic stream or the broadcast ends.
+/// The returned [`Bridge`] resolves when the topic stream or the broadcast ends.
 pub fn spawn_ros_to_moq(
 	node: &mut r2r::Node,
 	topic: &str,
 	qos: QosProfile,
 	mut broadcast: ImagePublisher,
-) -> Result<JoinHandle<Result<BridgeStats>>> {
+) -> Result<Bridge> {
 	let mut stream = node.subscribe::<RosImage>(topic, qos)?;
 	let topic = topic.to_string();
 
-	let slot = Arc::new(LatestSlot::default());
-
-	let encoder = tokio::task::spawn_blocking({
-		let slot = slot.clone();
-		move || -> Result<u64> {
-			let mut sent = 0;
-			let mut warned = WarnOnce::default();
-			while let Some(msg) = slot.take() {
-				let image = match image_from_ros(msg) {
-					Ok(image) => image,
-					Err(err) => {
-						if warned.first() {
-							tracing::warn!(%err, "skipping image");
+	Ok(Bridge::spawn(|stats| async move {
+		let slot = Arc::new(LatestSlot::default());
+		let encoder = tokio::task::spawn_blocking({
+			let slot = slot.clone();
+			let stats = stats.clone();
+			move || -> Result<()> {
+				let mut warned = WarnOnce::default();
+				while let Some(msg) = slot.take() {
+					let image = match image_from_ros(msg) {
+						Ok(image) => image,
+						Err(err) => {
+							stats.dropped();
+							if warned.first() {
+								tracing::warn!(%err, "skipping image");
+							}
+							continue;
 						}
-						continue;
+					};
+					if broadcast.publish(&image)? {
+						stats.sent();
 					}
-				};
-				if broadcast.publish(&image)? {
-					sent += 1;
 				}
+				Ok(())
 			}
-			Ok(sent)
-		}
-	});
+		});
 
-	Ok(tokio::spawn(async move {
 		// Closing on drop also releases the encoder thread when this task is cancelled
 		// (e.g. at runtime shutdown); otherwise the runtime would wait on it forever.
 		let slot = CloseOnDrop(slot);
-		let mut stats = BridgeStats::default();
 		let mut meter = RateMeter::new("ROS -> MoQ");
 		while let Some(msg) = stream.next().await {
-			stats.received += 1;
+			stats.received();
 			meter.tick();
 			if slot.0.put(msg) {
-				stats.dropped += 1;
+				stats.dropped();
 				tracing::debug!(topic, "encoder busy, dropped an older image");
 			}
 			if encoder.is_finished() {
@@ -68,8 +66,7 @@ pub fn spawn_ros_to_moq(
 			}
 		}
 		drop(slot);
-		stats.sent = encoder.await.expect("encoder thread panicked")?;
-		Ok(stats)
+		encoder.await.expect("encoder thread panicked")
 	}))
 }
 
@@ -122,13 +119,13 @@ impl<T> Drop for CloseOnDrop<T> {
 ///
 /// The broadcast's [`DataSettings`](crate::DataSettings) pick the serialization and
 /// must name the ROS type (see [`wait_for_topic_type`](super::wait_for_topic_type)). Messages are forwarded as
-/// they arrive. The returned task resolves when the topic stream ends.
+/// they arrive. The returned [`Bridge`] resolves when the topic stream ends.
 pub fn spawn_ros_to_moq_data(
 	node: &mut r2r::Node,
 	topic: &str,
 	qos: QosProfile,
 	mut broadcast: DataPublisher,
-) -> Result<JoinHandle<Result<BridgeStats>>> {
+) -> Result<Bridge> {
 	let settings = broadcast.settings();
 	let ros_type = settings
 		.ros_type
@@ -142,27 +139,26 @@ pub fn spawn_ros_to_moq_data(
 		DataFormat::Cdr => Box::pin(node.subscribe_raw(topic, &ros_type, qos)?.map(|msg| Ok(msg.into()))),
 	};
 
-	Ok(tokio::spawn(async move {
-		let mut stats = BridgeStats::default();
+	Ok(Bridge::spawn(|stats| async move {
 		let mut meter = RateMeter::new("ROS -> MoQ");
 		let mut warned = WarnOnce::default();
 		while let Some(msg) = messages.next().await {
-			stats.received += 1;
+			stats.received();
 			meter.tick();
 			match msg {
 				Ok(payload) => {
 					broadcast.publish(payload)?;
-					stats.sent += 1;
+					stats.sent();
 				}
 				Err(err) => {
-					stats.dropped += 1;
+					stats.dropped();
 					if warned.first() {
 						tracing::warn!(%err, "skipping message");
 					}
 				}
 			}
 		}
-		Ok(stats)
+		Ok(())
 	}))
 }
 
