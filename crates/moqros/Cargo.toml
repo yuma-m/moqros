@@ -37,6 +37,10 @@ doc-only = ["ros", "r2r/doc-only"]
 [lints]
 workspace = true
 
+[[bench]]
+name = "convert"
+harness = false
+
 [dependencies]
 aom-sys = { workspace = true, optional = true }
 bytes.workspace = true
@@ -55,6 +59,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+yuvutils-rs.workspace = true
 zune-jpeg = { workspace = true, optional = true }
 
 [dev-dependencies]

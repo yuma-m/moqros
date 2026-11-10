@@ -36,6 +36,20 @@ fn stamp_duration(stamp: &Time) -> Duration {
 	Duration::new(u64::try_from(stamp.sec).unwrap_or(0), stamp.nanosec)
 }
 
+/// Convert an [`Image`] into a `sensor_msgs/Image` with the given header, taking its pixel buffer
+/// without a copy when nothing else shares it (e.g. a freshly decoded image).
+pub fn image_into_ros(image: Image, header: Header) -> RosImage {
+	RosImage {
+		header,
+		height: image.height,
+		width: image.width,
+		encoding: image.format.as_ros_encoding().to_string(),
+		is_bigendian: 0,
+		step: image.step,
+		data: Vec::from(image.data),
+	}
+}
+
 /// Convert an [`Image`] into a `sensor_msgs/Image` with the given header.
 pub fn image_to_ros(image: &Image, header: Header) -> RosImage {
 	RosImage {
@@ -93,6 +107,11 @@ mod tests {
 			frame_id: "out".into(),
 		};
 		let back = image_to_ros(&image, header.clone());
+		assert_eq!(image_into_ros(image.clone(), header.clone()), back);
+		// A buffer nothing else shares moves into the message.
+		let fresh = Image::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12], Duration::ZERO).unwrap();
+		let pixels = fresh.data.as_ptr();
+		assert_eq!(image_into_ros(fresh, header.clone()).data.as_ptr(), pixels);
 		assert_eq!(back.header, header);
 		assert_eq!(back.encoding, "bgr8");
 		assert_eq!((back.width, back.height, back.step, back.is_bigendian), (2, 2, 8, 0));
