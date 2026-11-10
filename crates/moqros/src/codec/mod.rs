@@ -360,12 +360,16 @@ impl Encoder {
 	}
 
 	/// Encode one image. Returns `None` when the encoder dropped the frame.
+	pub fn encode(&mut self, image: &Image) -> Result<Option<EncodedFrame>> {
+		self.encode_yuv(&I420::from_image(image)?, image.timestamp)
+	}
+
+	/// Encode one converted picture captured at `timestamp`.
 	#[expect(
 		clippy::cast_possible_truncation,
 		reason = "I420 dimensions come from `u32` image dimensions"
 	)]
-	pub fn encode(&mut self, image: &Image) -> Result<Option<EncodedFrame>> {
-		let yuv = I420::from_image(image)?;
+	pub(crate) fn encode_yuv(&mut self, yuv: &I420, timestamp: Duration) -> Result<Option<EncodedFrame>> {
 		let dims = (yuv.width(), yuv.height());
 
 		if self.active.as_ref().is_none_or(|active| active.dims != dims) {
@@ -378,13 +382,13 @@ impl Encoder {
 
 		// Codecs want strictly increasing presentation times. Keyframes are scheduled on
 		// the same timeline, so capture clock jumps can't stall or flood them.
-		let pts = self.clock.micros(image.timestamp);
+		let pts = self.clock.micros(timestamp);
 		let interval = u64::try_from(self.settings.keyframe_interval.as_micros()).unwrap_or(u64::MAX);
 		let force = self
 			.last_keyframe
 			.is_none_or(|last| pts.saturating_sub(last) >= interval);
 
-		let Some(EncodedChunk { data, keyframe }) = self.encode_with_fallback(&yuv, pts, force)? else {
+		let Some(EncodedChunk { data, keyframe }) = self.encode_with_fallback(yuv, pts, force)? else {
 			return Ok(None);
 		};
 		if keyframe {
@@ -401,7 +405,7 @@ impl Encoder {
 			keyframe,
 			width: dims.0 as u32,
 			height: dims.1 as u32,
-			timestamp: image.timestamp,
+			timestamp,
 			codec,
 		}))
 	}

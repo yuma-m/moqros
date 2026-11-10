@@ -82,6 +82,11 @@ VP8 is always available.
   ```
 
   Browsers decode all three through WebCodecs; AV1 needs a reasonably recent browser.
+- **Renditions (simulcast):** `moqros-pub --rendition 360p@500000` (repeatable) also encodes each video scaled
+  down to 360 rows at 500 kbit/s, into a track of its own in the same broadcast; images no taller than a
+  rendition skip it. Browsers pick a rendition themselves; `moqros-sub --max-height 480` (or `max_height=`)
+  republishes the largest rendition at most 480 rows tall instead of the largest. Each rendition costs one more
+  encode per image, and `bitrate` changes at runtime only apply to the full-size one.
 - **Hardware encoding:** built with the `hw` feature, `moqros-pub` encodes on a GPU through GStreamer when it
   can (`--hw auto`, the default): VA-API on Intel and AMD GPUs, and NVENC on NVIDIA GPUs, for each codec the GPU
   supports (H.264 on most, AV1 on recent ones, VP8 on few). It tries each known encoder element and keeps the

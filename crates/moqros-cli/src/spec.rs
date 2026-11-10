@@ -129,7 +129,7 @@ pub fn pub_topics(
 		.collect()
 }
 
-/// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…]`.
+/// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…][,max_height=…]`.
 ///
 /// Options left out fall back to the matching command-line flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,25 +138,33 @@ pub struct BroadcastSpec {
 	pub topic: Option<String>,
 	pub ros_type: Option<String>,
 	pub frame_id: Option<String>,
+	pub max_height: Option<u32>,
 }
 
 impl FromStr for BroadcastSpec {
 	type Err = String;
 
 	fn from_str(spec: &str) -> Result<Self, String> {
-		let (broadcast, options) = split_spec(spec, &["topic", "type", "frame_id"])?;
+		let (broadcast, options) = split_spec(spec, &["topic", "type", "frame_id", "max_height"])?;
 		let mut parsed = Self {
 			broadcast: broadcast.to_string(),
 			topic: None,
 			ros_type: None,
 			frame_id: None,
+			max_height: None,
 		};
 		for (key, value) in options {
-			let value = Some(value.to_string());
 			match key {
-				"topic" => parsed.topic = value,
-				"type" => parsed.ros_type = value,
-				_ => parsed.frame_id = value,
+				"max_height" => {
+					parsed.max_height = Some(
+						value
+							.parse()
+							.map_err(|_| format!("max_height must be a number, not {value:?}"))?,
+					);
+				}
+				"topic" => parsed.topic = Some(value.to_string()),
+				"type" => parsed.ros_type = Some(value.to_string()),
+				_ => parsed.frame_id = Some(value.to_string()),
 			}
 		}
 		Ok(parsed)
@@ -171,6 +179,8 @@ pub struct SubBroadcast {
 	/// Taken from the catalog when `None`.
 	pub ros_type: Option<String>,
 	pub frame_id: String,
+	/// The tallest video rendition to pick; the largest when `None`.
+	pub max_height: Option<u32>,
 }
 
 /// Topic of a lone broadcast that neither `topic=` nor `--topic` names.
@@ -184,6 +194,7 @@ pub fn sub_broadcasts(
 	topic: Option<String>,
 	ros_type: Option<String>,
 	frame_id: &str,
+	max_height: Option<u32>,
 ) -> anyhow::Result<Vec<SubBroadcast>> {
 	ensure!(!specs.is_empty(), "no broadcast to subscribe to");
 	let single = specs.len() == 1;
@@ -202,6 +213,7 @@ pub fn sub_broadcasts(
 				}),
 				ros_type: spec.ros_type.or(ros_type.clone()),
 				frame_id: spec.frame_id.unwrap_or_else(|| frame_id.to_string()),
+				max_height: spec.max_height.or(max_height),
 				broadcast: spec.broadcast,
 			};
 			ensure!(
@@ -277,6 +289,11 @@ mod tests {
 			("camera/image_raw", Some("/out"), Some("cam"))
 		);
 		assert!("chatter,format=json".parse::<BroadcastSpec>().is_err());
+		assert_eq!(
+			"cam,max_height=360".parse::<BroadcastSpec>().unwrap().max_height,
+			Some(360)
+		);
+		assert!("cam,max_height=tall".parse::<BroadcastSpec>().is_err());
 	}
 
 	#[test]
@@ -371,7 +388,7 @@ mod tests {
 		};
 		let broadcasts = |specs: &[&str]| {
 			let specs = specs.iter().map(|s| s.parse::<BroadcastSpec>().unwrap()).collect();
-			sub_broadcasts(specs, None, None, "camera").unwrap()
+			sub_broadcasts(specs, None, None, "camera", None).unwrap()
 		};
 
 		let odom = topics(&["/odom,broadcast=robot/odom"]);
@@ -394,11 +411,11 @@ mod tests {
 		let topics = |broadcasts: Vec<SubBroadcast>| broadcasts.into_iter().map(|b| b.topic).collect::<Vec<_>>();
 
 		assert_eq!(
-			topics(sub_broadcasts(specs(&["image_raw"]), None, None, "camera").unwrap()),
+			topics(sub_broadcasts(specs(&["image_raw"]), None, None, "camera", None).unwrap()),
 			[DEFAULT_SUB_TOPIC]
 		);
 		assert_eq!(
-			topics(sub_broadcasts(specs(&["image_raw"]), Some("/x".into()), None, "camera").unwrap()),
+			topics(sub_broadcasts(specs(&["image_raw"]), Some("/x".into()), None, "camera", None).unwrap()),
 			["/x"]
 		);
 		let broadcasts = sub_broadcasts(
@@ -410,16 +427,18 @@ mod tests {
 			None,
 			None,
 			"camera",
+			Some(480),
 		)
 		.unwrap();
 		assert_eq!(broadcasts[2].frame_id, "imu");
+		assert_eq!(broadcasts[2].max_height, Some(480));
 		assert_eq!(
 			topics(broadcasts),
 			["/moqros/image", "/moqros/chatter", "/moqros/front/imu"]
 		);
 
-		assert!(sub_broadcasts(specs(&["a", "b"]), Some("/x".into()), None, "camera").is_err());
-		assert!(sub_broadcasts(specs(&["a", "b"]), None, Some("t/msg/T".into()), "camera").is_err());
-		assert!(sub_broadcasts(specs(&["a,topic=/x", "b,topic=/x"]), None, None, "camera").is_err());
+		assert!(sub_broadcasts(specs(&["a", "b"]), Some("/x".into()), None, "camera", None).is_err());
+		assert!(sub_broadcasts(specs(&["a", "b"]), None, Some("t/msg/T".into()), "camera", None).is_err());
+		assert!(sub_broadcasts(specs(&["a,topic=/x", "b,topic=/x"]), None, None, "camera", None).is_err());
 	}
 }

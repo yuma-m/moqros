@@ -17,7 +17,7 @@ struct Cli {
 	topic: Vec<TopicSpec>,
 
 	/// Broadcast to republish on ROS (MoQ -> ROS); repeat for several. Options as in
-	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam`.
+	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam,max_height=480`.
 	/// The topic defaults to `/moqros/<broadcast>`, or `/moqros/image` for a lone broadcast.
 	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
@@ -35,6 +35,11 @@ struct Cli {
 	/// `header.frame_id` of the republished images.
 	#[arg(long, default_value = "camera")]
 	frame_id: String,
+
+	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
+	/// the largest.
+	#[arg(long)]
+	max_height: Option<u32>,
 
 	#[command(flatten)]
 	encoder: EncoderArgs,
@@ -63,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let broadcasts = match cli.broadcast.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id)?,
+		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id, cli.max_height)?,
 	};
 	moqros_cli::check_no_loop(&topics, &broadcasts)?;
 
@@ -79,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 	let bridges = Bridges {
 		topics,
 		broadcasts,
-		encoder: cli.encoder.settings(),
+		video: cli.encoder.broadcast_settings(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
 	};

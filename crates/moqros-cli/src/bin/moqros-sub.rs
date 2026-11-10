@@ -8,7 +8,7 @@ use moqros_cli::{Bridges, BroadcastSpec, DiagnosticsArgs, QosArgs, Relay, RelayA
 #[command(version, about)]
 struct Cli {
 	/// Broadcast to subscribe to; repeat for several. Options after the name override
-	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam`.
+	/// the flags below for that broadcast: `chatter,topic=/chatter,type=std_msgs/msg/String,frame_id=cam,max_height=480`.
 	#[arg(long, default_value = "image_raw")]
 	broadcast: Vec<BroadcastSpec>,
 
@@ -21,6 +21,11 @@ struct Cli {
 	/// `header.frame_id` of the republished images.
 	#[arg(long, default_value = "camera")]
 	frame_id: String,
+
+	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
+	/// the largest.
+	#[arg(long)]
+	max_height: Option<u32>,
 
 	/// Message type to republish a data track as; defaults to the type its catalog names.
 	/// Single broadcast only.
@@ -41,7 +46,7 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
 	init_logging();
 	let (cli, node) = moqros_cli::init::<Cli>("moqros_sub")?;
-	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id)?;
+	let broadcasts = moqros_cli::sub_broadcasts(cli.broadcast, cli.topic, cli.ros_type, &cli.frame_id, cli.max_height)?;
 
 	cli.relay.warn_if_insecure();
 	let subscriber = moqros::Subscriber::connect(&cli.relay.config())?;
@@ -49,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 	let bridges = Bridges {
 		topics: Vec::new(),
 		broadcasts,
-		encoder: Default::default(),
+		video: Default::default(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
 	};

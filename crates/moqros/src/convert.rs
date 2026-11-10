@@ -79,6 +79,25 @@ impl I420 {
 		Self { width, height, data }
 	}
 
+	/// This picture scaled down to `width`x`height` (both even, and at most this picture's size)
+	/// with a box filter: each output pixel is the mean of the input pixels it covers.
+	pub(crate) fn downscale(&self, width: usize, height: usize) -> Self {
+		debug_assert!(
+			width.is_multiple_of(2) && height.is_multiple_of(2) && width <= self.width && height <= self.height
+		);
+		let mut out = Self {
+			width,
+			height,
+			data: vec![0; width * height * 3 / 2],
+		};
+		let src = self.planes();
+		let (y, u, v) = out.planes_mut();
+		scale_plane(src.y.0, self.width, self.height, y, width, height);
+		scale_plane(src.u.0, self.width / 2, self.height / 2, u, width / 2, height / 2);
+		scale_plane(src.v.0, self.width / 2, self.height / 2, v, width / 2, height / 2);
+		out
+	}
+
 	/// Convert any supported [`Image`] to I420.
 	///
 	/// 4:2:0 video needs even dimensions, so an odd trailing row or column is cropped.
@@ -175,6 +194,34 @@ impl I420 {
 				u_plane[cy * cw + cx] = su.div_ceil(2) as u8;
 				v_plane[cy * cw + cx] = sv.div_ceil(2) as u8;
 			}
+		}
+	}
+}
+
+/// Box-filter the tightly packed `sw`x`sh` plane `src` into the `dw`x`dh` plane `dst`.
+#[expect(clippy::cast_possible_truncation, reason = "a mean of bytes fits a byte")]
+fn scale_plane(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: usize) {
+	// The input columns each output column covers, the same for every row.
+	let columns: Vec<(usize, usize)> = (0..dw)
+		.map(|dx| {
+			let x0 = dx * sw / dw;
+			(x0, ((dx + 1) * sw / dw).max(x0 + 1))
+		})
+		.collect();
+	for (dy, row) in dst.chunks_exact_mut(dw).enumerate() {
+		let y0 = dy * sh / dh;
+		let y1 = ((dy + 1) * sh / dh).max(y0 + 1);
+		for (out, &(x0, x1)) in row.iter_mut().zip(&columns) {
+			let sum: usize = (y0..y1)
+				.map(|y| {
+					src[y * sw + x0..y * sw + x1]
+						.iter()
+						.map(|&p| usize::from(p))
+						.sum::<usize>()
+				})
+				.sum();
+			let count = (y1 - y0) * (x1 - x0);
+			*out = ((sum + count / 2) / count) as u8;
 		}
 	}
 }
@@ -508,5 +555,25 @@ mod tests {
 		let ptrs = [y.as_ptr(), std::ptr::null(), y.as_ptr()];
 		// SAFETY: a null plane is rejected before any plane is read.
 		assert!(unsafe { Planes::from_raw(4, 4, ptrs, [4, 2, 2]) }.is_err());
+	}
+
+	#[test]
+	fn downscales_with_a_box_filter() {
+		// 4x4 luma: a 2x2 checker of 2x2 blocks, which halves into one sample per block.
+		let rgb = |v: u8| [v, v, v];
+		let pixels: Vec<u8> = (0..4)
+			.flat_map(|y| (0..4).flat_map(move |x| rgb(if (x / 2 + y / 2) % 2 == 0 { 0 } else { 255 })))
+			.collect();
+		let frame = i420(4, 4, PixelFormat::Rgb8, pixels);
+		let half = frame.downscale(2, 2);
+		assert_eq!((half.width(), half.height()), (2, 2));
+		assert_eq!(half.y(), &[16, 235, 235, 16]);
+		assert_eq!((half.u(), half.v()), (&[128][..], &[128][..]));
+
+		// Non-integer ratios cover every input row and column.
+		let frame = i420(6, 6, PixelFormat::Rgb8, [200u8; 6 * 6 * 3].to_vec());
+		let scaled = frame.downscale(4, 2);
+		assert!(scaled.y().iter().all(|&y| y == frame.y()[0]), "{:?}", scaled.y());
+		assert_eq!(scaled.data().len(), 4 * 2 * 3 / 2);
 	}
 }
