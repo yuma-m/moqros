@@ -16,9 +16,9 @@ use openh264::encoder::{
 };
 use openh264::formats::YUVSource;
 
-use super::{DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, rgb8_picture};
+use super::{DecoderBackend, EncodedChunk, EncoderBackend, EncoderSettings, packed_picture};
 use crate::convert::{I420, Planes};
-use crate::{Error, Result};
+use crate::{Error, PixelFormat, Result};
 
 /// Environment variable naming Cisco's OpenH264 shared library.
 pub const OPENH264_LIBRARY_ENV: &str = "OPENH264_LIBRARY";
@@ -130,7 +130,7 @@ impl H264Decoder {
 }
 
 impl DecoderBackend for H264Decoder {
-	fn decode(&mut self, data: &[u8], max_pixels: u64) -> Result<Option<(u32, u32, Vec<u8>)>> {
+	fn decode(&mut self, data: &[u8], max_pixels: u64, format: PixelFormat) -> Result<Option<(u32, u32, Vec<u8>)>> {
 		// OpenH264 has allocated the picture by now, but the RGB copies aren't made.
 		let Some(yuv) = self.inner.decode(data).map_err(codec_error)? else {
 			return Ok(None);
@@ -144,7 +144,7 @@ impl DecoderBackend for H264Decoder {
 			u: (yuv.u(), us),
 			v: (yuv.v(), vs),
 		};
-		Ok(Some(rgb8_picture(&planes, max_pixels)?))
+		Ok(Some(packed_picture(&planes, max_pixels, format)?))
 	}
 }
 

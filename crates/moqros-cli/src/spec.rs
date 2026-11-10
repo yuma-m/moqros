@@ -132,7 +132,7 @@ pub fn pub_topics(
 		.collect()
 }
 
-/// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…][,max_height=…]`.
+/// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…][,max_height=…][,encoding=…]`.
 ///
 /// Options left out fall back to the matching command-line flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,19 +142,21 @@ pub struct BroadcastSpec {
 	pub ros_type: Option<String>,
 	pub frame_id: Option<String>,
 	pub max_height: Option<u32>,
+	pub encoding: Option<moqros::PixelFormat>,
 }
 
 impl FromStr for BroadcastSpec {
 	type Err = String;
 
 	fn from_str(spec: &str) -> Result<Self, String> {
-		let (broadcast, options) = split_spec(spec, &["topic", "type", "frame_id", "max_height"])?;
+		let (broadcast, options) = split_spec(spec, &["topic", "type", "frame_id", "max_height", "encoding"])?;
 		let mut parsed = Self {
 			broadcast: broadcast.to_string(),
 			topic: None,
 			ros_type: None,
 			frame_id: None,
 			max_height: None,
+			encoding: None,
 		};
 		for (key, value) in options {
 			match key {
@@ -165,12 +167,25 @@ impl FromStr for BroadcastSpec {
 							.map_err(|_| format!("max_height must be a number, not {value:?}"))?,
 					);
 				}
+				"encoding" => parsed.encoding = Some(parse_encoding(value)?),
 				"topic" => parsed.topic = Some(value.to_string()),
 				"type" => parsed.ros_type = Some(value.to_string()),
 				_ => parsed.frame_id = Some(value.to_string()),
 			}
 		}
 		Ok(parsed)
+	}
+}
+
+/// Parse a pixel encoding images can be republished in: `rgb8`, `bgr8`, `rgba8`, `bgra8`
+/// or `mono8`.
+pub fn parse_encoding(value: &str) -> Result<moqros::PixelFormat, String> {
+	use moqros::PixelFormat::{Bgr8, Bgra8, Mono8, Rgb8, Rgba8};
+	match value.parse::<moqros::PixelFormat>() {
+		Ok(format @ (Rgb8 | Bgr8 | Rgba8 | Bgra8 | Mono8)) => Ok(format),
+		_ => Err(format!(
+			"unsupported encoding {value:?} (expected one of: rgb8, bgr8, rgba8, bgra8, mono8)"
+		)),
 	}
 }
 
@@ -184,6 +199,8 @@ pub struct SubBroadcast {
 	pub frame_id: String,
 	/// The tallest video rendition to pick; the largest when `None`.
 	pub max_height: Option<u32>,
+	/// Pixel encoding of republished images.
+	pub encoding: moqros::PixelFormat,
 }
 
 /// Topic of a lone broadcast that neither `topic=` nor `--topic` names.
@@ -198,6 +215,7 @@ pub fn sub_broadcasts(
 	ros_type: Option<String>,
 	frame_id: &str,
 	max_height: Option<u32>,
+	encoding: moqros::PixelFormat,
 ) -> anyhow::Result<Vec<SubBroadcast>> {
 	ensure!(!specs.is_empty(), "no broadcast to subscribe to");
 	let single = specs.len() == 1;
@@ -217,6 +235,7 @@ pub fn sub_broadcasts(
 				ros_type: spec.ros_type.or(ros_type.clone()),
 				frame_id: spec.frame_id.unwrap_or_else(|| frame_id.to_string()),
 				max_height: spec.max_height.or(max_height),
+				encoding: spec.encoding.unwrap_or(encoding),
 				broadcast: spec.broadcast,
 			};
 			ensure!(
@@ -238,6 +257,7 @@ pub struct Discovery {
 	pub topic_template: String,
 	pub frame_id: String,
 	pub max_height: Option<u32>,
+	pub encoding: moqros::PixelFormat,
 }
 
 /// Default of [`Discovery::topic_template`].
@@ -250,6 +270,7 @@ impl Discovery {
 		topic_template: String,
 		frame_id: String,
 		max_height: Option<u32>,
+		encoding: moqros::PixelFormat,
 	) -> anyhow::Result<Self> {
 		ensure!(
 			topic_template.contains("{name}"),
@@ -260,6 +281,7 @@ impl Discovery {
 			topic_template,
 			frame_id,
 			max_height,
+			encoding,
 		};
 		if let Err(err) = discovery.broadcast("name") {
 			bail!("--topic-template {:?}: {err}", discovery.topic_template);
@@ -287,6 +309,7 @@ impl Discovery {
 			ros_type: None,
 			frame_id: self.frame_id.clone(),
 			max_height: self.max_height,
+			encoding: self.encoding,
 		})
 	}
 }
@@ -393,6 +416,12 @@ mod tests {
 			Some(360)
 		);
 		assert!("cam,max_height=tall".parse::<BroadcastSpec>().is_err());
+		assert_eq!(
+			"cam,encoding=mono8".parse::<BroadcastSpec>().unwrap().encoding,
+			Some(moqros::PixelFormat::Mono8)
+		);
+		assert!("cam,encoding=yuv422".parse::<BroadcastSpec>().is_err());
+		assert!("cam,encoding=16UC1".parse::<BroadcastSpec>().is_err());
 	}
 
 	#[test]
@@ -487,7 +516,7 @@ mod tests {
 		};
 		let broadcasts = |specs: &[&str]| {
 			let specs = specs.iter().map(|s| s.parse::<BroadcastSpec>().unwrap()).collect();
-			sub_broadcasts(specs, None, None, "camera", None).unwrap()
+			sub_broadcasts(specs, None, None, "camera", None, moqros::PixelFormat::Rgb8).unwrap()
 		};
 
 		let odom = topics(&["/odom,broadcast=robot/odom"]);
@@ -510,11 +539,31 @@ mod tests {
 		let topics = |broadcasts: Vec<SubBroadcast>| broadcasts.into_iter().map(|b| b.topic).collect::<Vec<_>>();
 
 		assert_eq!(
-			topics(sub_broadcasts(specs(&["image_raw"]), None, None, "camera", None).unwrap()),
+			topics(
+				sub_broadcasts(
+					specs(&["image_raw"]),
+					None,
+					None,
+					"camera",
+					None,
+					moqros::PixelFormat::Rgb8
+				)
+				.unwrap()
+			),
 			[DEFAULT_SUB_TOPIC]
 		);
 		assert_eq!(
-			topics(sub_broadcasts(specs(&["image_raw"]), Some("/x".into()), None, "camera", None).unwrap()),
+			topics(
+				sub_broadcasts(
+					specs(&["image_raw"]),
+					Some("/x".into()),
+					None,
+					"camera",
+					None,
+					moqros::PixelFormat::Rgb8
+				)
+				.unwrap()
+			),
 			["/x"]
 		);
 		let broadcasts = sub_broadcasts(
@@ -527,18 +576,50 @@ mod tests {
 			None,
 			"camera",
 			Some(480),
+			moqros::PixelFormat::Bgr8,
 		)
 		.unwrap();
 		assert_eq!(broadcasts[2].frame_id, "imu");
 		assert_eq!(broadcasts[2].max_height, Some(480));
+		assert_eq!(broadcasts[2].encoding, moqros::PixelFormat::Bgr8);
 		assert_eq!(
 			topics(broadcasts),
 			["/moqros/image", "/moqros/chatter", "/moqros/front/imu"]
 		);
 
-		assert!(sub_broadcasts(specs(&["a", "b"]), Some("/x".into()), None, "camera", None).is_err());
-		assert!(sub_broadcasts(specs(&["a", "b"]), None, Some("t/msg/T".into()), "camera", None).is_err());
-		assert!(sub_broadcasts(specs(&["a,topic=/x", "b,topic=/x"]), None, None, "camera", None).is_err());
+		assert!(
+			sub_broadcasts(
+				specs(&["a", "b"]),
+				Some("/x".into()),
+				None,
+				"camera",
+				None,
+				moqros::PixelFormat::Rgb8
+			)
+			.is_err()
+		);
+		assert!(
+			sub_broadcasts(
+				specs(&["a", "b"]),
+				None,
+				Some("t/msg/T".into()),
+				"camera",
+				None,
+				moqros::PixelFormat::Rgb8
+			)
+			.is_err()
+		);
+		assert!(
+			sub_broadcasts(
+				specs(&["a,topic=/x", "b,topic=/x"]),
+				None,
+				None,
+				"camera",
+				None,
+				moqros::PixelFormat::Rgb8
+			)
+			.is_err()
+		);
 	}
 
 	#[test]
@@ -548,6 +629,7 @@ mod tests {
 			DEFAULT_TOPIC_TEMPLATE.into(),
 			"camera".into(),
 			Some(480),
+			moqros::PixelFormat::Mono8,
 		)
 		.unwrap();
 		assert!(discovery.covers("robots/r1/camera"));
@@ -558,6 +640,7 @@ mod tests {
 		let found = discovery.broadcast("robots/r1/camera").unwrap();
 		assert_eq!(found.topic, "/moqros/robots/r1/camera");
 		assert_eq!(found.max_height, Some(480));
+		assert_eq!(found.encoding, moqros::PixelFormat::Mono8);
 		// Names from the network that don't make plain topic names are refused.
 		for bad in [
 			"robots/r-1/camera",
@@ -570,9 +653,25 @@ mod tests {
 			assert!(discovery.broadcast(bad).is_err(), "{bad}");
 		}
 
-		assert!(Discovery::new(vec![], "/remote".into(), String::new(), None).is_err());
-		assert!(Discovery::new(vec![], "remote/{name}".into(), String::new(), None).is_err());
-		let custom = Discovery::new(vec![], "/remote/{name}/image".into(), String::new(), None).unwrap();
+		assert!(Discovery::new(vec![], "/remote".into(), String::new(), None, moqros::PixelFormat::Rgb8).is_err());
+		assert!(
+			Discovery::new(
+				vec![],
+				"remote/{name}".into(),
+				String::new(),
+				None,
+				moqros::PixelFormat::Rgb8
+			)
+			.is_err()
+		);
+		let custom = Discovery::new(
+			vec![],
+			"/remote/{name}/image".into(),
+			String::new(),
+			None,
+			moqros::PixelFormat::Rgb8,
+		)
+		.unwrap();
 		assert_eq!(custom.broadcast("r1").unwrap().topic, "/remote/r1/image");
 	}
 
@@ -587,7 +686,14 @@ mod tests {
 		)
 		.unwrap();
 		let discovery = |prefix: &str| {
-			Discovery::new(vec![prefix.into()], DEFAULT_TOPIC_TEMPLATE.into(), String::new(), None).unwrap()
+			Discovery::new(
+				vec![prefix.into()],
+				DEFAULT_TOPIC_TEMPLATE.into(),
+				String::new(),
+				None,
+				moqros::PixelFormat::Rgb8,
+			)
+			.unwrap()
 		};
 		assert!(check_no_loop(&topics, &[], Some(&discovery("robots"))).is_err());
 		assert!(check_no_loop(&topics, &[], Some(&discovery("drones"))).is_ok());

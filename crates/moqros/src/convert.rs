@@ -332,10 +332,36 @@ impl<'a> Planes<'a> {
 ///
 /// If the planes are shorter than their strides and the picture size say.
 pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
+	yuv_to_packed(src, PixelFormat::Rgb8).expect("rgb8 is a packed format")
+}
+
+/// Convert planar 4:2:0 into packed `format`: `rgb8`, `bgr8`, `rgba8` or `bgra8` (opaque), or
+/// `mono8` (the luma, in full range). Fails with [`Error::InvalidSettings`] for the 4:2:2 formats.
+///
+/// # Panics
+///
+/// If the planes are shorter than their strides and the picture size say.
+pub fn yuv_to_packed(src: &Planes<'_>, format: PixelFormat) -> Result<Vec<u8>, Error> {
+	type Kernel =
+		fn(&YuvPlanarImage<'_, u8>, &mut [u8], u32, YuvRange, YuvStandardMatrix) -> Result<(), yuvutils_rs::YuvError>;
+	// The kernel, and where R, G, B and alpha go in a pixel.
+	let (kernel, order, alpha): (Kernel, [usize; 3], Option<usize>) = match format {
+		PixelFormat::Rgb8 => (yuvutils_rs::yuv420_to_rgb, [0, 1, 2], None),
+		PixelFormat::Bgr8 => (yuvutils_rs::yuv420_to_bgr, [2, 1, 0], None),
+		PixelFormat::Rgba8 => (yuvutils_rs::yuv420_to_rgba, [0, 1, 2], Some(3)),
+		PixelFormat::Bgra8 => (yuvutils_rs::yuv420_to_bgra, [2, 1, 0], Some(3)),
+		PixelFormat::Mono8 => return Ok(luma_to_mono(src)),
+		PixelFormat::Uyvy | PixelFormat::Yuyv => {
+			return Err(Error::InvalidSettings(format!(
+				"can't convert decoded pictures to {format}"
+			)));
+		}
+	};
+	let bpp = format.bytes_per_pixel();
 	let (width, height) = (src.width, src.height);
-	let mut out = vec![0u8; width * height * 3];
+	let mut out = vec![0u8; width * height * bpp];
 	if width == 0 || height == 0 {
-		return out;
+		return Ok(out);
 	}
 	// yuvutils-rs 0.8.3 pairs the last row of an odd-height picture with the wrong chroma row,
 	// so that row is converted here.
@@ -351,10 +377,10 @@ pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
 			width: dim(width),
 			height: dim(even),
 		};
-		yuvutils_rs::yuv420_to_rgb(
+		kernel(
 			&planar,
-			&mut out[..width * even * 3],
-			dim(width * 3),
+			&mut out[..width * even * bpp],
+			dim(width * bpp),
 			YuvRange::Limited,
 			YuvStandardMatrix::Bt601,
 		)
@@ -364,8 +390,30 @@ pub fn yuv_to_rgb8(src: &Planes<'_>) -> Vec<u8> {
 		let y_row = &src.y.0[even * src.y.1..];
 		let u_row = &src.u.0[(even / 2) * src.u.1..];
 		let v_row = &src.v.0[(even / 2) * src.v.1..];
-		for (x, rgb) in out[even * width * 3..].as_chunks_mut::<3>().0.iter_mut().enumerate() {
-			*rgb = yuv_to_rgb(y_row[x], u_row[x / 2], v_row[x / 2]);
+		for (x, pixel) in out[even * width * bpp..].chunks_exact_mut(bpp).enumerate() {
+			let rgb = yuv_to_rgb(y_row[x], u_row[x / 2], v_row[x / 2]);
+			for (channel, &index) in order.iter().enumerate() {
+				pixel[index] = rgb[channel];
+			}
+			if let Some(index) = alpha {
+				pixel[index] = 255;
+			}
+		}
+	}
+	Ok(out)
+}
+
+/// The luma plane as packed full-range `mono8`, inverting [`I420::from_image`]'s mapping.
+fn luma_to_mono(src: &Planes<'_>) -> Vec<u8> {
+	let (width, height) = (src.width, src.height);
+	let mut out = vec![0u8; width * height];
+	if width == 0 {
+		return out;
+	}
+	let (plane, stride) = src.y;
+	for (row, dst) in out.chunks_exact_mut(width).enumerate() {
+		for (d, &y) in dst.iter_mut().zip(&plane[row * stride..row * stride + width]) {
+			*d = u8::try_from(((u32::from(y.clamp(16, 235)) - 16) * 255 + 109) / 219).unwrap_or(u8::MAX);
 		}
 	}
 	out
@@ -687,5 +735,50 @@ mod tests {
 			let expected = yuv_to_rgb(frame.y()[i], frame.u()[ci], frame.v()[ci]);
 			assert!(max_diff(pixel, &expected) <= 2, "rgb {i}: {pixel:?} vs {expected:?}");
 		}
+	}
+
+	/// Every packed format comes out of the same picture with its channels in its own order.
+	#[test]
+	fn converts_to_every_packed_format() {
+		// 4x3: odd height, so the last row takes the other path.
+		let rgb: Vec<u8> = (0..4 * 3).flat_map(|i: u8| [i * 20, 200 - i * 10, 90]).collect();
+		let frame = I420::from_image(&Image::new(4, 3, PixelFormat::Rgb8, rgb, Duration::ZERO).unwrap()).unwrap();
+		let planes = frame.planes();
+		let reference = yuv_to_rgb8(&planes);
+		let pixels = |format| yuv_to_packed(&planes, format).unwrap();
+		for (format, order, alpha) in [
+			(PixelFormat::Bgr8, [2, 1, 0], None),
+			(PixelFormat::Rgba8, [0, 1, 2], Some(3)),
+			(PixelFormat::Bgra8, [2, 1, 0], Some(3)),
+		] {
+			let out = pixels(format);
+			let bpp = format.bytes_per_pixel();
+			assert_eq!(out.len(), 4 * 2 * bpp, "{format}");
+			for (pixel, rgb) in out.chunks_exact(bpp).zip(reference.as_chunks::<3>().0) {
+				for channel in 0..3 {
+					assert!(
+						pixel[order[channel]].abs_diff(rgb[channel]) <= 1,
+						"{format}: {pixel:?} vs {rgb:?}"
+					);
+				}
+				if let Some(index) = alpha {
+					assert_eq!(pixel[index], 255, "{format}");
+				}
+			}
+		}
+		assert!(matches!(
+			yuv_to_packed(&planes, PixelFormat::Yuyv),
+			Err(Error::InvalidSettings(_))
+		));
+	}
+
+	#[test]
+	fn mono_round_trips_through_luma() {
+		let gray: Vec<u8> = (0..=255).collect();
+		let frame =
+			I420::from_image(&Image::new(16, 16, PixelFormat::Mono8, gray.clone(), Duration::ZERO).unwrap()).unwrap();
+		let back = yuv_to_packed(&frame.planes(), PixelFormat::Mono8).unwrap();
+		assert!(max_diff(&back, &gray) <= 1, "{back:?}");
+		assert_eq!((back[0], back[255]), (0, 255));
 	}
 }

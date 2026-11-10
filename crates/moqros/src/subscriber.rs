@@ -11,7 +11,7 @@ use crate::catalog::{self, Kind};
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSubscriber};
 use crate::track::{GroupReader, RouteWatch};
-use crate::{ClientConfig, Error, Image, Result, Session};
+use crate::{ClientConfig, Error, Image, PixelFormat, Result, Session};
 
 /// A connection to a relay used to consume image and data broadcasts.
 ///
@@ -262,6 +262,11 @@ impl ImageSubscriber {
 		lock(&self.decoder).set_max_pixels(max_pixels);
 	}
 
+	/// Decode into `format` images; see [`Decoder::set_output_format`].
+	pub fn set_output_format(&mut self, format: PixelFormat) -> Result<()> {
+		lock(&self.decoder).set_output_format(format)
+	}
+
 	/// Next encoded frame, or `None` once the broadcast ends.
 	pub async fn next_frame(&mut self) -> Result<Option<VideoFrame>> {
 		let Some(frame) = self.video.next_frame().await? else {
@@ -275,7 +280,8 @@ impl ImageSubscriber {
 		}))
 	}
 
-	/// Next decoded `rgb8` image, or `None` once the broadcast ends.
+	/// Next decoded image (`rgb8` unless [set otherwise](ImageSubscriber::set_output_format)), or
+	/// `None` once the broadcast ends.
 	///
 	/// Decoding and color conversion run on tokio's blocking pool, so a large picture doesn't
 	/// stall the other tasks of the runtime.

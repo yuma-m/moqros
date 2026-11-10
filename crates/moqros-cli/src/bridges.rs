@@ -506,6 +506,7 @@ fn spawn_sub_broadcast(
 		topic: broadcast.topic.clone(),
 		qos,
 		frame_id: broadcast.frame_id.clone(),
+		encoding: broadcast.encoding,
 		ros_type: broadcast.ros_type.clone(),
 	};
 	let bridge = ready.spawn(node, target)?;

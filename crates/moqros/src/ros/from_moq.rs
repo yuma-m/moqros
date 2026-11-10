@@ -9,11 +9,12 @@ use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
 use super::{Bridge, QosProfile, RosImage, Teardown, image_into_ros, now_stamp};
 use crate::{
-	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, Result, Subscriber, Subscription,
+	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, PixelFormat, Result, Subscriber,
+	Subscription,
 };
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
-/// `rgb8` images, or the messages of a data track.
+/// images ([`RosTarget::encoding`], `rgb8` by default), or the messages of a data track.
 ///
 /// Waits for the first subscription to learn what to publish, so this resolves once
 /// `broadcast` is announced. A data track's ROS type comes from its catalog, or from
@@ -46,6 +47,9 @@ pub struct RosTarget {
 	pub frame_id: String,
 	/// ROS message type of a data track, overriding the one its catalog announces.
 	pub ros_type: Option<String>,
+	/// Pixel encoding of republished images (`rgb8` by default); see
+	/// [`Decoder::set_output_format`](crate::Decoder::set_output_format).
+	pub encoding: PixelFormat,
 }
 
 impl RosTarget {
@@ -56,7 +60,14 @@ impl RosTarget {
 			qos,
 			frame_id: String::new(),
 			ros_type: None,
+			encoding: PixelFormat::Rgb8,
 		}
+	}
+
+	/// Set [`RosTarget::encoding`].
+	pub fn with_encoding(mut self, encoding: PixelFormat) -> Self {
+		self.encoding = encoding;
+		self
 	}
 
 	/// Set [`RosTarget::frame_id`].
@@ -118,12 +129,19 @@ impl MoqToRos {
 			qos,
 			frame_id,
 			ros_type,
+			encoding,
 		} = target;
 		let output = match &self.first {
-			Subscription::Images(_) => RosOutput::Images {
-				publisher: node.create_publisher::<RosImage>(&topic, qos)?,
-				frame_id,
-			},
+			Subscription::Images(_) => {
+				if matches!(encoding, PixelFormat::Uyvy | PixelFormat::Yuyv) {
+					return Err(Error::InvalidSettings(format!("can't republish images as {encoding}")));
+				}
+				RosOutput::Images {
+					publisher: node.create_publisher::<RosImage>(&topic, qos)?,
+					frame_id,
+					encoding,
+				}
+			}
 			Subscription::Data(data) => {
 				let settings = data.settings();
 				let ros_type = ros_type
@@ -181,6 +199,7 @@ enum RosOutput {
 	Images {
 		publisher: r2r::Publisher<RosImage>,
 		frame_id: String,
+		encoding: PixelFormat,
 	},
 	Data {
 		publisher: r2r::PublisherUntyped,
@@ -216,9 +235,14 @@ async fn republish(
 		};
 
 		let ended = match (subscription, &mut *output) {
-			(Subscription::Images(images), RosOutput::Images { publisher, frame_id }) => {
-				republish_images(images, publisher, frame_id, &stats).await?
-			}
+			(
+				Subscription::Images(images),
+				RosOutput::Images {
+					publisher,
+					frame_id,
+					encoding,
+				},
+			) => republish_images(images, publisher, frame_id, *encoding, &stats).await?,
 			(Subscription::Data(data), RosOutput::Data { publisher, catalog }) => {
 				if let Some((from, to)) = data_changed(catalog, data.settings()) {
 					return Err(Error::BroadcastChanged { broadcast, from, to });
@@ -264,8 +288,10 @@ async fn republish_images(
 	mut images: ImageSubscriber,
 	publisher: &mut r2r::Publisher<RosImage>,
 	frame_id: &str,
+	encoding: PixelFormat,
 	stats: &StatsSender,
 ) -> Result<Option<Error>> {
+	images.set_output_format(encoding)?;
 	let mut meter = RateMeter::new("MoQ -> ROS");
 	loop {
 		match images.next_image().await {
