@@ -56,7 +56,7 @@ impl RelayArgs {
 /// What `moqros-pub` sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
-	/// Encode `sensor_msgs/msg/Image` messages as video.
+	/// Encode `sensor_msgs/msg/Image` or `sensor_msgs/msg/CompressedImage` messages as video.
 	Video,
 	/// Any message type, as one JSON document per message.
 	Json,

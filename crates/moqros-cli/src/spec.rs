@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{bail, ensure};
 use clap::ValueEnum;
-use moqros::ros::ROS_IMAGE_TYPE;
+use moqros::ros::{ROS_COMPRESSED_IMAGE_TYPE, ROS_IMAGE_TYPE};
 
 use crate::args::Format;
 
@@ -112,10 +112,13 @@ pub fn pub_topics(
 				topic: spec.topic,
 			};
 			if topic.format == Format::Video
-				&& let Some(ros_type) = topic.ros_type.as_deref().filter(|t| *t != ROS_IMAGE_TYPE)
+				&& let Some(ros_type) = topic
+					.ros_type
+					.as_deref()
+					.filter(|t| ![ROS_IMAGE_TYPE, ROS_COMPRESSED_IMAGE_TYPE].contains(t))
 			{
 				bail!(
-					"{}: video needs {ROS_IMAGE_TYPE} messages, not {ros_type}; use format=json or cdr",
+					"{}: video needs {ROS_IMAGE_TYPE} or {ROS_COMPRESSED_IMAGE_TYPE} messages, not {ros_type}; use format=json or cdr",
 					topic.topic
 				);
 			}

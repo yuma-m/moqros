@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail, ensure};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use moqros::ros::{BitrateControl, Bridge, MoqToRos, QosProfile, r2r};
+use moqros::ros::{BitrateControl, Bridge, MoqToRos, QosProfile, ROS_COMPRESSED_IMAGE_TYPE, ROS_IMAGE_TYPE, r2r};
 use tokio::task::JoinError;
 
 use crate::args::Format;
@@ -69,10 +69,10 @@ impl Relay {
 /// arrives (which closes the connection first, so the relay ends this node's broadcasts and
 /// subscriptions right away).
 ///
-/// Video topics start at once. A data topic without a type starts when it appears in the ROS
-/// graph. Broadcasts are waited for all at once, each starting when it's announced; one whose
-/// topic can't be created (e.g. a message type without bindings) is skipped. With `discovery`,
-/// every broadcast announced under its prefixes is republished too, once.
+/// A topic without a type starts when it appears in the ROS graph. Broadcasts are waited for all
+/// at once, each starting when it's announced; one whose topic can't be created (e.g. a message
+/// type without bindings) is skipped. With `discovery`, every broadcast announced under its
+/// prefixes is republished too, once.
 ///
 /// A bridge that stops or fails is restarted on its own, after a delay that grows while it
 /// keeps failing (up to 30 seconds), so one broken topic or broadcast doesn't take the others
@@ -448,8 +448,8 @@ impl PendingTopics {
 	}
 }
 
-/// Start bridging `topic` from ROS to MoQ once its type is known. Returns `None` while
-/// the topic hasn't appeared in the ROS graph yet.
+/// Start bridging `topic` from ROS to MoQ once its type is known: given, or looked up in the ROS
+/// graph. Returns `None` while the topic hasn't appeared there yet.
 fn start_pub_topic(
 	node: &mut r2r::Node,
 	publisher: &moqros::Publisher,
@@ -457,19 +457,26 @@ fn start_pub_topic(
 	video: &moqros::ImageBroadcastSettings,
 	qos: QosProfile,
 ) -> anyhow::Result<Option<Bridge>> {
+	let ros_type = match &topic.ros_type {
+		Some(ros_type) => ros_type.clone(),
+		None => match moqros::ros::topic_type(node, &topic.topic)? {
+			Some(ros_type) => ros_type,
+			None => return Ok(None),
+		},
+	};
 	let bridge = match topic.format.data() {
 		None => {
 			let images = publisher.create_image_broadcast(&topic.broadcast, video.clone())?;
-			moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?
+			match ros_type.as_str() {
+				ROS_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?,
+				ROS_COMPRESSED_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq_compressed(node, &topic.topic, qos, images)?,
+				other => bail!(
+					"{}: video needs {ROS_IMAGE_TYPE} or {ROS_COMPRESSED_IMAGE_TYPE} messages, not {other}; use format=json or cdr",
+					topic.topic
+				),
+			}
 		}
 		Some(format) => {
-			let ros_type = match &topic.ros_type {
-				Some(ros_type) => ros_type.clone(),
-				None => match moqros::ros::topic_type(node, &topic.topic)? {
-					Some(ros_type) => ros_type,
-					None => return Ok(None),
-				},
-			};
 			let settings = moqros::DataSettings {
 				format,
 				mode: topic.mode,

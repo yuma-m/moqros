@@ -55,6 +55,7 @@
 //! | `av1` | AV1 (Main profile, 8-bit) through the system libaom in real-time mode. Needs libaom, pkg-config, and libclang at build time. |
 //! | `h264` | H.264 (Constrained Baseline, `avc3`) through Cisco's prebuilt OpenH264 binary, loaded at runtime. |
 //! | `hw` | Hardware encoders (VA-API, NVENC) through GStreamer, falling back to software. Needs the GStreamer development files at build time. |
+//! | `compressed` (default) | Decode JPEG and PNG images ([`Image::from_compressed`], `sensor_msgs/CompressedImage`) with pure-Rust decoders. |
 //! | `ros` | ROS 2 bridges built on r2r. Needs a sourced ROS 2 environment and libclang at build time. |
 //!
 //! Pick the codec with [`EncoderSettings::codec`]. A subscriber picks the best rendition in
@@ -96,6 +97,8 @@ mod catalog;
 mod client;
 mod clock;
 mod codec;
+#[cfg(feature = "compressed")]
+mod compressed;
 mod convert;
 mod data;
 mod error;
