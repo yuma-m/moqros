@@ -157,7 +157,9 @@ Each topic becomes a broadcast of its own. `--type` and `--broadcast` of `moqros
 topics start at once. A data topic without a `type` starts when it appears in the ROS graph. `moqros-sub`
 waits for all its broadcasts at once, and starts each one when it's announced. It skips a broadcast whose
 topic it can't create (e.g. a message type this build has no bindings for), and goes on with the rest.
-Otherwise, each bridge exits when any of its topics fails.
+A topic or broadcast that stops or fails later is restarted on its own, one second later at first and up to
+30 seconds later while it keeps failing, so the others go on. The node exits on SIGINT or SIGTERM, when the
+relay connection gives up, or when a topic can't be started at all (e.g. an unavailable codec).
 
 ## Other message types
 

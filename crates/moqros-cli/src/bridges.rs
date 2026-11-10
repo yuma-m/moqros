@@ -1,10 +1,13 @@
 //! Running the bridges of one node over one relay connection.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail, ensure};
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use moqros::ros::{Bridge, MoqToRos, QosProfile, r2r};
+use tokio::task::JoinError;
 
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
 use crate::spec::{PubTopic, SubBroadcast};
@@ -56,13 +59,17 @@ impl Relay {
 	}
 }
 
-/// Run `bridges` until one of them ends, the relay connection gives up, or SIGINT or SIGTERM
+/// Run `bridges` until the relay connection gives up, the ROS spinner dies, or SIGINT or SIGTERM
 /// arrives (which closes the connection first, so the relay ends this node's broadcasts and
 /// subscriptions right away).
 ///
 /// Video topics start at once. A data topic without a type starts when it appears in the ROS
 /// graph. Broadcasts are waited for all at once, each starting when it's announced; one whose
 /// topic can't be created (e.g. a message type without bindings) is skipped.
+///
+/// A bridge that stops or fails is restarted on its own, after a delay that grows while it
+/// keeps failing (up to 30 seconds), so one broken topic or broadcast doesn't take the others
+/// down.
 pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> anyhow::Result<()> {
 	let Bridges {
 		topics,
@@ -89,31 +96,34 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 
 	// A topic's type depends on what its broadcast carries, so wait for each broadcast
 	// (all at once) before creating its publisher.
-	let mut subscribing: futures::stream::FuturesUnordered<_> = broadcasts
+	let mut subscribing: FuturesUnordered<_> = broadcasts
 		.into_iter()
-		.filter_map(|broadcast| {
-			let subscriber = relay.subscriber.clone()?;
-			Some(async move { (MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast) })
-		})
+		.filter_map(|broadcast| Some(subscribe_after(relay.subscriber.clone()?, broadcast, Duration::ZERO)))
 		.collect();
-	let mut pub_bridges = futures::stream::FuturesUnordered::new();
-	let mut sub_bridges = futures::stream::FuturesUnordered::new();
+	let mut pub_bridges = FuturesUnordered::new();
+	let mut sub_bridges = FuturesUnordered::new();
 	let mut pending = PendingTopics::new(topics);
+	let mut restarts = Restarts::default();
 	// Created once, so a signal arriving while the loop body runs isn't missed.
 	let shutdown = shutdown_signal();
 	tokio::pin!(shutdown);
 
 	loop {
 		if let Some(publisher) = &relay.publisher {
-			for (topic, bridge) in pending.start_ready(&node, publisher, &encoder, &qos)? {
-				pub_bridges.push(async move { (topic, bridge.await) });
+			for (topic, bridge) in pending.start_ready(&node, publisher, &encoder, &qos, &mut restarts)? {
+				let stats = bridge.watch_stats();
+				pub_bridges.push(async move { (topic, stats, bridge.await) });
 			}
 		}
 
 		tokio::select! {
 			Some((ready, broadcast)) = subscribing.next() => {
 				match node.with(|node| spawn_sub_broadcast(ready, node, &broadcast, qos.clone())) {
-					Ok(bridge) => sub_bridges.push(async move { (broadcast.broadcast, bridge.await) }),
+					Ok(mut bridge) => {
+						let stats = bridge.watch_stats();
+						let teardown = bridge.take_teardown();
+						sub_bridges.push(async move { (broadcast, stats, teardown, bridge.await) });
+					}
 					// E.g. a message type this build has no bindings for: the other
 					// broadcasts and topics can still go on.
 					Err(err) => {
@@ -124,15 +134,22 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 					}
 				}
 			}
-			Some((topic, res)) = pub_bridges.next() => {
-				let stats = res.context("bridge panicked")??;
-				tracing::info!(topic, ?stats, "topic stream ended");
-				return Ok(());
+			Some((topic, stats, res)) = pub_bridges.next() => {
+				let stats = *stats.borrow();
+				log_stopped("topic", &topic.topic, &stats, res);
+				let delay = restarts.next(&format!("topic {}", topic.topic), stats.sent > 0);
+				tracing::info!(topic = topic.topic, ?delay, "restarting the topic bridge");
+				pending.restart(topic, delay);
 			}
-			Some((broadcast, res)) = sub_bridges.next() => {
-				let stats = res.context("bridge panicked")?.with_context(|| format!("broadcast {broadcast}"))?;
-				tracing::info!(broadcast, ?stats, "broadcast bridge ended");
-				return Ok(());
+			Some((broadcast, stats, teardown, res)) = sub_bridges.next() => {
+				let stats = *stats.borrow();
+				log_stopped("broadcast", &broadcast.broadcast, &stats, res);
+				node.with(|node| teardown.run(node));
+				let delay = restarts.next(&format!("broadcast {}", broadcast.broadcast), stats.sent > 0);
+				tracing::info!(broadcast = broadcast.broadcast, ?delay, "restarting the broadcast bridge");
+				if let Some(subscriber) = relay.subscriber.clone() {
+					subscribing.push(subscribe_after(subscriber, broadcast, delay));
+				}
 			}
 			_ = tokio::time::sleep(Duration::from_millis(500)), if !pending.is_empty() => {}
 			// E.g. the relay refused the session: nothing would ever be announced.
@@ -149,15 +166,81 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	}
 }
 
-/// Topics to publish that haven't started yet, because their type isn't known.
+/// Wait `delay`, then subscribe to `broadcast` (retrying until it's announced).
+async fn subscribe_after(
+	subscriber: moqros::Subscriber,
+	broadcast: SubBroadcast,
+	delay: Duration,
+) -> (MoqToRos, SubBroadcast) {
+	tokio::time::sleep(delay).await;
+	(MoqToRos::subscribe(subscriber, &broadcast.broadcast).await, broadcast)
+}
+
+/// Log why the bridge of `kind` `name` stopped.
+fn log_stopped(
+	kind: &str,
+	name: &str,
+	stats: &moqros::ros::BridgeStats,
+	res: Result<moqros::Result<moqros::ros::BridgeStats>, JoinError>,
+) {
+	match res {
+		Ok(Ok(_)) => tracing::warn!(kind, name, ?stats, "bridge stopped"),
+		Ok(Err(err)) => tracing::warn!(kind, name, ?stats, %err, "bridge failed"),
+		Err(err) => tracing::error!(kind, name, ?stats, %err, "bridge panicked"),
+	}
+}
+
+/// How long to wait before restarting each bridge that stopped: one second at first, doubling
+/// up to [`Restarts::MAX`] while it keeps stopping without getting a message through.
+#[derive(Debug, Default)]
+struct Restarts {
+	delays: HashMap<String, Duration>,
+}
+
+impl Restarts {
+	const MIN: Duration = Duration::from_secs(1);
+	const MAX: Duration = Duration::from_secs(30);
+
+	/// The delay before restarting `bridge`, which stopped after sending a message if
+	/// `progressed`.
+	fn next(&mut self, bridge: &str, progressed: bool) -> Duration {
+		let delay = self.delays.entry(bridge.to_string()).or_default();
+		*delay = match progressed || delay.is_zero() {
+			true => Self::MIN,
+			false => (*delay * 2).min(Self::MAX),
+		};
+		*delay
+	}
+}
+
+/// A topic to publish that hasn't started (again) yet.
+struct Pending {
+	topic: PubTopic,
+	/// Not started before this.
+	due: Instant,
+	/// Whether it ran before, so a failure to start is retried instead of fatal.
+	restart: bool,
+}
+
+/// Topics to publish that haven't started yet, because their type isn't known or they wait
+/// to be restarted.
 struct PendingTopics {
-	topics: Vec<PubTopic>,
-	/// Whether the topics still waiting were logged.
+	topics: Vec<Pending>,
+	/// Whether the topics still waiting for their type were logged.
 	logged: bool,
 }
 
 impl PendingTopics {
 	fn new(topics: Vec<PubTopic>) -> Self {
+		let now = Instant::now();
+		let topics = topics
+			.into_iter()
+			.map(|topic| Pending {
+				topic,
+				due: now,
+				restart: false,
+			})
+			.collect();
 		Self { topics, logged: false }
 	}
 
@@ -165,24 +248,49 @@ impl PendingTopics {
 		self.topics.is_empty()
 	}
 
-	/// Start every topic whose type is known by now, returning each one's name and bridge.
-	/// Data topics without a `type` wait until something publishes them.
+	/// Start `topic` again in `delay`.
+	fn restart(&mut self, topic: PubTopic, delay: Duration) {
+		self.topics.push(Pending {
+			topic,
+			due: Instant::now() + delay,
+			restart: true,
+		});
+	}
+
+	/// Start every topic that is due and whose type is known by now, returning each one with
+	/// its bridge. Data topics without a `type` wait until something publishes them.
+	///
+	/// A topic that fails to start fails the node the first time (it's misconfigured), and is
+	/// retried later on a restart.
 	fn start_ready(
 		&mut self,
 		node: &SharedNode,
 		publisher: &moqros::Publisher,
 		encoder: &moqros::EncoderSettings,
 		qos: &QosProfile,
-	) -> anyhow::Result<Vec<(String, Bridge)>> {
+		restarts: &mut Restarts,
+	) -> anyhow::Result<Vec<(PubTopic, Bridge)>> {
+		let now = Instant::now();
 		let mut started = Vec::new();
 		let mut waiting = Vec::new();
-		for topic in std::mem::take(&mut self.topics) {
-			match node.with(|node| start_pub_topic(node, publisher, &topic, encoder, qos.clone()))? {
-				Some(bridge) => started.push((topic.topic.clone(), bridge)),
-				None => {
-					waiting.push(topic.topic.clone());
-					self.topics.push(topic);
+		for mut pending in std::mem::take(&mut self.topics) {
+			if pending.due > now {
+				self.topics.push(pending);
+				continue;
+			}
+			match node.with(|node| start_pub_topic(node, publisher, &pending.topic, encoder, qos.clone())) {
+				Ok(Some(bridge)) => started.push((pending.topic, bridge)),
+				Ok(None) => {
+					waiting.push(pending.topic.topic.clone());
+					self.topics.push(pending);
 				}
+				Err(err) if pending.restart => {
+					let delay = restarts.next(&format!("topic {}", pending.topic.topic), false);
+					tracing::warn!(topic = pending.topic.topic, %err, ?delay, "restarting the topic bridge failed");
+					pending.due = now + delay;
+					self.topics.push(pending);
+				}
+				Err(err) => return Err(err),
 			}
 		}
 		if !waiting.is_empty() && !self.logged {
@@ -253,4 +361,21 @@ fn spawn_sub_broadcast(
 		"bridging MoQ -> ROS"
 	);
 	Ok(bridge)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn restart_delays_back_off_and_reset() {
+		let mut restarts = Restarts::default();
+		let delays: Vec<u64> = (0..7).map(|_| restarts.next("topic /a", false).as_secs()).collect();
+		assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
+		// Each bridge has its own delay.
+		assert_eq!(restarts.next("topic /b", false), Restarts::MIN);
+		// A bridge that got messages through starts over.
+		assert_eq!(restarts.next("topic /a", true), Restarts::MIN);
+		assert_eq!(restarts.next("topic /a", false), Duration::from_secs(2));
+	}
 }
