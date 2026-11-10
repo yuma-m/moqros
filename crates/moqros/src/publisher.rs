@@ -87,7 +87,7 @@ pub struct ImagePublisher {
 }
 
 impl ImagePublisher {
-	fn new(origin: &moq_net::origin::Producer, name: &str, settings: EncoderSettings) -> Result<Self> {
+	pub(crate) fn new(origin: &moq_net::origin::Producer, name: &str, settings: EncoderSettings) -> Result<Self> {
 		let encoder = Encoder::new(settings)?;
 		let broadcast = BroadcastWriter::create(origin, name)?;
 		let video = broadcast.create_track(VIDEO_TRACK, hang::container::track_info(PRIORITY.video))?;
