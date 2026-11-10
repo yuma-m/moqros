@@ -116,11 +116,18 @@ impl From<EncoderSettings> for ImageBroadcastSettings {
 /// With [smaller renditions](ImageBroadcastSettings::renditions), each image is also scaled down
 /// and encoded once per rendition, into a track of its own (`video_<height>p`). Each rendition
 /// has its own groups and keyframes.
+///
+/// The catalog is also republished whenever what its `moqros` section says changes: the capture
+/// time of timestamp 0 (capture times map onto the timeline as for
+/// [`DataPublisher::publish_at`](crate::DataPublisher::publish_at)) or the
+/// [frame id](ImagePublisher::set_frame_id).
 pub struct ImagePublisher {
 	// Declared before `broadcast`, so the open groups are finished before the broadcast closes.
 	/// The full-size rendition first.
 	tracks: Vec<VideoTrack>,
 	broadcast: BroadcastWriter,
+	/// What the catalog's `moqros` section announces.
+	section: MoqrosSection,
 	clock: StreamClock,
 }
 
@@ -185,6 +192,7 @@ impl ImagePublisher {
 		Ok(Self {
 			tracks,
 			broadcast,
+			section: MoqrosSection::default(),
 			clock: StreamClock::default(),
 		})
 	}
@@ -210,6 +218,18 @@ impl ImagePublisher {
 		}
 	}
 
+	/// Announce `frame_id` (e.g. the ROS `header.frame_id` of the images) in the catalog, so
+	/// subscribers can stamp the images they republish with it. An empty or unprintable one,
+	/// or one over 256 bytes, counts as none.
+	pub fn set_frame_id(&mut self, frame_id: &str) -> Result<()> {
+		let frame_id = catalog::is_frame_id(frame_id).then(|| frame_id.to_string());
+		if frame_id != self.section.frame_id {
+			self.section.frame_id = frame_id;
+			self.publish_catalog()?;
+		}
+		Ok(())
+	}
+
 	/// Encode and send one image, in every rendition. Returns whether a full-size frame was written.
 	///
 	/// Encoding is CPU bound; call this from a blocking-friendly thread when
@@ -217,10 +237,10 @@ impl ImagePublisher {
 	pub fn publish(&mut self, image: &Image) -> Result<bool> {
 		let yuv = I420::from_image(image)?;
 		let pts = self.clock.micros(image.timestamp);
+		let mut stale = self.update_capture_origin();
 		// Every rendition is encoded before the catalog is updated, so a new subscriber's first
 		// catalog lists all of them.
 		let mut frames = Vec::with_capacity(self.tracks.len());
-		let mut stale = false;
 		for index in 0..self.tracks.len() {
 			let frame = match self.tracks[index].height {
 				None => self.tracks[index].encoder.encode_yuv(&yuv, image.timestamp)?,
@@ -253,10 +273,20 @@ impl ImagePublisher {
 	/// inline in keyframes, or an AV1 temporal unit with the sequence header in keyframes).
 	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<()> {
 		let pts = self.clock.micros(frame.timestamp);
-		if self.update_rendition(0, frame) {
+		let stale = self.update_capture_origin();
+		if self.update_rendition(0, frame) || stale {
 			self.publish_catalog()?;
 		}
 		self.write(0, frame, pts)
+	}
+
+	/// Announce the capture time of timestamp 0 from now on, returning whether that changes the
+	/// catalog: it does on the first frame, and when the timeline re-anchors.
+	fn update_capture_origin(&mut self) -> bool {
+		let origin = self.clock.origin_micros();
+		let changed = origin != self.section.capture_origin;
+		self.section.capture_origin = origin;
+		changed
 	}
 
 	/// Announce what the keyframe `frame` of the track at `index` carries from now on, returning
@@ -316,13 +346,16 @@ impl ImagePublisher {
 		Ok(())
 	}
 
-	/// Publish the catalog of the renditions sent so far.
+	/// Publish the catalog of the renditions sent so far, once there is one.
 	fn publish_catalog(&mut self) -> Result<()> {
+		if self.tracks.iter().all(|track| track.rendition.is_none()) {
+			return Ok(());
+		}
 		let catalog = catalog::video(
 			self.tracks
 				.iter()
 				.filter_map(|track| Some((track.name.as_str(), track.rendition.as_ref()?, track.encoder.settings()))),
-			&MoqrosSection::default(),
+			&self.section,
 		)?;
 		self.broadcast.publish_catalog(&catalog)
 	}

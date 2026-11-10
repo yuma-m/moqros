@@ -151,6 +151,7 @@ async fn images(
 	Ok(ImageSubscriber {
 		_broadcast: broadcast,
 		video,
+		catalog,
 		codec,
 		decoder: Arc::new(Mutex::new(Decoder::new(codec)?)),
 	})
@@ -232,6 +233,9 @@ pub enum Subscription {
 pub struct VideoFrame {
 	/// Presentation time relative to the start of the broadcast.
 	pub timestamp: Duration,
+	/// When the frame was captured, in the publisher's clock (e.g. the ROS `header.stamp` of
+	/// the image), if the broadcast's catalog says.
+	pub capture_time: Option<Duration>,
 	/// Whether the frame decodes on its own.
 	pub keyframe: bool,
 	/// Codec payload (VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit).
@@ -243,6 +247,7 @@ pub struct VideoFrame {
 pub struct ImageSubscriber {
 	_broadcast: moq_net::broadcast::Consumer,
 	video: GroupReader,
+	catalog: CatalogWatch,
 	codec: Codec,
 	/// Shared with the blocking task decoding the current frame, which keeps running (and then
 	/// lets go) when [`ImageSubscriber::next_image`] is cancelled, so the decoder stays in step
@@ -254,6 +259,17 @@ impl ImageSubscriber {
 	/// Codec of the subscribed track.
 	pub fn codec(&self) -> Codec {
 		self.codec
+	}
+
+	/// The frame id the publisher announces (e.g. the ROS `header.frame_id` of its images), if any.
+	pub fn frame_id(&self) -> Option<&str> {
+		self.catalog.section().frame_id.as_deref()
+	}
+
+	/// Whether the broadcast announces capture times, so that [`VideoFrame::capture_time`] is set
+	/// and [`ImageSubscriber::next_image`] stamps images with them.
+	pub fn has_capture_times(&self) -> bool {
+		self.catalog.has_capture_times()
 	}
 
 	/// Accept decoded pictures of up to `max_pixels`; see [`Decoder::set_max_pixels`].
@@ -268,12 +284,22 @@ impl ImageSubscriber {
 
 	/// Next encoded frame, or `None` once the broadcast ends.
 	pub async fn next_frame(&mut self) -> Result<Option<VideoFrame>> {
-		let Some(frame) = self.video.next_frame().await? else {
+		let frame = loop {
+			tokio::select! {
+				// A new capture origin comes before the frames stamped against it.
+				biased;
+				() = self.catalog.changed() => {}
+				frame = self.video.next_frame() => break frame?,
+			}
+		};
+		let Some(frame) = frame else {
 			return Ok(None);
 		};
 		let frame = hang::container::Frame::decode(frame.payload)?;
+		let timestamp = Duration::from_micros(u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX));
 		Ok(Some(VideoFrame {
-			timestamp: Duration::from_micros(u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX)),
+			timestamp,
+			capture_time: self.catalog.capture_time(timestamp),
 			keyframe: self.codec.is_keyframe(&frame.payload),
 			data: frame.payload,
 		}))
@@ -281,6 +307,9 @@ impl ImageSubscriber {
 
 	/// Next decoded image (`rgb8` unless [set otherwise](ImageSubscriber::set_output_format)), or
 	/// `None` once the broadcast ends.
+	///
+	/// Its timestamp is the [capture time](VideoFrame::capture_time) when the broadcast announces
+	/// capture times, and otherwise the presentation time relative to the start of the broadcast.
 	///
 	/// Decoding and color conversion run on tokio's blocking pool, so a large picture doesn't
 	/// stall the other tasks of the runtime.
@@ -290,7 +319,8 @@ impl ImageSubscriber {
 	pub async fn next_image(&mut self) -> Result<Option<Image>> {
 		while let Some(frame) = self.next_frame().await? {
 			let decoder = self.decoder.clone();
-			let decoded = tokio::task::spawn_blocking(move || lock(&decoder).decode(&frame.data, frame.timestamp))
+			let timestamp = frame.capture_time.unwrap_or(frame.timestamp);
+			let decoded = tokio::task::spawn_blocking(move || lock(&decoder).decode(&frame.data, timestamp))
 				.await
 				.map_err(|err| Error::Codec(format!("decoder task failed: {err}")))??;
 			if let Some(image) = decoded {
@@ -383,5 +413,40 @@ mod tests {
 		let image = images.next_image().await.unwrap().expect("a decoded image");
 		assert_eq!((image.width, image.height), (64, 48));
 		assert!(ran.load(Ordering::Relaxed), "the other task never ran while decoding");
+	}
+
+	/// Images come back stamped with their capture time and the publisher's frame id, which
+	/// follow the catalog when they change.
+	#[tokio::test]
+	async fn images_carry_capture_time_and_frame_id() {
+		if Codec::available().is_empty() {
+			return;
+		}
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = ImagePublisher::new(&origin, "camera", EncoderSettings::default()).unwrap();
+		publisher.set_frame_id("camera_optical").unwrap();
+		let at = |t: u32, millis: u64| {
+			let mut image = test_pattern(64, 48, t);
+			image.timestamp = Duration::from_millis(millis);
+			image
+		};
+		assert!(publisher.publish(&at(0, 100_000)).unwrap());
+		let mut images = subscribe_images(&origin, "camera").await;
+		assert_eq!(images.frame_id(), Some("camera_optical"));
+		assert!(images.has_capture_times());
+
+		publisher.publish(&at(1, 100_033)).unwrap();
+		// The subscription starts at the keyframe opening the current group.
+		for millis in [100_000, 100_033] {
+			let image = images.next_image().await.unwrap().expect("a decoded image");
+			assert_eq!(image.timestamp, Duration::from_millis(millis));
+		}
+
+		// A restarted capture clock and a new frame id reach the subscriber with the next frame.
+		publisher.set_frame_id("left").unwrap();
+		publisher.publish(&at(2, 5_000)).unwrap();
+		let image = images.next_image().await.unwrap().expect("a decoded image");
+		assert_eq!(image.timestamp, Duration::from_millis(5_000));
+		assert_eq!(images.frame_id(), Some("left"));
 	}
 }

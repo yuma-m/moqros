@@ -7,7 +7,7 @@ use r2r::std_msgs::msg::Header;
 
 use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
-use super::{Bridge, QosProfile, RosImage, Teardown, image_into_ros, now_stamp};
+use super::{Bridge, QosProfile, RosImage, Teardown, image_into_ros, now_stamp, stamp};
 use crate::{
 	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, PixelFormat, Result, Subscriber,
 	Subscription,
@@ -22,8 +22,10 @@ use crate::{
 /// publisher side may restart freely, but fails if it comes back carrying something
 /// else (video instead of data, or another format or message type).
 ///
-/// Images are stamped with the local receive time, since MoQ timestamps are relative
-/// to the start of the broadcast.
+/// Images are stamped with their capture time when the publisher announces capture times
+/// (moqros does for ROS images: their `header.stamp`), and otherwise with the local receive
+/// time; see [`RosTarget::stamp`]. Their `frame_id` is the publisher's unless
+/// [`RosTarget::frame_id`] overrides it.
 ///
 /// To wait for several broadcasts at once, use [`MoqToRos::subscribe`] and then
 /// [`MoqToRos::spawn`]: only the latter needs the node.
@@ -43,8 +45,11 @@ pub struct RosTarget {
 	pub topic: String,
 	/// QoS of the ROS publisher.
 	pub qos: QosProfile,
-	/// `header.frame_id` of republished images.
-	pub frame_id: String,
+	/// `header.frame_id` of republished images, overriding the one the publisher announces
+	/// (empty if neither says).
+	pub frame_id: Option<String>,
+	/// Where the `header.stamp` of republished images comes from.
+	pub stamp: StampSource,
 	/// ROS message type of a data track, overriding the one its catalog announces.
 	pub ros_type: Option<String>,
 	/// Pixel encoding of republished images (`rgb8` by default); see
@@ -52,13 +57,32 @@ pub struct RosTarget {
 	pub encoding: PixelFormat,
 }
 
+/// Where the `header.stamp` of a republished image comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StampSource {
+	/// The image's capture time from the publisher, in its clock (which may be sim time), or
+	/// the receive time if the publisher doesn't announce capture times.
+	#[default]
+	Source,
+	/// The local wall-clock time the image was received.
+	Receive,
+}
+
+crate::names::named_enum!(StampSource, "stamp source", {
+	Source => "source",
+	Receive => "receive",
+});
+
 impl RosTarget {
-	/// Publish on `topic`, with an empty `frame_id` and the catalog's message type.
+	/// Publish on `topic`, with the publisher's `frame_id`, capture times, and the catalog's
+	/// message type.
 	pub fn new(topic: impl Into<String>, qos: QosProfile) -> Self {
 		Self {
 			topic: topic.into(),
 			qos,
-			frame_id: String::new(),
+			frame_id: None,
+			stamp: StampSource::default(),
 			ros_type: None,
 			encoding: PixelFormat::Rgb8,
 		}
@@ -72,7 +96,13 @@ impl RosTarget {
 
 	/// Set [`RosTarget::frame_id`].
 	pub fn with_frame_id(mut self, frame_id: impl Into<String>) -> Self {
-		self.frame_id = frame_id.into();
+		self.frame_id = Some(frame_id.into());
+		self
+	}
+
+	/// Set [`RosTarget::stamp`].
+	pub fn with_stamp(mut self, stamp: StampSource) -> Self {
+		self.stamp = stamp;
 		self
 	}
 
@@ -128,6 +158,7 @@ impl MoqToRos {
 			topic,
 			qos,
 			frame_id,
+			stamp,
 			ros_type,
 			encoding,
 		} = target;
@@ -139,6 +170,7 @@ impl MoqToRos {
 				RosOutput::Images {
 					publisher: node.create_publisher::<RosImage>(&topic, qos)?,
 					frame_id,
+					stamp,
 					encoding,
 				}
 			}
@@ -198,7 +230,9 @@ async fn subscribe(subscriber: &Subscriber, broadcast: &str, options: &ImageOpti
 enum RosOutput {
 	Images {
 		publisher: r2r::Publisher<RosImage>,
-		frame_id: String,
+		/// Overrides the publisher's.
+		frame_id: Option<String>,
+		stamp: StampSource,
 		encoding: PixelFormat,
 	},
 	Data {
@@ -240,9 +274,10 @@ async fn republish(
 				RosOutput::Images {
 					publisher,
 					frame_id,
+					stamp,
 					encoding,
 				},
-			) => republish_images(images, publisher, frame_id, *encoding, &stats).await?,
+			) => republish_images(images, publisher, frame_id.as_deref(), *stamp, *encoding, &stats).await?,
 			(Subscription::Data(data), RosOutput::Data { publisher, catalog }) => {
 				if let Some((from, to)) = data_changed(catalog, data.settings()) {
 					return Err(Error::BroadcastChanged { broadcast, from, to });
@@ -287,7 +322,8 @@ fn data_changed(first: &DataSettings, now: &DataSettings) -> Option<(String, Str
 async fn republish_images(
 	mut images: ImageSubscriber,
 	publisher: &mut r2r::Publisher<RosImage>,
-	frame_id: &str,
+	frame_id: Option<&str>,
+	stamp_source: StampSource,
 	encoding: PixelFormat,
 	stats: &StatsSender,
 ) -> Result<Option<Error>> {
@@ -297,9 +333,10 @@ async fn republish_images(
 		match images.next_image().await {
 			Ok(Some(image)) => {
 				stats.received();
+				let source = stamp_source == StampSource::Source && images.has_capture_times();
 				let header = Header {
-					stamp: now_stamp(),
-					frame_id: frame_id.to_string(),
+					stamp: if source { stamp(image.timestamp) } else { now_stamp() },
+					frame_id: frame_id.or(images.frame_id()).unwrap_or_default().to_string(),
 				};
 				publisher.publish(&image_into_ros(image, header))?;
 				stats.sent();

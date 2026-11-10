@@ -63,7 +63,12 @@ VP8 is always available.
   `moqros-sub` always jumps to the newest group.
 - **Reconnects:** the relay connection redials automatically, and `moqros-sub` resubscribes when a broadcast
   comes back. It also resubscribes when the relay retracts a broadcast or routes it to another publisher of the
-  same name, since the relay doesn't end subscriptions then. It stamps republished images with the local receive time.
+  same name, since the relay doesn't end subscriptions then.
+- **Stamps and frames:** `moqros-pub` announces each image topic's `header.stamp` (as the capture time of the
+  video timeline) and `header.frame_id` in the broadcast's catalog, and `moqros-sub` republishes the images with
+  them. The stamps stay in the publisher's clock, sim time included. `--stamp receive` (or `stamp=receive`)
+  stamps them with the local receive time instead, as does a publisher that announces no capture times;
+  `--frame-id` (or `frame_id=`) overrides the frame.
 - **Shutdown:** on SIGINT or SIGTERM (`docker stop`, systemd), both bridges close the relay session before
   exiting, so the relay ends their broadcasts right away and a restarted `moqros-pub` can announce them again.
 - **Logging:** both bridges log their message rate every 10 s (`message rate`).
@@ -155,7 +160,7 @@ moqros-sub --broadcast camera/image_raw,topic=/remote/image --broadcast imu --br
 | Bridge | Options | Defaults |
 | --- | --- | --- |
 | `moqros-pub --topic TOPIC,…` | `format`, `type`, `mode`, `broadcast` | `--format` and `--mode` for every topic. The broadcast name is the topic without its leading slash. |
-| `moqros-sub --broadcast NAME,…` | `topic`, `type`, `frame_id` | `--frame-id` for every broadcast. The topic is `/moqros/<broadcast>` (`/moqros/image` for a lone broadcast). |
+| `moqros-sub --broadcast NAME,…` | `topic`, `type`, `frame_id`, `stamp` | `--frame-id` and `--stamp` for every broadcast. The topic is `/moqros/<broadcast>` (`/moqros/image` for a lone broadcast). |
 
 `moqros-bridge` does both in one node and over one relay connection, e.g. for a robot that streams its camera
 and takes velocity commands.

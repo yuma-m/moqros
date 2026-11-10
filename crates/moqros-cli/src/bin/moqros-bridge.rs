@@ -4,6 +4,7 @@
 
 use anyhow::ensure;
 use clap::Parser;
+use moqros::ros::StampSource;
 use moqros_cli::{
 	Bridges, BroadcastSpec, DiagnosticsArgs, EncoderArgs, Format, QosArgs, Relay, RelayArgs, TopicSpec, init_logging,
 };
@@ -17,7 +18,7 @@ struct Cli {
 	topic: Vec<TopicSpec>,
 
 	/// Broadcast to republish on ROS (MoQ -> ROS); repeat for several. Options as in
-	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam,max_height=480,encoding=bgr8`.
+	/// `moqros-sub`: `robot/cmd_vel,topic=/cmd_vel,type=geometry_msgs/msg/Twist,frame_id=cam,stamp=receive,max_height=480,encoding=bgr8`.
 	/// The topic defaults to `/moqros/<broadcast>`, or `/moqros/image` for a lone broadcast.
 	#[arg(long)]
 	broadcast: Vec<BroadcastSpec>,
@@ -32,9 +33,14 @@ struct Cli {
 	#[arg(long, default_value_t = moqros::DataMode::default())]
 	mode: moqros::DataMode,
 
-	/// `header.frame_id` of the republished images.
-	#[arg(long, default_value = "camera")]
-	frame_id: String,
+	/// `header.frame_id` of the republished images; defaults to the one the publisher announces.
+	#[arg(long)]
+	frame_id: Option<String>,
+
+	/// `header.stamp` of the republished images: `source` uses the capture time the publisher
+	/// announces (falling back to the receive time), `receive` the local receive time.
+	#[arg(long, default_value_t = StampSource::default())]
+	stamp: StampSource,
 
 	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
 	/// the largest.
@@ -72,7 +78,15 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let broadcasts = match cli.broadcast.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id, cli.max_height, cli.encoding)?,
+		false => moqros_cli::sub_broadcasts(
+			cli.broadcast,
+			None,
+			None,
+			cli.frame_id.as_deref(),
+			cli.stamp,
+			cli.max_height,
+			cli.encoding,
+		)?,
 	};
 	moqros_cli::check_no_loop(&topics, &broadcasts, None)?;
 
