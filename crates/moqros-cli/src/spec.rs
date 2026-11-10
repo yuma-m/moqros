@@ -226,11 +226,107 @@ pub fn sub_broadcasts(
 		.collect()
 }
 
+/// Broadcasts `moqros-sub` finds by prefix, and republishes on topics named after them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovery {
+	/// Broadcast name prefixes, without leading or trailing slashes; whole path segments match.
+	pub prefixes: Vec<String>,
+	/// The topic of a found broadcast, with `{name}` standing for the broadcast name.
+	pub topic_template: String,
+	pub frame_id: String,
+	pub max_height: Option<u32>,
+}
+
+/// Default of [`Discovery::topic_template`].
+pub const DEFAULT_TOPIC_TEMPLATE: &str = "/moqros/{name}";
+
+impl Discovery {
+	/// Check the template on the way in.
+	pub fn new(
+		prefixes: Vec<String>,
+		topic_template: String,
+		frame_id: String,
+		max_height: Option<u32>,
+	) -> anyhow::Result<Self> {
+		ensure!(
+			topic_template.contains("{name}"),
+			"--topic-template {topic_template:?} has no {{name}}"
+		);
+		let discovery = Self {
+			prefixes: prefixes.iter().map(|p| p.trim_matches('/').to_string()).collect(),
+			topic_template,
+			frame_id,
+			max_height,
+		};
+		if let Err(err) = discovery.broadcast("name") {
+			bail!("--topic-template {:?}: {err}", discovery.topic_template);
+		}
+		Ok(discovery)
+	}
+
+	/// Whether the broadcast `name` is under one of the prefixes.
+	pub fn covers(&self, name: &str) -> bool {
+		self.prefixes.iter().any(|prefix| is_under(name, prefix))
+	}
+
+	/// What to do with the found broadcast `name`, or why it can't be republished. Names come
+	/// from whoever announces the broadcast, so the topic they make must be a plain ROS name.
+	pub fn broadcast(&self, name: &str) -> Result<SubBroadcast, String> {
+		let topic = self.topic_template.replace("{name}", name.trim_matches('/'));
+		if !is_ros_topic(&topic) {
+			return Err(format!(
+				"{topic:?} isn't a topic name moqros republishes on (letters, digits, `_` and `/` only)"
+			));
+		}
+		Ok(SubBroadcast {
+			broadcast: name.to_string(),
+			topic,
+			ros_type: None,
+			frame_id: self.frame_id.clone(),
+			max_height: self.max_height,
+		})
+	}
+}
+
+/// Whether the broadcast `name` is under `prefix` (without slashes at its ends), by whole path
+/// segments. An empty prefix covers everything.
+fn is_under(name: &str, prefix: &str) -> bool {
+	let name = name.trim_matches('/');
+	prefix.is_empty() || name == prefix || name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether `topic` is an absolute ROS topic name of plain tokens: each a letter or `_` followed
+/// by letters, digits or `_`, without `__`.
+fn is_ros_topic(topic: &str) -> bool {
+	let Some(tokens) = topic.strip_prefix('/') else {
+		return false;
+	};
+	let is_token = |token: &str| {
+		let mut chars = token.chars();
+		chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+			&& chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+			&& !token.contains("__")
+	};
+	!tokens.is_empty() && tokens.split('/').all(is_token)
+}
+
 /// Refuse a bridge that would feed its own output back in: a broadcast or a ROS topic that
 /// both directions use. Every message would go round the loop forever.
-pub fn check_no_loop(topics: &[PubTopic], broadcasts: &[SubBroadcast]) -> anyhow::Result<()> {
+pub fn check_no_loop(
+	topics: &[PubTopic],
+	broadcasts: &[SubBroadcast],
+	discovery: Option<&Discovery>,
+) -> anyhow::Result<()> {
 	let name = |name: &str| name.trim_matches('/').to_string();
 	for topic in topics {
+		if let Some(discovery) = discovery {
+			ensure!(
+				!discovery.covers(&topic.broadcast),
+				"the broadcast {:?} is published (from {}) and under a --broadcast-prefix; that would loop",
+				topic.broadcast,
+				topic.topic
+			);
+		}
 		for broadcast in broadcasts {
 			ensure!(
 				name(&topic.broadcast) != name(&broadcast.broadcast),
@@ -392,12 +488,12 @@ mod tests {
 		};
 
 		let odom = topics(&["/odom,broadcast=robot/odom"]);
-		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/cmd_vel"])).is_ok());
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/cmd_vel"]), None).is_ok());
 		// The same broadcast both ways, however it's spelled.
-		assert!(check_no_loop(&odom, &broadcasts(&["/robot/odom/,topic=/other"])).is_err());
+		assert!(check_no_loop(&odom, &broadcasts(&["/robot/odom/,topic=/other"]), None).is_err());
 		// The same topic both ways.
-		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/odom"])).is_err());
-		assert!(check_no_loop(&odom, &[]).is_ok());
+		assert!(check_no_loop(&odom, &broadcasts(&["robot/cmd_vel,topic=/odom"]), None).is_err());
+		assert!(check_no_loop(&odom, &[], None).is_ok());
 	}
 
 	#[test]
@@ -440,5 +536,57 @@ mod tests {
 		assert!(sub_broadcasts(specs(&["a", "b"]), Some("/x".into()), None, "camera", None).is_err());
 		assert!(sub_broadcasts(specs(&["a", "b"]), None, Some("t/msg/T".into()), "camera", None).is_err());
 		assert!(sub_broadcasts(specs(&["a,topic=/x", "b,topic=/x"]), None, None, "camera", None).is_err());
+	}
+
+	#[test]
+	fn discovers_broadcasts_under_prefixes() {
+		let discovery = Discovery::new(
+			vec!["robots/".into(), "/drones".into()],
+			DEFAULT_TOPIC_TEMPLATE.into(),
+			"camera".into(),
+			Some(480),
+		)
+		.unwrap();
+		assert!(discovery.covers("robots/r1/camera"));
+		assert!(discovery.covers("drones"));
+		assert!(!discovery.covers("robots2/camera"));
+		assert!(!discovery.covers("cars/robots"));
+
+		let found = discovery.broadcast("robots/r1/camera").unwrap();
+		assert_eq!(found.topic, "/moqros/robots/r1/camera");
+		assert_eq!(found.max_height, Some(480));
+		// Names from the network that don't make plain topic names are refused.
+		for bad in [
+			"robots/r-1/camera",
+			"robots/1/camera",
+			"robots//camera",
+			"robots/a b",
+			"robots/__x",
+			"robots/{x}",
+		] {
+			assert!(discovery.broadcast(bad).is_err(), "{bad}");
+		}
+
+		assert!(Discovery::new(vec![], "/remote".into(), String::new(), None).is_err());
+		assert!(Discovery::new(vec![], "remote/{name}".into(), String::new(), None).is_err());
+		let custom = Discovery::new(vec![], "/remote/{name}/image".into(), String::new(), None).unwrap();
+		assert_eq!(custom.broadcast("r1").unwrap().topic, "/remote/r1/image");
+	}
+
+	#[test]
+	fn refuses_to_discover_its_own_broadcasts() {
+		let topics = pub_topics(
+			vec!["/robots/me/camera".parse().unwrap()],
+			Format::Video,
+			moqros::DataMode::Snapshot,
+			None,
+			None,
+		)
+		.unwrap();
+		let discovery = |prefix: &str| {
+			Discovery::new(vec![prefix.into()], DEFAULT_TOPIC_TEMPLATE.into(), String::new(), None).unwrap()
+		};
+		assert!(check_no_loop(&topics, &[], Some(&discovery("robots"))).is_err());
+		assert!(check_no_loop(&topics, &[], Some(&discovery("drones"))).is_ok());
 	}
 }

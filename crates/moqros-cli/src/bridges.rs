@@ -1,6 +1,6 @@
 //! Running the bridges of one node over one relay connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail, ensure};
@@ -12,7 +12,7 @@ use tokio::task::JoinError;
 use crate::args::Format;
 use crate::diagnostics::Diagnostics;
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
-use crate::spec::{PubTopic, SubBroadcast};
+use crate::spec::{Discovery, PubTopic, SubBroadcast};
 
 /// What a bridge node does: ROS topics to publish to the relay, and broadcasts to republish
 /// on ROS.
@@ -24,6 +24,8 @@ pub struct Bridges {
 	pub qos: QosProfile,
 	/// How often to publish the bridges' statistics on `/diagnostics`, if at all.
 	pub diagnostics_period: Option<Duration>,
+	/// Broadcasts to find by prefix and republish too.
+	pub discovery: Option<Discovery>,
 }
 
 /// The relay connection of a bridge node: a publisher for its topics, a subscriber for its
@@ -69,7 +71,8 @@ impl Relay {
 ///
 /// Video topics start at once. A data topic without a type starts when it appears in the ROS
 /// graph. Broadcasts are waited for all at once, each starting when it's announced; one whose
-/// topic can't be created (e.g. a message type without bindings) is skipped.
+/// topic can't be created (e.g. a message type without bindings) is skipped. With `discovery`,
+/// every broadcast announced under its prefixes is republished too, once.
 ///
 /// A bridge that stops or fails is restarted on its own, after a delay that grows while it
 /// keeps failing (up to 30 seconds), so one broken topic or broadcast doesn't take the others
@@ -81,15 +84,31 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 		mut video,
 		qos,
 		diagnostics_period,
+		discovery,
 	} = bridges;
 	ensure!(
 		topics.is_empty() || relay.publisher.is_some(),
 		"topics to publish need a publisher"
 	);
 	ensure!(
-		broadcasts.is_empty() || relay.subscriber.is_some(),
+		(broadcasts.is_empty() && discovery.is_none()) || relay.subscriber.is_some(),
 		"broadcasts to republish need a subscriber"
 	);
+	// Broadcasts and topics taken, so a found broadcast doesn't take one again.
+	let mut known_broadcasts: HashSet<String> = broadcasts
+		.iter()
+		.map(|b| b.broadcast.trim_matches('/').to_string())
+		.collect();
+	let mut used_topics: HashSet<String> = broadcasts
+		.iter()
+		.map(|b| b.topic.clone())
+		.chain(topics.iter().map(|t| t.topic.clone()))
+		.collect();
+	let mut announcements = relay
+		.subscriber
+		.as_ref()
+		.filter(|_| discovery.is_some())
+		.map(|subscriber| subscriber.announced(""));
 
 	let node = SharedNode::new(node);
 	// Only the ROS -> MoQ side subscribes to anything; a node that only publishes has
@@ -160,10 +179,26 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 					// broadcasts and topics can still go on.
 					Err(err) => {
 						tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
-						if subscribing.is_empty() && sub_bridges.is_empty() && pub_bridges.is_empty() && pending.is_empty() {
+						if discovery.is_none() && subscribing.is_empty() && sub_bridges.is_empty() && pub_bridges.is_empty() && pending.is_empty() {
 							bail!("nothing left to bridge: no broadcast could be republished");
 						}
 					}
+				}
+			}
+			Some(name) = next_announcement(&mut announcements) => {
+				let Some(discovery) = &discovery else { continue };
+				if !discovery.covers(&name) || !known_broadcasts.insert(name.trim_matches('/').to_string()) {
+					continue;
+				}
+				match discovery.broadcast(&name) {
+					Ok(broadcast) if used_topics.insert(broadcast.topic.clone()) => {
+						tracing::info!(broadcast = name, topic = broadcast.topic, "found a broadcast");
+						if let Some(subscriber) = relay.subscriber.clone() {
+							subscribing.push(subscribe_after(subscriber, broadcast, Duration::ZERO));
+						}
+					}
+					Ok(broadcast) => tracing::warn!(broadcast = name, topic = broadcast.topic, "skipping a found broadcast: its topic is taken"),
+					Err(err) => tracing::warn!(broadcast = name, %err, "skipping a found broadcast"),
 				}
 			}
 			Some((name, value)) = next_parameter(&mut parameters) => {
@@ -232,6 +267,14 @@ fn watch_parameters(node: &mut r2r::Node) -> anyhow::Result<ParameterChanges> {
 		.context("failed to serve ROS parameters")?;
 	tokio::spawn(serve);
 	Ok(Box::pin(changes))
+}
+
+/// The next broadcast announced. Never resolves without discovery.
+async fn next_announcement(announcements: &mut Option<moqros::Announcements>) -> Option<String> {
+	match announcements {
+		Some(announcements) => announcements.next().await,
+		None => std::future::pending().await,
+	}
 }
 
 /// The next parameter change. Never resolves without parameter services.

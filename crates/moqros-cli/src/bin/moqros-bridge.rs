@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
 		true => Vec::new(),
 		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.frame_id, cli.max_height)?,
 	};
-	moqros_cli::check_no_loop(&topics, &broadcasts)?;
+	moqros_cli::check_no_loop(&topics, &broadcasts, None)?;
 
 	cli.relay.warn_if_insecure();
 	// One session carries both directions.
@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
 		video: cli.encoder.broadcast_settings(),
 		qos: cli.qos.profile(),
 		diagnostics_period: cli.diagnostics.period(),
+		discovery: None,
 	};
 	moqros_cli::run_bridges(node, Relay::both(publisher, subscriber), bridges).await
 }
