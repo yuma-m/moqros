@@ -1,11 +1,15 @@
 //! MoQ plumbing shared by the image and data broadcasts: announcing a broadcast with its catalog,
 //! writing groups within moq-net's limits, and reading a track group after group.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use hang::catalog::Catalog;
 use hang::moq_net;
+use serde::Serialize;
 
 use crate::Result;
+use crate::catalog::{MoqrosCatalog, MoqrosSection};
 
 /// One announced broadcast and its catalog track. Closes the broadcast when dropped.
 pub(crate) struct BroadcastWriter {
@@ -37,7 +41,7 @@ impl BroadcastWriter {
 	}
 
 	/// Replace the catalog subscribers see.
-	pub(crate) fn publish_catalog(&mut self, catalog: &Catalog) -> Result<()> {
+	pub(crate) fn publish_catalog<E: Serialize>(&mut self, catalog: &Catalog<E>) -> Result<()> {
 		let mut group = self.catalog.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
 		group.finish()?;
@@ -158,6 +162,57 @@ impl GroupBudget {
 
 	fn nearly_full(&self) -> bool {
 		self.frames >= moq_net::group::MAX_GROUP_FRAMES / 4 * 3 || self.bytes >= moq_net::group::MAX_CACHE_BYTES / 4 * 3
+	}
+}
+
+/// The catalog of a subscribed broadcast, following its updates.
+pub(crate) struct CatalogWatch {
+	/// `None` once the catalog track ended or failed: the last catalog stays.
+	updates: Option<Box<hang::catalog::Consumer<serde_json::Map<String, serde_json::Value>>>>,
+	catalog: Box<MoqrosCatalog>,
+	section: MoqrosSection,
+}
+
+impl CatalogWatch {
+	/// Follow `updates`, whose first catalog was `first`.
+	pub(crate) fn new(
+		updates: hang::catalog::Consumer<serde_json::Map<String, serde_json::Value>>,
+		first: MoqrosCatalog,
+	) -> Self {
+		Self {
+			updates: Some(Box::new(updates)),
+			section: MoqrosSection::read(&first),
+			catalog: Box::new(first),
+		}
+	}
+
+	/// The current catalog.
+	pub(crate) fn catalog(&self) -> &MoqrosCatalog {
+		&self.catalog
+	}
+
+	/// The capture time of a frame with media timestamp `pts`, by the current catalog.
+	pub(crate) fn capture_time(&self, pts: Duration) -> Option<Duration> {
+		self.section.capture_time(&self.catalog, pts)
+	}
+
+	/// Resolves once the next catalog has replaced the current one. Never resolves after the
+	/// catalog track ended; the media tracks end with it anyway.
+	pub(crate) async fn changed(&mut self) {
+		let Some(updates) = self.updates.as_mut() else {
+			return std::future::pending().await;
+		};
+		match updates.next().await {
+			Ok(Some(catalog)) => {
+				self.section = MoqrosSection::read(&catalog);
+				*self.catalog = catalog;
+			}
+			Ok(None) => self.updates = None,
+			Err(err) => {
+				tracing::debug!(%err, "catalog update failed, keeping the last catalog");
+				self.updates = None;
+			}
+		}
 	}
 }
 

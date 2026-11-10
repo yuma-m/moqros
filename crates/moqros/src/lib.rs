@@ -88,6 +88,11 @@
 //!   ([`DataFormat::Json`]) or its `binary` section ([`DataFormat::Cdr`], MIME type
 //!   [`CDR_MIME`]), with the [`DataMode`] and the ROS message type (`rosType`). Each MoQ frame
 //!   is one message payload, without a container.
+//! - **Capture times:** a root `moqros` section of the catalog can carry `captureOrigin`, the
+//!   capture time in µs that frame timestamp 0 maps to, in the publisher's clock (e.g. ROS time,
+//!   which may be sim time). It is republished whenever the timeline re-anchors. When the
+//!   capture times are wall-clock times since 2020, hang's `clock` carries the same origin.
+//!   Data broadcasts published with [`DataPublisher::publish_at`] use it.
 
 // On docs.rs, label feature-gated items with the feature they need.
 #![cfg_attr(docsrs, feature(doc_cfg))]

@@ -40,6 +40,25 @@ impl StreamClock {
 	}
 }
 
+impl StreamClock {
+	/// The capture time, in µs, that stream time 0 maps to, so that a stream time `pts` was
+	/// captured at `origin + pts`. Negative when the capture clock restarted below the stream
+	/// time it had reached. `None` before the first timestamp. Changes when the timeline
+	/// re-anchors after a backwards jump.
+	pub(crate) fn origin_micros(&self) -> Option<i64> {
+		let (capture, base) = self.anchor?;
+		let capture = i64::try_from(capture.as_micros()).unwrap_or(i64::MAX);
+		Some(capture.saturating_sub(i64::try_from(base).unwrap_or(i64::MAX)))
+	}
+}
+
+/// The capture time of stream time `pts` on a timeline whose [origin](StreamClock::origin_micros)
+/// is `origin`, or `None` if it would be before the capture clock's zero.
+pub(crate) fn capture_time(origin: i64, pts: Duration) -> Option<Duration> {
+	let micros = i128::from(origin) + i128::try_from(pts.as_micros()).ok()?;
+	u64::try_from(micros).ok().map(Duration::from_micros)
+}
+
 /// `duration` in microseconds, saturating at `u64::MAX`.
 fn saturating_micros(duration: Duration) -> u64 {
 	u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
@@ -77,5 +96,25 @@ mod tests {
 		// Time keeps its pace from the jump instead of collapsing onto `last + 1`.
 		assert_eq!(clock.micros(Duration::from_secs(6)), 1_000_001);
 		assert_eq!(clock.micros(Duration::from_secs(11)), 6_000_001);
+	}
+
+	#[test]
+	fn origin_follows_the_anchor() {
+		let mut clock = StreamClock::default();
+		assert_eq!(clock.origin_micros(), None);
+		clock.micros(Duration::from_secs(10));
+		assert_eq!(clock.origin_micros(), Some(10_000_000));
+		clock.micros(Duration::from_millis(10_033));
+		assert_eq!(clock.origin_micros(), Some(10_000_000));
+		// A restarted capture clock moves the origin, below zero here.
+		let pts = clock.micros(Duration::from_millis(10));
+		assert_eq!(pts, 33_001);
+		assert_eq!(clock.origin_micros(), Some(10_000 - 33_001));
+		let origin = clock.origin_micros().unwrap();
+		assert_eq!(
+			capture_time(origin, Duration::from_micros(pts)),
+			Some(Duration::from_millis(10))
+		);
+		assert_eq!(capture_time(origin, Duration::ZERO), None);
 	}
 }

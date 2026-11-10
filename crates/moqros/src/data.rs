@@ -4,6 +4,10 @@
 //! ([`DataFormat::Json`]) or its `binary` section ([`DataFormat::Cdr`]). Each MoQ frame is one
 //! message payload, as is; the catalog entry also names the ROS message type (`rosType`) so a
 //! subscriber can republish it without being told.
+//!
+//! Messages published with [`DataPublisher::publish_at`] carry their capture time: the frame
+//! timestamps are relative to the capture time in the catalog's `moqros.captureOrigin`, as for
+//! video, and [`DataMessage::capture_time`] puts them back together.
 
 use std::time::Duration;
 
@@ -11,9 +15,10 @@ use bytes::Bytes;
 use hang::catalog::PRIORITY;
 use hang::moq_net;
 
-use crate::Result;
-use crate::catalog::{self, DATA_TRACK};
-use crate::track::{BroadcastWriter, GroupReader, GroupWriter};
+use crate::catalog::{self, DATA_TRACK, MoqrosSection};
+use crate::clock::StreamClock;
+use crate::track::{BroadcastWriter, CatalogWatch, GroupReader, GroupWriter};
+use crate::{Error, Result};
 
 /// How each message is serialized on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +79,10 @@ impl DataSettings {
 /// Writes messages into one MoQ data broadcast.
 pub struct DataPublisher {
 	settings: DataSettings,
+	/// The timeline of [`DataPublisher::publish_at`].
+	clock: StreamClock,
+	/// What the catalog announces in its `moqros` section.
+	section: MoqrosSection,
 	// Declared before `broadcast`, so the open group is finished before the broadcast closes.
 	track: GroupWriter,
 	broadcast: BroadcastWriter,
@@ -81,7 +90,8 @@ pub struct DataPublisher {
 
 impl DataPublisher {
 	pub(crate) fn new(origin: &moq_net::origin::Producer, name: &str, settings: DataSettings) -> Result<Self> {
-		let catalog = catalog::data(&settings)?;
+		let section = MoqrosSection::default();
+		let catalog = catalog::data(&settings, &section)?;
 		let mut broadcast = BroadcastWriter::create(origin, name)?;
 		let track = broadcast.create_track(DATA_TRACK, moq_net::track::Info::default().with_priority(PRIORITY.text))?;
 		broadcast.publish_catalog(&catalog)?;
@@ -95,6 +105,8 @@ impl DataPublisher {
 
 		Ok(Self {
 			settings,
+			clock: StreamClock::default(),
+			section,
 			track: GroupWriter::new(track),
 			broadcast,
 		})
@@ -110,10 +122,33 @@ impl DataPublisher {
 		&self.settings
 	}
 
-	/// Send one message payload, serialized as [`DataSettings::format`] says.
+	/// Send one message payload, serialized as [`DataSettings::format`] says, stamped with the
+	/// time it was sent.
 	pub fn publish(&mut self, payload: impl Into<Bytes>) -> Result<()> {
-		let payload = payload.into();
-		let timestamp = moq_net::Timestamp::now();
+		self.write(moq_net::Timestamp::now(), payload.into())
+	}
+
+	/// Send one message payload captured at `capture` (e.g. its ROS `header.stamp`, as a time
+	/// since the epoch of whatever clock stamped it), so subscribers get it back as
+	/// [`DataMessage::capture_time`].
+	///
+	/// Capture times map onto the broadcast's timeline as video timestamps do: they must
+	/// increase, a repeated or slightly earlier one is nudged forward, and a capture clock that
+	/// jumps back by over a second (e.g. a looping rosbag) re-anchors the timeline, which
+	/// republishes the catalog. Use either this or [`DataPublisher::publish`] on one broadcast.
+	pub fn publish_at(&mut self, capture: Duration, payload: impl Into<Bytes>) -> Result<()> {
+		let pts = self.clock.micros(capture);
+		let origin = self.clock.origin_micros();
+		if origin != self.section.capture_origin {
+			self.section.capture_origin = origin;
+			self.broadcast
+				.publish_catalog(&catalog::data(&self.settings, &self.section)?)?;
+		}
+		let timestamp = moq_net::Timestamp::from_micros(pts).map_err(|_| Error::Timestamp)?;
+		self.write(timestamp, payload.into())
+	}
+
+	fn write(&mut self, timestamp: moq_net::Timestamp, payload: Bytes) -> Result<()> {
 		match self.settings.mode {
 			DataMode::Snapshot => {
 				self.track.write_frame(timestamp, payload)?;
@@ -133,8 +168,13 @@ impl DataPublisher {
 /// One message received from a data broadcast.
 #[derive(Debug, Clone)]
 pub struct DataMessage {
-	/// Send time on the publisher's monotonic clock; only differences are meaningful.
+	/// Frame timestamp: relative to the start of the broadcast for messages published with
+	/// [`DataPublisher::publish_at`], otherwise the send time on the publisher's monotonic clock.
+	/// Only differences are meaningful.
 	pub timestamp: Duration,
+	/// When the message was captured, from [`DataPublisher::publish_at`] (in the publisher's
+	/// clock), or `None` if the publisher didn't say.
+	pub capture_time: Option<Duration>,
 	/// The serialized message, in the track's [`DataFormat`].
 	pub payload: Bytes,
 }
@@ -147,14 +187,21 @@ pub struct DataSubscriber {
 	_broadcast: moq_net::broadcast::Consumer,
 	reader: GroupReader,
 	settings: DataSettings,
+	catalog: CatalogWatch,
 }
 
 impl DataSubscriber {
-	pub(crate) fn new(broadcast: moq_net::broadcast::Consumer, reader: GroupReader, settings: DataSettings) -> Self {
+	pub(crate) fn new(
+		broadcast: moq_net::broadcast::Consumer,
+		reader: GroupReader,
+		settings: DataSettings,
+		catalog: CatalogWatch,
+	) -> Self {
 		Self {
 			_broadcast: broadcast,
 			reader,
 			settings,
+			catalog,
 		}
 	}
 
@@ -165,17 +212,28 @@ impl DataSubscriber {
 
 	/// Next message, or `None` once the broadcast ends.
 	pub async fn next_message(&mut self) -> Result<Option<DataMessage>> {
-		Ok(self.reader.next_frame().await?.map(|frame| DataMessage {
-			timestamp: frame.timestamp.into(),
-			payload: frame.payload,
-		}))
+		loop {
+			let frame = tokio::select! {
+				// A new capture origin comes before the messages stamped against it.
+				biased;
+				() = self.catalog.changed() => continue,
+				frame = self.reader.next_frame() => frame?,
+			};
+			return Ok(frame.map(|frame| {
+				let timestamp = frame.timestamp.into();
+				DataMessage {
+					timestamp,
+					capture_time: self.catalog.capture_time(timestamp),
+					payload: frame.payload,
+				}
+			}));
+		}
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Error;
 
 	#[test]
 	fn names_round_trip() {
