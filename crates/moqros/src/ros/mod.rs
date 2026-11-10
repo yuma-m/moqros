@@ -53,7 +53,7 @@ mod graph;
 mod meter;
 mod to_moq;
 
-pub use bridge::{Bridge, BridgeStats, Teardown};
+pub use bridge::{BitrateControl, Bridge, BridgeStats, Teardown};
 pub use convert::{image_from_ros, image_to_ros, now_stamp};
 pub use from_moq::{MoqToRos, RosTarget, spawn_moq_to_ros};
 pub use graph::{topic_type, wait_for_topic_type};

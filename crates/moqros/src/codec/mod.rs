@@ -228,6 +228,13 @@ pub(crate) struct EncodedChunk {
 pub(crate) trait EncoderBackend: Send {
 	/// Encode one frame at `pts` microseconds. Returns `None` if the encoder dropped it.
 	fn encode(&mut self, frame: &I420, pts: u64, force_keyframe: bool) -> Result<Option<EncodedChunk>>;
+
+	/// Aim for `bitrate` bit/s from the next frame on. Returns `false` if the backend can't change
+	/// it while running, so it has to be recreated.
+	fn set_bitrate(&mut self, bitrate: u32) -> Result<bool> {
+		let _ = bitrate;
+		Ok(false)
+	}
 }
 
 /// A codec implementation behind [`Decoder`].
@@ -320,6 +327,31 @@ impl Encoder {
 	/// `None` while encoding in software.
 	pub fn hardware_encoder(&self) -> Option<&'static str> {
 		self.hardware
+	}
+
+	/// Aim for `bitrate` bit/s from the next frame on.
+	///
+	/// VP8 and AV1 software encoders adjust in place. Other encoders (H.264, hardware) are
+	/// recreated, so the next frame is a keyframe.
+	pub fn set_bitrate(&mut self, bitrate: u32) {
+		if bitrate == self.settings.bitrate {
+			return;
+		}
+		self.settings.bitrate = bitrate;
+		let Some(active) = self.active.as_mut() else {
+			return;
+		};
+		match active.backend.set_bitrate(bitrate) {
+			Ok(true) => tracing::debug!(codec = %self.settings.codec, bitrate, "changed the bitrate"),
+			Ok(false) => {
+				tracing::debug!(codec = %self.settings.codec, bitrate, "recreating the encoder for the new bitrate");
+				self.active = None;
+			}
+			Err(err) => {
+				tracing::warn!(codec = %self.settings.codec, bitrate, %err, "changing the bitrate failed; recreating the encoder");
+				self.active = None;
+			}
+		}
 	}
 
 	/// Request that the next frame is encoded as a keyframe.
@@ -681,6 +713,47 @@ pub(crate) mod tests {
 			assert!(!frame.keyframe);
 			assert_eq!((frame.width, frame.height), (32, 32));
 		}
+	}
+
+	/// A noisy picture, so the encoded size follows the bitrate.
+	#[expect(clippy::cast_possible_truncation, reason = "the noise wraps around")]
+	fn noise(w: u32, h: u32, t: u32) -> Image {
+		let mut state = 0x9e37_79b9_u32 ^ t.wrapping_mul(0x85eb_ca6b);
+		let rgb: Vec<u8> = (0..w * h * 3)
+			.map(|_| {
+				state ^= state << 13;
+				state ^= state >> 17;
+				state ^= state << 5;
+				state as u8
+			})
+			.collect();
+		Image::new(w, h, PixelFormat::Rgb8, rgb, Duration::from_millis(u64::from(t) * 33)).unwrap()
+	}
+
+	/// Lowering the bitrate mid-stream shrinks the frames that follow.
+	pub(crate) fn bitrate_changes(codec: Codec) {
+		let mut encoder = Encoder::new(EncoderSettings {
+			codec,
+			bitrate: 2_000_000,
+			keyframe_interval: Duration::from_secs(60),
+			hardware: Hardware::Off,
+			..Default::default()
+		})
+		.unwrap();
+		let size = |encoder: &mut Encoder, frames: std::ops::Range<u32>| -> usize {
+			frames
+				.filter_map(|t| encoder.encode(&noise(128, 96, t)).unwrap())
+				.filter(|frame| !frame.keyframe)
+				.map(|frame| frame.data.len())
+				.sum()
+		};
+		let high = size(&mut encoder, 0..30);
+		encoder.set_bitrate(200_000);
+		assert_eq!(encoder.settings().bitrate, 200_000);
+		// Let rate control settle before measuring.
+		size(&mut encoder, 30..40);
+		let low = size(&mut encoder, 40..70);
+		assert!(low * 2 < high, "{codec}: {high} bytes at 2 Mbit/s, {low} at 200 kbit/s");
 	}
 
 	/// Pictures above the decoder's limit fail without being converted.

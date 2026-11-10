@@ -25,6 +25,7 @@ moqros_pub:
     codec: vp8
     # Hardware encoder (`hw` feature): auto (fall back to software), off, or require.
     hw: auto
+    # Can change at runtime: ros2 param set /moqros_pub bitrate 500000
     bitrate: 2000000
     fps: 30.0
     keyframe_interval_ms: 2000

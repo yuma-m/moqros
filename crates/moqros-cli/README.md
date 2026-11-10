@@ -108,8 +108,11 @@ Both bridges accept the standard `--ros-args`: remap the node name (`-r __node:=
 (`-r __ns:=…`), and set ROS parameters with `-p` or `--params-file`. Each command-line flag can also be
 set as a parameter of the same name in snake_case (`--keyframe-interval-ms` becomes `keyframe_interval_ms`).
 A flag on the command line wins over a parameter, and a parameter wins over environment variables and
-defaults. Bool flags also take a value (`--reliable=false`). Parameters are read once at startup, and
-parameters that match no flag are ignored with a warning. In a parameter file, key a namespaced node by
+defaults. Bool flags also take a value (`--reliable=false`). Parameters are read at startup, and
+parameters that match no flag are ignored with a warning. The one exception is `bitrate`: setting it on a
+running node with video topics (`ros2 param set /moqros_pub bitrate 500000`) changes the video bitrate of every
+topic. VP8 and AV1 encoders adjust in place; H.264 and hardware encoders restart with a keyframe. Other
+parameters set at runtime only log that the node needs a restart. In a parameter file, key a namespaced node by
 its fully qualified name (`/front/moqros_pub`); the bare node name only matches in the root namespace.
 
 ```sh
