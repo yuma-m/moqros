@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "moqros"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "aom-sys",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "moqros-cli"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "moqros-image-source"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
