@@ -172,7 +172,8 @@ mod tests {
 			})
 			.unwrap();
 			let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
-			assert!(frame.codec.to_string().starts_with("avc3.42"), "{}", frame.codec);
+			let codec = frame.codec_string().expect("the first frame is a keyframe");
+			assert!(codec.starts_with("avc3.42"), "{codec}");
 		}
 	}
 }

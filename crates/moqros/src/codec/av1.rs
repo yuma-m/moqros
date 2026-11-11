@@ -352,10 +352,10 @@ mod tests {
 		let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
 		let header = super::obu::sequence_header(&frame.data).expect("keyframes carry a sequence header");
 		assert_eq!((header.max_width, header.max_height, header.bit_depth), (64, 48, 8));
-		assert_eq!(frame.codec.to_string(), "av01.0.00M.08");
+		assert_eq!(frame.codec_string().as_deref(), Some("av01.0.00M.08"));
 		// libaom picks the level for the picture size: 3.1 for 720p.
 		let frame = encoder.encode(&tests::test_pattern(1280, 720, 1)).unwrap().unwrap();
-		assert_eq!(frame.codec.to_string(), "av01.0.05M.08");
+		assert_eq!(frame.codec_string().as_deref(), Some("av01.0.05M.08"));
 	}
 
 	/// A frame that doesn't match the configured size is refused, not read out of bounds.

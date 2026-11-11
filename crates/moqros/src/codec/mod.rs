@@ -67,7 +67,7 @@ impl Codec {
 	}
 
 	/// Map a catalog codec onto a moqros codec.
-	pub fn from_catalog(codec: &VideoCodec) -> Option<Self> {
+	pub(crate) fn from_catalog(codec: &VideoCodec) -> Option<Self> {
 		match codec {
 			VideoCodec::VP8 => Some(Self::Vp8),
 			VideoCodec::H264(_) => Some(Self::H264),
@@ -239,6 +239,7 @@ pub(crate) fn default_threads() -> u32 {
 
 /// One encoded frame.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EncodedFrame {
 	/// VP8 frame, Annex-B H.264 access unit, or AV1 temporal unit (low-overhead OBUs).
 	pub data: Bytes,
@@ -250,9 +251,37 @@ pub struct EncodedFrame {
 	pub height: u32,
 	/// Timestamp of the encoded [`Image`].
 	pub timestamp: Duration,
-	/// Catalog codec description (for H.264 parsed from the keyframe's SPS, for AV1 from its
-	/// sequence header).
-	pub codec: VideoCodec,
+	/// Codec of `data`.
+	pub codec: Codec,
+}
+
+impl EncodedFrame {
+	/// A frame encoded elsewhere, for [`ImagePublisher::publish_encoded`](crate::ImagePublisher::publish_encoded):
+	/// `data` is one `width`x`height` picture in `codec`, captured at `timestamp`.
+	pub fn new(
+		codec: Codec,
+		data: impl Into<Bytes>,
+		keyframe: bool,
+		width: u32,
+		height: u32,
+		timestamp: Duration,
+	) -> Self {
+		Self {
+			data: data.into(),
+			keyframe,
+			width,
+			height,
+			timestamp,
+			codec,
+		}
+	}
+
+	/// The WebCodecs codec string a catalog announces for this frame, e.g. `vp8`, `avc3.42c01f`
+	/// or `av01.0.05M.08` (for H.264 read from the SPS, for AV1 from the sequence header).
+	/// `None` for a delta frame, which doesn't carry those.
+	pub fn codec_string(&self) -> Option<String> {
+		self.keyframe.then(|| self.codec.catalog_codec(&self.data).to_string())
+	}
 }
 
 /// What an [`EncoderBackend`] produced for one input frame.
@@ -322,17 +351,11 @@ pub struct Encoder {
 struct ActiveBackend {
 	backend: Box<dyn EncoderBackend>,
 	dims: (usize, usize),
-	/// Catalog codec of the last keyframe, reused for the delta frames that follow it.
-	codec: Option<VideoCodec>,
 }
 
 impl ActiveBackend {
 	fn new(backend: Box<dyn EncoderBackend>, dims: (usize, usize)) -> Self {
-		Self {
-			backend,
-			dims,
-			codec: None,
-		}
+		Self { backend, dims }
 	}
 }
 
@@ -439,11 +462,6 @@ impl Encoder {
 		if keyframe {
 			self.last_keyframe = Some(pts);
 		}
-		let active = self.active.as_mut().expect("backend created above");
-		let codec = match &active.codec {
-			Some(codec) if !keyframe => codec.clone(),
-			_ => active.codec.insert(self.settings.codec.catalog_codec(&data)).clone(),
-		};
 
 		Ok(Some(EncodedFrame {
 			data,
@@ -451,7 +469,7 @@ impl Encoder {
 			width: dims.0 as u32,
 			height: dims.1 as u32,
 			timestamp,
-			codec,
+			codec: self.settings.codec,
 		}))
 	}
 
