@@ -22,7 +22,7 @@
 //! tokio::task::spawn_blocking(move || loop {
 //!     node.spin_once(std::time::Duration::from_millis(50));
 //! });
-//! bridge.await??;
+//! bridge.await.result?;
 //! # Ok(()) }
 //! ```
 //!
@@ -52,7 +52,7 @@ mod graph;
 mod meter;
 mod to_moq;
 
-pub use bridge::{BitrateControl, Bridge, BridgeStats, Teardown};
+pub use bridge::{BitrateControl, Bridge, BridgeEnd, BridgeStats, Teardown};
 #[cfg(feature = "compressed")]
 pub use convert::compressed_image_from_ros;
 pub use convert::{image_from_ros, image_into_ros, image_to_ros, now_stamp, stamp};

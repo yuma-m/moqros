@@ -86,6 +86,18 @@ pub enum Error {
 	#[error("ros error: {0}")]
 	Ros(#[from] r2r::Error),
 
+	/// A ROS bridge was stopped with `Bridge::abort`.
+	#[cfg(feature = "ros")]
+	#[cfg_attr(docsrs, doc(cfg(feature = "ros")))]
+	#[error("the bridge was aborted")]
+	BridgeAborted,
+
+	/// The task of a ROS bridge panicked.
+	#[cfg(feature = "ros")]
+	#[cfg_attr(docsrs, doc(cfg(feature = "ros")))]
+	#[error("the bridge panicked: {0}")]
+	BridgePanicked(String),
+
 	/// Publishers of a ROS topic disagree on its message type.
 	#[error("{topic} has several types: {}", types.join(", "))]
 	TopicTypes {
