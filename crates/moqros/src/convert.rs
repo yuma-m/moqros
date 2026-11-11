@@ -2,6 +2,9 @@
 //!
 //! Uses BT.601 limited range, which is what VP8/H.264 decoders (and browsers) assume when the
 //! bitstream carries no color description. RGB conversions run on yuvutils-rs's SIMD kernels.
+//!
+//! [`Encoder`](crate::Encoder) and [`Decoder`](crate::Decoder) convert for you; these are the
+//! building blocks they use, for code that feeds or reads a codec of its own.
 
 use yuvutils_rs::{BufferStoreMut, YuvConversionMode, YuvPlanarImage, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
 
