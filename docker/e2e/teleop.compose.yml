@@ -1,0 +1,35 @@
+# Adds the end-to-end check to docker/teleop.compose.yml. `cmd` stands in for the browser's
+# teleop pad, and `sub` for a viewer:
+#
+#   docker compose -f docker/teleop.compose.yml -f docker/e2e/teleop.compose.yml up -d --build
+#   docker compose -f docker/teleop.compose.yml -f docker/e2e/teleop.compose.yml run --rm check
+x-ros: &ros
+  image: moqros/ros:latest
+  environment:
+    ROS_DOMAIN_ID: "42"
+    RUST_LOG: info
+  network_mode: service:sim
+  ipc: service:sim
+
+services:
+  cmd:
+    <<: *ros
+    command: ["moqros-pub", "--url", "http://relay:4443/anon",
+              "--topic", "/e2e/cmd_vel,format=json,type=geometry_msgs/msg/Twist,broadcast=robot/cmd_vel"]
+    depends_on: [relay, sim]
+
+  sub:
+    <<: *ros
+    command: ["moqros-sub", "--url", "http://relay:4443/anon",
+              "--broadcast", "robot/camera,topic=/e2e/camera",
+              "--broadcast", "robot/map,topic=/e2e/map",
+              "--broadcast", "robot/odom,topic=/e2e/odom"]
+    depends_on: [relay, sim]
+
+  check:
+    <<: *ros
+    command: ["python3", "/e2e/check.py", "teleop"]
+    volumes:
+      - ./e2e:/e2e:ro
+    depends_on: [bridge, cmd, sub]
+    profiles: [e2e]
