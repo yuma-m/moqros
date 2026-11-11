@@ -94,6 +94,9 @@ pub struct DataPublisher {
 	settings: DataSettings,
 	/// The timeline of [`DataPublisher::publish_at`].
 	clock: StreamClock,
+	/// Which of [`DataPublisher::publish`] and [`DataPublisher::publish_at`] stamps this
+	/// broadcast, once the first message chose.
+	stamps: Option<Stamps>,
 	/// What the catalog announces in its `moqros` section.
 	section: MoqrosSection,
 	// Declared before `broadcast`, so the open group is finished before the broadcast closes.
@@ -119,6 +122,7 @@ impl DataPublisher {
 		Ok(Self {
 			settings,
 			clock: StreamClock::default(),
+			stamps: None,
 			section,
 			track: GroupWriter::new(track),
 			broadcast,
@@ -137,7 +141,11 @@ impl DataPublisher {
 
 	/// Send one message payload, serialized as [`DataSettings::format`] says, stamped with the
 	/// time it was sent.
+	///
+	/// Fails with [`Error::InvalidSettings`] on a broadcast that [`DataPublisher::publish_at`]
+	/// already stamped with capture times.
 	pub fn publish(&mut self, payload: impl Into<Bytes>) -> Result<()> {
+		self.stamp_with(Stamps::SendTime)?;
 		self.write(moq_net::Timestamp::now(), payload.into())
 	}
 
@@ -148,8 +156,12 @@ impl DataPublisher {
 	/// Capture times map onto the broadcast's timeline as video timestamps do: they must
 	/// increase, a repeated or slightly earlier one is nudged forward, and a capture clock that
 	/// jumps back by over a second (e.g. a looping rosbag) re-anchors the timeline, which
-	/// republishes the catalog. Use either this or [`DataPublisher::publish`] on one broadcast.
+	/// republishes the catalog.
+	///
+	/// The two timelines don't mix: this fails with [`Error::InvalidSettings`] on a broadcast
+	/// that [`DataPublisher::publish`] already stamped with send times.
 	pub fn publish_at(&mut self, capture: Duration, payload: impl Into<Bytes>) -> Result<()> {
+		self.stamp_with(Stamps::CaptureTime)?;
 		let pts = self.clock.micros(capture);
 		let origin = self.clock.origin_micros();
 		if origin != self.section.capture_origin {
@@ -159,6 +171,18 @@ impl DataPublisher {
 		}
 		let timestamp = moq_net::Timestamp::from_micros(pts).map_err(|_| Error::Timestamp)?;
 		self.write(timestamp, payload.into())
+	}
+
+	/// Stamp this broadcast's messages as `stamps` says, unless earlier ones were stamped the
+	/// other way: a subscriber would then read send times as capture times.
+	fn stamp_with(&mut self, stamps: Stamps) -> Result<()> {
+		if *self.stamps.get_or_insert(stamps) == stamps {
+			return Ok(());
+		}
+		Err(Error::InvalidSettings(format!(
+			"data broadcast {:?} mixes publish (send times) and publish_at (capture times)",
+			self.name()
+		)))
 	}
 
 	fn write(&mut self, timestamp: moq_net::Timestamp, payload: Bytes) -> Result<()> {
@@ -176,6 +200,15 @@ impl DataPublisher {
 		}
 		Ok(())
 	}
+}
+
+/// What the frame timestamps of a data broadcast count from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stamps {
+	/// The publisher's monotonic clock, at the time each message is sent.
+	SendTime,
+	/// The capture time of the first message.
+	CaptureTime,
 }
 
 /// One message received from a data broadcast.
@@ -249,6 +282,28 @@ mod tests {
 			mode,
 			ros_type: ros_type.map(String::from),
 		}
+	}
+
+	/// A broadcast is stamped with send times or capture times, whichever its first message uses.
+	#[tokio::test]
+	async fn send_and_capture_times_do_not_mix() {
+		let origin = moq_tokio::origin::spawn();
+		let new =
+			|name| DataPublisher::new(&origin, name, settings(DataFormat::Json, DataMode::Snapshot, None)).unwrap();
+
+		let mut sent = new("sent");
+		sent.publish("0").unwrap();
+		let err = sent.publish_at(Duration::from_secs(1), "1").unwrap_err();
+		assert!(matches!(err, Error::InvalidSettings(_)), "{err}");
+		// The refused message changed nothing: no capture origin was announced.
+		assert_eq!(sent.section.capture_origin, None);
+		sent.publish("2").unwrap();
+
+		let mut captured = new("captured");
+		captured.publish_at(Duration::from_secs(1), "0").unwrap();
+		let err = captured.publish("1").unwrap_err();
+		assert!(matches!(err, Error::InvalidSettings(_)), "{err}");
+		captured.publish_at(Duration::from_secs(2), "2").unwrap();
 	}
 
 	/// A stream track outgrowing moq-net's group limits continues in a new group.
