@@ -98,17 +98,12 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 	let name = format!("test/image-{codec}");
 	let mut broadcast = publisher.create_image_broadcast(
 		&name,
-		ImageBroadcastSettings {
-			encoder: EncoderSettings {
-				codec,
-				keyframe_interval: Duration::from_millis(200),
-				..Default::default()
-			},
-			renditions: vec![RenditionSettings {
-				height: 60,
-				bitrate: 200_000,
-			}],
-		},
+		ImageBroadcastSettings::new(
+			EncoderSettings::default()
+				.with_codec(codec)
+				.with_keyframe_interval(Duration::from_millis(200)),
+		)
+		.with_renditions([RenditionSettings::new(60, 200_000)]),
 	)?;
 
 	// Publish continuously from a blocking thread, like a ROS callback would.
@@ -184,11 +179,9 @@ async fn publish_and_subscribe_data_through_relay() -> anyhow::Result<()> {
 		(DataFormat::Cdr, DataMode::Stream),
 	] {
 		let name = format!("test/{format}");
-		let settings = DataSettings {
-			format,
-			mode,
-			ros_type: Some("std_msgs/msg/String".into()),
-		};
+		let settings = DataSettings::new(format)
+			.with_mode(mode)
+			.with_ros_type("std_msgs/msg/String");
 		let mut broadcast = publisher.create_data_broadcast(&name, settings.clone())?;
 
 		// Publish continuously until stopped, so the subscriber can join at any point.

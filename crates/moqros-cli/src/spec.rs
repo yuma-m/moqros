@@ -250,14 +250,12 @@ impl SubBroadcast {
 
 	/// The ROS topic to republish on, with `qos`.
 	pub fn target(&self, qos: QosProfile) -> RosTarget {
-		RosTarget {
-			topic: self.topic.clone(),
-			qos,
-			frame_id: self.options.frame_id.clone(),
-			stamp: self.options.stamp,
-			ros_type: self.ros_type.clone(),
-			encoding: self.options.encoding,
-		}
+		let mut target = RosTarget::new(self.topic.clone(), qos)
+			.with_stamp(self.options.stamp)
+			.with_encoding(self.options.encoding);
+		target.frame_id = self.options.frame_id.clone();
+		target.ros_type = self.ros_type.clone();
+		target
 	}
 }
 

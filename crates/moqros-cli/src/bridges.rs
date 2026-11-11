@@ -592,11 +592,9 @@ fn start_pub_topic(
 			}
 		}
 		Some(format) => {
-			let settings = moqros::DataSettings {
-				format,
-				mode: topic.mode,
-				ros_type: Some(ros_type),
-			};
+			let settings = moqros::DataSettings::new(format)
+				.with_mode(topic.mode)
+				.with_ros_type(ros_type);
 			let data = publisher.create_data_broadcast(&topic.broadcast, settings)?;
 			moqros::ros::spawn_ros_to_moq_data(node, &topic.topic, qos, data)?
 		}

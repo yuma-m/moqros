@@ -31,11 +31,8 @@
 //! use moqros::ros::{QosProfile, spawn_ros_to_moq_data, wait_for_topic_type};
 //!
 //! # async fn run(mut node: moqros::ros::r2r::Node, publisher: moqros::Publisher) -> moqros::Result<()> {
-//! let settings = moqros::DataSettings {
-//!     format: moqros::DataFormat::Json,
-//!     mode: moqros::DataMode::Snapshot,
-//!     ros_type: Some(wait_for_topic_type(&node, "/imu").await?),
-//! };
+//! let settings = moqros::DataSettings::new(moqros::DataFormat::Json)
+//!     .with_ros_type(wait_for_topic_type(&node, "/imu").await?);
 //! let broadcast = publisher.create_data_broadcast("imu", settings)?;
 //! let bridge = spawn_ros_to_moq_data(&mut node, "/imu", QosProfile::sensor_data(), broadcast)?;
 //! # Ok(()) }

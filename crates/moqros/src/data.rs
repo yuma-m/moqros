@@ -56,6 +56,7 @@ crate::names::named_enum!(DataMode, "data mode", {
 /// Describes a data track: given to [`Publisher::create_data_broadcast`](crate::Publisher::create_data_broadcast),
 /// and read back from the catalog by [`DataSubscriber::settings`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DataSettings {
 	/// Serialization of each message.
 	pub format: DataFormat,
@@ -73,6 +74,18 @@ impl DataSettings {
 			mode: DataMode::default(),
 			ros_type: None,
 		}
+	}
+
+	/// Set [`DataSettings::mode`].
+	pub fn with_mode(mut self, mode: DataMode) -> Self {
+		self.mode = mode;
+		self
+	}
+
+	/// Set [`DataSettings::ros_type`].
+	pub fn with_ros_type(mut self, ros_type: impl Into<String>) -> Self {
+		self.ros_type = Some(ros_type.into());
+		self
 	}
 }
 
@@ -167,6 +180,7 @@ impl DataPublisher {
 
 /// One message received from a data broadcast.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DataMessage {
 	/// Frame timestamp: relative to the start of the broadcast for messages published with
 	/// [`DataPublisher::publish_at`], otherwise the send time on the publisher's monotonic clock.

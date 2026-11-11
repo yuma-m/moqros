@@ -34,12 +34,10 @@ pub struct RelayArgs {
 
 impl RelayArgs {
 	pub fn config(&self) -> moqros::ClientConfig {
-		moqros::ClientConfig {
-			url: self.url.clone(),
-			insecure: self.insecure,
-			tls_cert: self.tls_cert.clone(),
-			tls_key: self.tls_key.clone(),
-		}
+		let mut config = moqros::ClientConfig::new(self.url.clone()).with_insecure(self.insecure);
+		config.tls_cert = self.tls_cert.clone();
+		config.tls_key = self.tls_key.clone();
+		config
 	}
 
 	/// The relay URL with its tokens and password hidden, for logging.
@@ -147,27 +145,22 @@ fn parse_rendition(spec: &str) -> Result<moqros::RenditionSettings, String> {
 	if height < 2 || bitrate == 0 {
 		return Err(invalid());
 	}
-	Ok(moqros::RenditionSettings { height, bitrate })
+	Ok(moqros::RenditionSettings::new(height, bitrate))
 }
 
 impl EncoderArgs {
 	pub fn settings(&self) -> moqros::EncoderSettings {
-		moqros::EncoderSettings {
-			codec: self.codec,
-			bitrate: self.bitrate,
-			max_fps: self.fps,
-			keyframe_interval: Duration::from_millis(self.keyframe_interval_ms),
-			hardware: self.hw,
-			..Default::default()
-		}
+		moqros::EncoderSettings::default()
+			.with_codec(self.codec)
+			.with_bitrate(self.bitrate)
+			.with_max_fps(self.fps)
+			.with_keyframe_interval(Duration::from_millis(self.keyframe_interval_ms))
+			.with_hardware(self.hw)
 	}
 
 	/// The settings of every rendition.
 	pub fn broadcast_settings(&self) -> moqros::ImageBroadcastSettings {
-		moqros::ImageBroadcastSettings {
-			encoder: self.settings(),
-			renditions: self.renditions.clone(),
-		}
+		moqros::ImageBroadcastSettings::new(self.settings()).with_renditions(self.renditions.iter().copied())
 	}
 }
 
@@ -225,7 +218,7 @@ mod tests {
 
 	#[test]
 	fn parses_renditions() {
-		let rendition = |height, bitrate| moqros::RenditionSettings { height, bitrate };
+		let rendition = moqros::RenditionSettings::new;
 		assert_eq!(parse_rendition("360p@500000"), Ok(rendition(360, 500_000)));
 		assert_eq!(parse_rendition("720@2000000"), Ok(rendition(720, 2_000_000)));
 		for bad in [

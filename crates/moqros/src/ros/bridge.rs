@@ -12,6 +12,7 @@ use crate::Result;
 
 /// Message counts of a bridge, live through [`Bridge::stats`] and final once it stops.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BridgeStats {
 	/// Messages received from the source: the ROS topic, or the broadcast.
 	pub received: u64,

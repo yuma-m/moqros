@@ -191,6 +191,7 @@ pub enum Subscription {
 
 /// One encoded video frame received from a broadcast.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct VideoFrame {
 	/// Presentation time relative to the start of the broadcast.
 	pub timestamp: Duration,
