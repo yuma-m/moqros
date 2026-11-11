@@ -80,7 +80,7 @@
 //!   [`EncoderSettings::keyframe_interval`] bounds how long a new viewer waits for the first
 //!   picture. Subscribers always jump to the newest group. With
 //!   [`ImageBroadcastSettings::renditions`], smaller renditions go into tracks of their own
-//!   (`video_<height>p`), all listed in the same catalog; [`ImageOptions`] picks one.
+//!   (`video_<height>p`), all listed in the same catalog; [`SubscribeOptions`] picks one.
 //! - **Pixel formats:** see [`PixelFormat`]. An odd trailing row or column is cropped,
 //!   because 4:2:0 video needs even dimensions.
 //! - **Timestamps:** capture times become a µs timeline that starts at 0 for each broadcast.
@@ -129,7 +129,7 @@ pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
 pub use publisher::{ImageBroadcastSettings, ImagePublisher, Publisher, RenditionSettings};
 pub use subscriber::{
-	Announcements, DecodedImage, ImageOptions, ImageSubscriber, Subscriber, Subscription, VideoFrame,
+	Announcements, DecodedImage, ImageSubscriber, SubscribeOptions, Subscriber, Subscription, VideoFrame,
 };
 
 pub use url::Url;

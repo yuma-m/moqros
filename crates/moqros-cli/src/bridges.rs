@@ -427,7 +427,7 @@ async fn subscribe_after(
 ) -> (MoqToRos, SubBroadcast) {
 	tokio::time::sleep(delay).await;
 	(
-		MoqToRos::subscribe_with(subscriber, &broadcast.broadcast, broadcast.image_options()).await,
+		MoqToRos::subscribe_with(subscriber, &broadcast.broadcast, broadcast.subscribe_options()).await,
 		broadcast,
 	)
 }

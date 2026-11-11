@@ -63,11 +63,11 @@ impl Subscriber {
 	/// Wait for `name` to be announced, then subscribe to its best video rendition
 	/// whose codec this build can decode.
 	pub async fn subscribe_images(&self, name: &str) -> Result<ImageSubscriber> {
-		self.subscribe_images_with(name, &ImageOptions::default()).await
+		self.subscribe_images_with(name, &SubscribeOptions::default()).await
 	}
 
 	/// Like [`Subscriber::subscribe_images`], picking the rendition by `options`.
-	pub async fn subscribe_images_with(&self, name: &str, options: &ImageOptions) -> Result<ImageSubscriber> {
+	pub async fn subscribe_images_with(&self, name: &str, options: &SubscribeOptions) -> Result<ImageSubscriber> {
 		images(name, self.open(name).await?, options).await
 	}
 
@@ -79,11 +79,11 @@ impl Subscriber {
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
 	/// if this build can decode it, otherwise its data track.
 	pub async fn subscribe(&self, name: &str) -> Result<Subscription> {
-		self.subscribe_with(name, &ImageOptions::default()).await
+		self.subscribe_with(name, &SubscribeOptions::default()).await
 	}
 
 	/// Like [`Subscriber::subscribe`], picking a video rendition by `options`.
-	pub async fn subscribe_with(&self, name: &str, options: &ImageOptions) -> Result<Subscription> {
+	pub async fn subscribe_with(&self, name: &str, options: &SubscribeOptions) -> Result<Subscription> {
 		let opened = self.open(name).await?;
 		match Kind::of(opened.catalog()) {
 			Kind::Images => Ok(Subscription::Images(images(name, opened, options).await?)),
@@ -108,7 +108,7 @@ impl Subscriber {
 	}
 }
 
-async fn images(name: &str, opened: OpenBroadcast, options: &ImageOptions) -> Result<ImageSubscriber> {
+async fn images(name: &str, opened: OpenBroadcast, options: &SubscribeOptions) -> Result<ImageSubscriber> {
 	let (track, config, codec) = catalog::select_video(opened.catalog(), name, options.max_height)?;
 	tracing::info!(
 		broadcast = name,
@@ -163,18 +163,21 @@ impl Announcements {
 	}
 }
 
-/// Which video rendition [`Subscriber::subscribe_images_with`] picks, among those whose codec
-/// this build can decode. The rendition is picked once, from the catalog at subscription time.
+/// How [`Subscriber::subscribe_with`] and [`Subscriber::subscribe_images_with`] subscribe.
+///
+/// For now it only says which video rendition to pick, among those whose codec this build can
+/// decode; a data track ignores it. The rendition is picked once, from the catalog at
+/// subscription time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ImageOptions {
+pub struct SubscribeOptions {
 	/// The tallest picture wanted: the largest rendition at most this tall, or the smallest if
 	/// none is. `None` picks the largest.
 	pub max_height: Option<u32>,
 }
 
-impl ImageOptions {
-	/// Set [`ImageOptions::max_height`].
+impl SubscribeOptions {
+	/// Set [`SubscribeOptions::max_height`].
 	pub fn with_max_height(mut self, max_height: u32) -> Self {
 		self.max_height = Some(max_height);
 		self
@@ -316,7 +319,7 @@ mod tests {
 	/// Subscribe to `name` on `origin` the way [`Subscriber::subscribe_images`] does.
 	async fn subscribe_images(origin: &moq_net::origin::Producer, name: &str) -> ImageSubscriber {
 		let opened = OpenBroadcast::open(origin, name).await.unwrap();
-		images(name, opened, &ImageOptions::default()).await.unwrap()
+		images(name, opened, &SubscribeOptions::default()).await.unwrap()
 	}
 
 	/// Broadcasts already announced, and later ones, come back when under the prefix.

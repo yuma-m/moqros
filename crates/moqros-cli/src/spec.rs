@@ -242,8 +242,8 @@ pub struct SubBroadcast {
 
 impl SubBroadcast {
 	/// Which video rendition to subscribe to.
-	pub fn image_options(&self) -> moqros::ImageOptions {
-		let mut options = moqros::ImageOptions::default();
+	pub fn subscribe_options(&self) -> moqros::SubscribeOptions {
+		let mut options = moqros::SubscribeOptions::default();
 		options.max_height = self.options.max_height;
 		options
 	}
