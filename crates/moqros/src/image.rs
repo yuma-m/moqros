@@ -80,20 +80,23 @@ impl fmt::Display for PixelFormat {
 }
 
 /// An uncompressed image, equivalent to the payload of a `sensor_msgs/Image`.
+///
+/// Its constructors check that the buffer holds the geometry they declare, and nothing changes
+/// either afterwards, so an `Image` is always consistent.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Image {
 	/// Width in pixels.
-	pub width: u32,
+	pub(crate) width: u32,
 	/// Height in pixels.
-	pub height: u32,
+	pub(crate) height: u32,
 	/// Layout of each pixel.
-	pub format: PixelFormat,
+	pub(crate) format: PixelFormat,
 	/// Length of one row in bytes, including any padding.
-	pub step: u32,
+	pub(crate) step: u32,
 	/// Pixel rows, `step` bytes each.
-	pub data: Bytes,
+	pub(crate) data: Bytes,
 	/// Capture time; for ROS images this is `header.stamp` since the epoch.
-	pub timestamp: Duration,
+	pub(crate) timestamp: Duration,
 }
 
 impl Image {
@@ -133,8 +136,49 @@ impl Image {
 		Ok(image)
 	}
 
+	/// Width in pixels.
+	pub fn width(&self) -> u32 {
+		self.width
+	}
+
+	/// Height in pixels.
+	pub fn height(&self) -> u32 {
+		self.height
+	}
+
+	/// Layout of each pixel.
+	pub fn format(&self) -> PixelFormat {
+		self.format
+	}
+
+	/// Length of one row in bytes, including any padding.
+	pub fn step(&self) -> u32 {
+		self.step
+	}
+
+	/// Pixel rows, [`step`](Image::step) bytes each.
+	pub fn data(&self) -> &Bytes {
+		&self.data
+	}
+
+	/// Take the pixel buffer; see [`Image::data`].
+	pub fn into_data(self) -> Bytes {
+		self.data
+	}
+
+	/// Capture time; for ROS images this is `header.stamp` since the epoch.
+	pub fn timestamp(&self) -> Duration {
+		self.timestamp
+	}
+
+	/// The same picture captured at `timestamp`.
+	pub fn with_timestamp(mut self, timestamp: Duration) -> Self {
+		self.timestamp = timestamp;
+		self
+	}
+
 	/// Check that `step` and `data` are large enough for the declared geometry.
-	pub fn validate(&self) -> Result<(), Error> {
+	pub(crate) fn validate(&self) -> Result<(), Error> {
 		let row = (self.width as usize).checked_mul(self.format.bytes_per_pixel());
 		let step = self.step as usize;
 		let needed = step.checked_mul(self.height as usize);
@@ -251,7 +295,7 @@ mod tests {
 	}
 
 	#[test]
-	fn validate_rechecks_public_fields() {
+	fn validate_checks_the_geometry() {
 		let mut image = Image::new(4, 4, PixelFormat::Rgb8, vec![0u8; 48], Duration::ZERO).unwrap();
 		image.height = 5;
 		assert!(matches!(image.validate(), Err(Error::InvalidImage(_))));

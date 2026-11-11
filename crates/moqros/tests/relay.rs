@@ -128,9 +128,9 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 			.await??
 			.expect("broadcast ended early");
 		let image = &decoded.image;
-		assert_eq!(decoded.capture_time, Some(image.timestamp), "{codec}");
+		assert_eq!(decoded.capture_time, Some(image.timestamp()), "{codec}");
 		assert_eq!(
-			(image.width, image.height, image.format),
+			(image.width(), image.height(), image.format()),
 			(160, 120, PixelFormat::Rgb8),
 			"{codec}"
 		);
@@ -152,7 +152,7 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 		.await??
 		.expect("broadcast ended early")
 		.image;
-	assert_eq!((image.width, image.height), (80, 60), "{codec}");
+	assert_eq!((image.width(), image.height()), (80, 60), "{codec}");
 
 	stop_tx.send(()).ok();
 	pub_task.await??;
