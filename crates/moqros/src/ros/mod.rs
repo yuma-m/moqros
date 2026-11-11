@@ -6,7 +6,7 @@
 //! only publishes, which r2r does without spinning.
 //!
 //! ```no_run
-//! use moqros::ros::{QosProfile, r2r, spawn_ros_to_moq};
+//! use moqros::ros::{QosProfile, RosSource, r2r, spawn_ros_to_moq};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let ctx = r2r::Context::create()?;
@@ -16,7 +16,8 @@
 //!     "http://localhost:4443/anon".parse()?,
 //! ))?;
 //! let broadcast = publisher.create_image_broadcast("camera", moqros::EncoderSettings::default())?;
-//! let bridge = spawn_ros_to_moq(&mut node, "/camera/image_raw", QosProfile::sensor_data(), broadcast)?;
+//! let source = RosSource::new("/camera/image_raw", QosProfile::sensor_data());
+//! let bridge = spawn_ros_to_moq(&mut node, source, broadcast)?;
 //!
 //! tokio::task::spawn_blocking(move || loop {
 //!     node.spin_once(std::time::Duration::from_millis(50));
@@ -28,13 +29,14 @@
 //! Any other message type goes through a data broadcast:
 //!
 //! ```no_run
-//! use moqros::ros::{QosProfile, spawn_ros_to_moq_data, wait_for_topic_type};
+//! use moqros::ros::{QosProfile, RosSource, spawn_ros_to_moq_data, wait_for_topic_type};
 //!
 //! # async fn run(mut node: moqros::ros::r2r::Node, publisher: moqros::Publisher) -> moqros::Result<()> {
 //! let settings = moqros::DataSettings::new(moqros::DataFormat::Json)
 //!     .with_ros_type(wait_for_topic_type(&node, "/imu").await?);
 //! let broadcast = publisher.create_data_broadcast("imu", settings)?;
-//! let bridge = spawn_ros_to_moq_data(&mut node, "/imu", QosProfile::sensor_data(), broadcast)?;
+//! let source = RosSource::new("/imu", QosProfile::sensor_data());
+//! let bridge = spawn_ros_to_moq_data(&mut node, source, broadcast)?;
 //! # Ok(()) }
 //! ```
 //!
@@ -60,7 +62,7 @@ pub use r2r;
 pub use r2r::QosProfile;
 #[cfg(feature = "compressed")]
 pub use to_moq::spawn_ros_to_moq_compressed;
-pub use to_moq::{spawn_ros_to_moq, spawn_ros_to_moq_data};
+pub use to_moq::{RosSource, spawn_ros_to_moq, spawn_ros_to_moq_data};
 
 /// The ROS message type moqros encodes as video.
 pub type RosImage = r2r::sensor_msgs::msg::Image;

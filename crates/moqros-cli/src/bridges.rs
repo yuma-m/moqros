@@ -582,13 +582,14 @@ fn start_pub_topic(
 			None => return Ok(None),
 		},
 	};
+	let source = moqros::ros::RosSource::new(topic.topic.clone(), qos);
 	let bridge = match topic.format.data() {
 		None => {
 			check_video_type(&topic.topic, &ros_type)?;
 			let images = publisher.create_image_broadcast(&topic.broadcast, video.clone())?;
 			match ros_type.as_str() {
-				ROS_COMPRESSED_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq_compressed(node, &topic.topic, qos, images)?,
-				_ => moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?,
+				ROS_COMPRESSED_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq_compressed(node, source, images)?,
+				_ => moqros::ros::spawn_ros_to_moq(node, source, images)?,
 			}
 		}
 		Some(format) => {
@@ -596,7 +597,7 @@ fn start_pub_topic(
 				.with_mode(topic.mode)
 				.with_ros_type(ros_type);
 			let data = publisher.create_data_broadcast(&topic.broadcast, settings)?;
-			moqros::ros::spawn_ros_to_moq_data(node, &topic.topic, qos, data)?
+			moqros::ros::spawn_ros_to_moq_data(node, source, data)?
 		}
 	};
 	tracing::info!(
