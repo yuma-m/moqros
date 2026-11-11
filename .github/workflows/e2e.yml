@@ -49,11 +49,12 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: docker/setup-buildx-action@v4.4.1
       # The ros, relay and web images of both demos all come from compose.yml's build targets.
+      # Bake resolves the compose file's build contexts against `source`, not the file's directory.
       - name: Build images
         uses: docker/bake-action@v7.5.0
         with:
-          source: .
-          files: docker/compose.yml
+          source: docker
+          files: compose.yml
           load: true
           set: |
             *.cache-from=type=gha
