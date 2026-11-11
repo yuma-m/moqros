@@ -104,7 +104,7 @@ mod clock;
 mod codec;
 #[cfg(feature = "compressed")]
 mod compressed;
-mod convert;
+pub mod convert;
 mod data;
 mod error;
 mod image;
@@ -123,7 +123,6 @@ pub use client::{
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
 pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
-pub use convert::{I420, Planes, yuv_to_packed, yuv_to_rgb8};
 pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};

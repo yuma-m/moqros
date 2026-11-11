@@ -5,7 +5,8 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use moqros::{I420, Image, PixelFormat, yuv_to_rgb8};
+use moqros::convert::{I420, yuv_to_rgb8};
+use moqros::{Image, PixelFormat};
 
 /// Run `f` for about a second and return the mean time of one call.
 fn time(mut f: impl FnMut()) -> Duration {
