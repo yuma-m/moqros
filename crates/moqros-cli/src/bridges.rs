@@ -9,10 +9,9 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use moqros::ros::{
-	BitrateControl, Bridge, BridgeStats, MoqToRos, QosProfile, ROS_COMPRESSED_IMAGE_TYPE, Teardown, r2r,
+	BitrateControl, Bridge, BridgeEnd, BridgeStats, MoqToRos, QosProfile, ROS_COMPRESSED_IMAGE_TYPE, r2r,
 };
 use tokio::sync::watch;
-use tokio::task::JoinError;
 
 use crate::args::Format;
 use crate::diagnostics::Diagnostics;
@@ -117,12 +116,10 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	}
 }
 
-/// How a bridge task ended.
-type BridgeEnd = Result<moqros::Result<BridgeStats>, JoinError>;
-/// A topic bridge that stopped, with its counters.
-type TopicStopped = (PubTopic, watch::Receiver<BridgeStats>, BridgeEnd);
-/// A broadcast bridge that stopped, with its counters and what destroys its ROS publisher.
-type BroadcastStopped = (SubBroadcast, watch::Receiver<BridgeStats>, Teardown, BridgeEnd);
+/// A topic bridge that stopped.
+type TopicStopped = (PubTopic, BridgeEnd);
+/// A broadcast bridge that stopped.
+type BroadcastStopped = (SubBroadcast, BridgeEnd);
 
 /// The state of [`run_bridges`]: what runs, what waits to start, and what was taken.
 struct Supervisor {
@@ -246,8 +243,7 @@ impl Supervisor {
 			if let Some(control) = bridge.bitrate_control() {
 				self.bitrates.insert(topic.topic.clone(), control);
 			}
-			self.pub_bridges
-				.push(async move { (topic, stats, bridge.await) }.boxed());
+			self.pub_bridges.push(async move { (topic, bridge.await) }.boxed());
 		}
 		Ok(())
 	}
@@ -262,12 +258,9 @@ impl Supervisor {
 			.node
 			.with(|node| spawn_sub_broadcast(ready, node, &broadcast, self.qos.clone()))
 		{
-			Ok(mut bridge) => {
-				let stats = bridge.watch_stats();
-				self.report_running(&broadcast.broadcast, "MoQ -> ROS", &stats);
-				let teardown = bridge.take_teardown();
-				self.sub_bridges
-					.push(async move { (broadcast, stats, teardown, bridge.await) }.boxed());
+			Ok(bridge) => {
+				self.report_running(&broadcast.broadcast, "MoQ -> ROS", &bridge.watch_stats());
+				self.sub_bridges.push(async move { (broadcast, bridge.await) }.boxed());
 			}
 			Err(err) => {
 				tracing::error!(%err, broadcast = broadcast.broadcast, topic = broadcast.topic, "skipping broadcast");
@@ -323,15 +316,15 @@ impl Supervisor {
 		}
 	}
 
-	fn on_topic_stopped(&mut self, (topic, stats, end): TopicStopped) {
-		let delay = self.note_stopped("topic", &topic.topic, &stats, end);
+	fn on_topic_stopped(&mut self, (topic, end): TopicStopped) {
+		let delay = self.note_stopped("topic", &topic.topic, &end);
 		tracing::info!(topic = topic.topic, ?delay, "restarting the topic bridge");
 		self.pending.restart(topic, delay);
 	}
 
-	fn on_broadcast_stopped(&mut self, (broadcast, stats, teardown, end): BroadcastStopped) {
-		let delay = self.note_stopped("broadcast", &broadcast.broadcast, &stats, end);
-		self.node.with(|node| teardown.run(node));
+	fn on_broadcast_stopped(&mut self, (broadcast, end): BroadcastStopped) {
+		let delay = self.note_stopped("broadcast", &broadcast.broadcast, &end);
+		self.node.with(|node| end.teardown.run(node));
 		tracing::info!(
 			broadcast = broadcast.broadcast,
 			?delay,
@@ -342,19 +335,12 @@ impl Supervisor {
 
 	/// Log and report that the bridge of `kind` `name` stopped, returning how long to wait
 	/// before restarting it.
-	fn note_stopped(
-		&mut self,
-		kind: &str,
-		name: &str,
-		stats: &watch::Receiver<BridgeStats>,
-		end: BridgeEnd,
-	) -> Duration {
-		let stats = *stats.borrow();
-		log_stopped(kind, name, &stats, end);
+	fn note_stopped(&mut self, kind: &str, name: &str, end: &BridgeEnd) -> Duration {
+		log_stopped(kind, name, end);
 		if let Some((diagnostics, _)) = &mut self.diagnostics {
 			diagnostics.restarting(name);
 		}
-		self.restarts.next(&format!("{kind} {name}"), stats.sent > 0)
+		self.restarts.next(&format!("{kind} {name}"), end.stats.sent > 0)
 	}
 
 	/// Report the bridge `name` (`what` it bridges) as running, with its counters.
@@ -447,11 +433,12 @@ async fn subscribe_after(
 }
 
 /// Log why the bridge of `kind` `name` stopped.
-fn log_stopped(kind: &str, name: &str, stats: &BridgeStats, end: BridgeEnd) {
-	match end {
-		Ok(Ok(_)) => tracing::warn!(kind, name, ?stats, "bridge stopped"),
-		Ok(Err(err)) => tracing::warn!(kind, name, ?stats, %err, "bridge failed"),
-		Err(err) => tracing::error!(kind, name, ?stats, %err, "bridge panicked"),
+fn log_stopped(kind: &str, name: &str, end: &BridgeEnd) {
+	let stats = &end.stats;
+	match &end.result {
+		Ok(()) => tracing::warn!(kind, name, ?stats, "bridge stopped"),
+		Err(err @ moqros::Error::BridgePanicked(_)) => tracing::error!(kind, name, ?stats, %err, "bridge panicked"),
+		Err(err) => tracing::warn!(kind, name, ?stats, %err, "bridge failed"),
 	}
 }
 

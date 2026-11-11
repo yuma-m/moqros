@@ -6,11 +6,11 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 
-use crate::Result;
+use crate::{Error, Result};
 
-/// Message counts of a bridge, live through [`Bridge::stats`] and final once it stops.
+/// Message counts of a bridge, live through [`Bridge::stats`] and final in its [`BridgeEnd`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStats {
 	/// Messages received from the source: the ROS topic, or the broadcast.
@@ -26,14 +26,9 @@ pub struct BridgeStats {
 
 /// A running bridge between a ROS topic and a MoQ broadcast.
 ///
-/// Await it for the final [`BridgeStats`] once it stops; the outer `Result` is the task's
-/// (an `Err` means it panicked or was aborted), the inner one the bridge's. Dropping the handle
-/// leaves the bridge running.
-///
-/// The ROS entities a bridge creates on the node outlive it unless they are destroyed with its
-/// [`Teardown`] (see [`Bridge::take_teardown`]).
+/// Await it for its [`BridgeEnd`] once it stops. Dropping the handle leaves the bridge running.
 pub struct Bridge {
-	task: JoinHandle<Result<BridgeStats>>,
+	task: JoinHandle<Result<()>>,
 	stats: watch::Receiver<BridgeStats>,
 	teardown: Teardown,
 	bitrate: Option<BitrateControl>,
@@ -46,14 +41,8 @@ impl Bridge {
 		F: Future<Output = Result<()>> + Send + 'static,
 	{
 		let (sender, stats) = watch::channel(BridgeStats::default());
-		let counters = StatsSender(sender);
-		let run = run(counters.clone());
-		let task = tokio::spawn(async move {
-			run.await?;
-			Ok(counters.snapshot())
-		});
 		Self {
-			task,
+			task: tokio::spawn(run(StatsSender(sender))),
 			stats,
 			teardown: Teardown::default(),
 			bitrate: None,
@@ -75,12 +64,6 @@ impl Bridge {
 		self
 	}
 
-	/// What destroys the ROS entities of this bridge once it has stopped. Taken before awaiting
-	/// the bridge, which consumes it.
-	pub fn take_teardown(&mut self) -> Teardown {
-		std::mem::take(&mut self.teardown)
-	}
-
 	/// The counts so far.
 	pub fn stats(&self) -> BridgeStats {
 		*self.stats.borrow()
@@ -96,18 +79,41 @@ impl Bridge {
 		self.task.is_finished()
 	}
 
-	/// Stop the bridge. Awaiting it then yields a cancelled [`JoinError`].
+	/// Stop the bridge. Awaiting it then ends with [`Error::BridgeAborted`].
 	pub fn abort(&self) {
 		self.task.abort();
 	}
 }
 
 impl Future for Bridge {
-	type Output = std::result::Result<Result<BridgeStats>, JoinError>;
+	type Output = BridgeEnd;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		Pin::new(&mut self.task).poll(cx)
+		let result = match Pin::new(&mut self.task).poll(cx) {
+			Poll::Pending => return Poll::Pending,
+			Poll::Ready(Ok(result)) => result,
+			Poll::Ready(Err(err)) if err.is_cancelled() => Err(Error::BridgeAborted),
+			Poll::Ready(Err(err)) => Err(Error::BridgePanicked(err.to_string())),
+		};
+		let stats = *self.stats.borrow();
+		Poll::Ready(BridgeEnd {
+			result,
+			stats,
+			teardown: std::mem::take(&mut self.teardown),
+		})
 	}
+}
+
+/// How a [`Bridge`] stopped, and what it leaves behind.
+#[non_exhaustive]
+pub struct BridgeEnd {
+	/// Why the bridge stopped: `Ok` when its topic or broadcast ended, [`Error::BridgeAborted`]
+	/// after [`Bridge::abort`], [`Error::BridgePanicked`] if its task panicked.
+	pub result: Result<()>,
+	/// The final counts, however the bridge stopped.
+	pub stats: BridgeStats,
+	/// Destroys the ROS entities the bridge created on the node, which otherwise outlive it.
+	pub teardown: Teardown,
 }
 
 /// Changes the target bitrate of a running video [`Bridge`] (see
@@ -136,7 +142,7 @@ impl BitrateControl {
 /// Destroys the ROS entities of a stopped [`Bridge`], e.g. its publisher, so a new bridge on
 /// the same topic can use another message type.
 ///
-/// Does nothing while the bridge still runs, or for bridges whose entities go away on their own.
+/// Does nothing for bridges whose entities go away on their own.
 #[derive(Default)]
 pub struct Teardown(Option<TeardownFn>);
 
@@ -202,13 +208,32 @@ mod tests {
 		assert!(live.last_received.is_some());
 
 		go.send(()).unwrap();
-		assert_eq!(bridge.await.unwrap().unwrap(), live);
+		let end = bridge.await;
+		assert!(end.result.is_ok());
+		assert_eq!(end.stats, live);
+	}
+
+	#[tokio::test]
+	async fn a_failed_bridge_keeps_its_counts() {
+		let bridge = Bridge::spawn(|stats| async move {
+			stats.received();
+			Err(Error::NoVideo("camera".into()))
+		});
+		let end = bridge.await;
+		assert!(matches!(end.result, Err(Error::NoVideo(_))));
+		assert_eq!(end.stats.received, 1);
 	}
 
 	#[tokio::test]
 	async fn abort_cancels_the_task() {
 		let bridge = Bridge::spawn(|_| std::future::pending());
 		bridge.abort();
-		assert!(bridge.await.unwrap_err().is_cancelled());
+		assert!(matches!(bridge.await.result, Err(Error::BridgeAborted)));
+	}
+
+	#[tokio::test]
+	async fn a_panic_ends_the_bridge_with_an_error() {
+		let bridge = Bridge::spawn(|_| async { panic!("boom") });
+		assert!(matches!(bridge.await.result, Err(Error::BridgePanicked(_))));
 	}
 }
