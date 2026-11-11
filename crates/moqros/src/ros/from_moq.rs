@@ -331,14 +331,16 @@ async fn republish_images(
 	let mut meter = RateMeter::new("MoQ -> ROS");
 	loop {
 		match images.next_image().await {
-			Ok(Some(image)) => {
+			Ok(Some(decoded)) => {
 				stats.received();
-				let source = stamp_source == StampSource::Source && images.has_capture_times();
 				let header = Header {
-					stamp: if source { stamp(image.timestamp) } else { now_stamp() },
+					stamp: match (stamp_source, decoded.capture_time) {
+						(StampSource::Source, Some(capture_time)) => stamp(capture_time),
+						_ => now_stamp(),
+					},
 					frame_id: frame_id.or(images.frame_id()).unwrap_or_default().to_string(),
 				};
-				publisher.publish(&image_into_ros(image, header))?;
+				publisher.publish(&image_into_ros(decoded.image, header))?;
 				stats.sent();
 				meter.tick();
 			}

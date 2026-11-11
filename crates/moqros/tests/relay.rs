@@ -129,15 +129,17 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 
 	let mut received = Vec::new();
 	while received.len() < 10 {
-		let image = tokio::time::timeout(Duration::from_secs(5), images.next_image())
+		let decoded = tokio::time::timeout(Duration::from_secs(5), images.next_image())
 			.await??
 			.expect("broadcast ended early");
+		let image = &decoded.image;
+		assert_eq!(decoded.capture_time, Some(image.timestamp), "{codec}");
 		assert_eq!(
 			(image.width, image.height, image.format),
 			(160, 120, PixelFormat::Rgb8),
 			"{codec}"
 		);
-		received.push(image.timestamp);
+		received.push(decoded.timestamp);
 	}
 	assert!(
 		received.windows(2).all(|w| w[0] < w[1]),
@@ -153,7 +155,8 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 	.await??;
 	let image = tokio::time::timeout(Duration::from_secs(5), small.next_image())
 		.await??
-		.expect("broadcast ended early");
+		.expect("broadcast ended early")
+		.image;
 	assert_eq!((image.width, image.height), (80, 60), "{codec}");
 
 	stop_tx.send(()).ok();

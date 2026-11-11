@@ -203,6 +203,19 @@ pub struct VideoFrame {
 	pub data: Bytes,
 }
 
+/// One decoded picture received from a broadcast.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DecodedImage {
+	/// Presentation time relative to the start of the broadcast.
+	pub timestamp: Duration,
+	/// When the picture was captured, in the publisher's clock (e.g. the ROS `header.stamp` of
+	/// the image), if the broadcast's catalog says.
+	pub capture_time: Option<Duration>,
+	/// The picture. Its [`Image::timestamp`] is `capture_time`, or `timestamp` without one.
+	pub image: Image,
+}
+
 /// Reads frames of one video track, always jumping to the newest group so a slow
 /// reader falls back to the live edge instead of accumulating latency.
 pub struct ImageSubscriber {
@@ -225,8 +238,8 @@ impl ImageSubscriber {
 		self.video.catalog().section().frame_id.as_deref()
 	}
 
-	/// Whether the broadcast announces capture times, so that [`VideoFrame::capture_time`] is set
-	/// and [`ImageSubscriber::next_image`] stamps images with them.
+	/// Whether the broadcast announces capture times, so that [`VideoFrame::capture_time`] and
+	/// [`DecodedImage::capture_time`] are set.
 	pub fn has_capture_times(&self) -> bool {
 		self.video.catalog().has_capture_times()
 	}
@@ -259,23 +272,25 @@ impl ImageSubscriber {
 	/// Next decoded image (`rgb8` unless [set otherwise](ImageSubscriber::set_output_format)), or
 	/// `None` once the broadcast ends.
 	///
-	/// Its timestamp is the [capture time](VideoFrame::capture_time) when the broadcast announces
-	/// capture times, and otherwise the presentation time relative to the start of the broadcast.
-	///
 	/// Decoding and color conversion run on tokio's blocking pool, so a large picture doesn't
 	/// stall the other tasks of the runtime.
 	///
 	/// Fails with [`Error::TooLarge`] for a picture above the decoder's
 	/// [`max_pixels`](Decoder::max_pixels).
-	pub async fn next_image(&mut self) -> Result<Option<Image>> {
+	pub async fn next_image(&mut self) -> Result<Option<DecodedImage>> {
 		while let Some(frame) = self.next_frame().await? {
 			let decoder = self.decoder.clone();
-			let timestamp = frame.capture_time.unwrap_or(frame.timestamp);
-			let decoded = tokio::task::spawn_blocking(move || lock(&decoder).decode(&frame.data, timestamp))
+			let (timestamp, capture_time) = (frame.timestamp, frame.capture_time);
+			let stamp = capture_time.unwrap_or(timestamp);
+			let decoded = tokio::task::spawn_blocking(move || lock(&decoder).decode(&frame.data, stamp))
 				.await
 				.map_err(|err| Error::Codec(format!("decoder task failed: {err}")))??;
 			if let Some(image) = decoded {
-				return Ok(Some(image));
+				return Ok(Some(DecodedImage {
+					timestamp,
+					capture_time,
+					image,
+				}));
 			}
 		}
 		Ok(None)
@@ -339,7 +354,7 @@ mod tests {
 			let ran = ran.clone();
 			async move { ran.store(true, Ordering::Relaxed) }
 		});
-		let image = images.next_image().await.unwrap().expect("a decoded image");
+		let image = images.next_image().await.unwrap().expect("a decoded image").image;
 		assert_eq!((image.width, image.height), (64, 48));
 		assert!(ran.load(Ordering::Relaxed), "the other task never ran while decoding");
 	}
@@ -366,16 +381,19 @@ mod tests {
 
 		publisher.publish(&at(1, 100_033)).unwrap();
 		// The subscription starts at the keyframe opening the current group.
-		for millis in [100_000, 100_033] {
-			let image = images.next_image().await.unwrap().expect("a decoded image");
-			assert_eq!(image.timestamp, Duration::from_millis(millis));
+		for (millis, pts) in [(100_000, 0), (100_033, 33)] {
+			let decoded = images.next_image().await.unwrap().expect("a decoded image");
+			assert_eq!(decoded.capture_time, Some(Duration::from_millis(millis)));
+			assert_eq!(decoded.image.timestamp, Duration::from_millis(millis));
+			assert_eq!(decoded.timestamp, Duration::from_millis(pts));
 		}
 
 		// A restarted capture clock and a new frame id reach the subscriber with the next frame.
 		publisher.set_frame_id("left").unwrap();
 		publisher.publish(&at(2, 5_000)).unwrap();
-		let image = images.next_image().await.unwrap().expect("a decoded image");
-		assert_eq!(image.timestamp, Duration::from_millis(5_000));
+		let decoded = images.next_image().await.unwrap().expect("a decoded image");
+		assert_eq!(decoded.capture_time, Some(Duration::from_millis(5_000)));
+		assert!(decoded.timestamp > Duration::from_millis(33));
 		assert_eq!(images.frame_id(), Some("left"));
 	}
 }
