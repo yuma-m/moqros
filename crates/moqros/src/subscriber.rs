@@ -97,7 +97,7 @@ impl Subscriber {
 	pub fn announced(&self, prefix: &str) -> Announcements {
 		Announcements {
 			announced: self.origin.consume().announced(),
-			prefix: prefix.trim_matches('/').to_string(),
+			prefix: crate::normalize_broadcast_name(prefix).to_string(),
 		}
 	}
 
@@ -154,17 +154,12 @@ impl Announcements {
 	pub async fn next(&mut self) -> Option<String> {
 		while let Some(update) = self.announced.next().await {
 			let name = update.prefix.as_str();
-			if update.kind.is_active() && is_under(name, &self.prefix) {
+			if update.kind.is_active() && crate::broadcast_is_under(name, &self.prefix) {
 				return Some(name.to_string());
 			}
 		}
 		None
 	}
-}
-
-/// Whether the broadcast `name` is under `prefix`, by whole path segments.
-fn is_under(name: &str, prefix: &str) -> bool {
-	prefix.is_empty() || name == prefix || name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Which video rendition [`Subscriber::subscribe_images_with`] picks, among those whose codec
@@ -305,16 +300,6 @@ mod tests {
 	async fn subscribe_images(origin: &moq_net::origin::Producer, name: &str) -> ImageSubscriber {
 		let opened = OpenBroadcast::open(origin, name).await.unwrap();
 		images(name, opened, &ImageOptions::default()).await.unwrap()
-	}
-
-	#[test]
-	fn matches_prefixes_by_segment() {
-		assert!(is_under("robots/a/camera", "robots"));
-		assert!(is_under("robots/a/camera", "robots/a"));
-		assert!(is_under("robots", "robots"));
-		assert!(is_under("anything", ""));
-		assert!(!is_under("robots2/camera", "robots"));
-		assert!(!is_under("robot", "robots"));
 	}
 
 	/// Broadcasts already announced, and later ones, come back when under the prefix.

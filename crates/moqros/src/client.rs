@@ -126,7 +126,21 @@ impl Session {
 
 /// Turn a ROS topic into a broadcast name: `/camera/image_raw` -> `camera/image_raw`.
 pub fn broadcast_name_for_topic(topic: &str) -> String {
-	topic.trim_matches('/').to_string()
+	normalize_broadcast_name(topic).to_string()
+}
+
+/// A broadcast name without slashes at either end, the form to compare names in:
+/// `/robots/a/` -> `robots/a`.
+pub fn normalize_broadcast_name(name: &str) -> &str {
+	name.trim_matches('/')
+}
+
+/// Whether the broadcast `name` is under `prefix`, by whole path segments: `robots` covers
+/// `robots/a/camera` and `robots`, but not `robots2/camera`. Slashes at either end of both are
+/// ignored, and an empty prefix covers every name.
+pub fn broadcast_is_under(name: &str, prefix: &str) -> bool {
+	let (name, prefix) = (normalize_broadcast_name(name), normalize_broadcast_name(prefix));
+	prefix.is_empty() || name == prefix || name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -144,6 +158,18 @@ mod tests {
 		assert_eq!(broadcast_name_for_topic("/front/image_raw/"), "front/image_raw");
 		assert_eq!(broadcast_name_for_topic("//image"), "image");
 		assert_eq!(broadcast_name_for_topic("/"), "");
+	}
+
+	#[test]
+	fn matches_prefixes_by_segment() {
+		assert!(broadcast_is_under("robots/a/camera", "robots"));
+		assert!(broadcast_is_under("robots/a/camera", "robots/a"));
+		assert!(broadcast_is_under("robots", "robots"));
+		assert!(broadcast_is_under("anything", ""));
+		assert!(broadcast_is_under("/robots/a/", "/robots/"));
+		assert!(broadcast_is_under("anything", "/"));
+		assert!(!broadcast_is_under("robots2/camera", "robots"));
+		assert!(!broadcast_is_under("robot", "robots"));
 	}
 
 	#[test]

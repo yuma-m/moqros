@@ -112,15 +112,9 @@ pub fn pub_topics(
 				topic: spec.topic,
 			};
 			if topic.format == Format::Video
-				&& let Some(ros_type) = topic
-					.ros_type
-					.as_deref()
-					.filter(|t| ![ROS_IMAGE_TYPE, ROS_COMPRESSED_IMAGE_TYPE].contains(t))
+				&& let Some(ros_type) = &topic.ros_type
 			{
-				bail!(
-					"{}: video needs {ROS_IMAGE_TYPE} or {ROS_COMPRESSED_IMAGE_TYPE} messages, not {ros_type}; use format=json or cdr",
-					topic.topic
-				);
+				check_video_type(&topic.topic, ros_type)?;
 			}
 			ensure!(
 				broadcasts.insert(topic.broadcast.clone()),
@@ -130,6 +124,15 @@ pub fn pub_topics(
 			Ok(topic)
 		})
 		.collect()
+}
+
+/// Fail unless `topic` of type `ros_type` can be published as video.
+pub(crate) fn check_video_type(topic: &str, ros_type: &str) -> anyhow::Result<()> {
+	ensure!(
+		[ROS_IMAGE_TYPE, ROS_COMPRESSED_IMAGE_TYPE].contains(&ros_type),
+		"{topic}: video needs {ROS_IMAGE_TYPE} or {ROS_COMPRESSED_IMAGE_TYPE} messages, not {ros_type}; use format=json or cdr"
+	);
+	Ok(())
 }
 
 /// A broadcast for `moqros-sub`: `BROADCAST[,topic=…][,type=…][,frame_id=…][,stamp=…][,max_height=…][,encoding=…]`.
@@ -236,7 +239,7 @@ pub fn sub_broadcasts(
 			let broadcast = SubBroadcast {
 				topic: spec.topic.or(topic.clone()).unwrap_or_else(|| match single {
 					true => DEFAULT_SUB_TOPIC.to_string(),
-					false => format!("/moqros/{}", spec.broadcast.trim_matches('/')),
+					false => format!("/moqros/{}", moqros::normalize_broadcast_name(&spec.broadcast)),
 				}),
 				ros_type: spec.ros_type.or(ros_type.clone()),
 				frame_id: spec.frame_id.or_else(|| frame_id.map(String::from)),
@@ -287,7 +290,10 @@ impl Discovery {
 			"--topic-template {topic_template:?} has no {{name}}"
 		);
 		let discovery = Self {
-			prefixes: prefixes.iter().map(|p| p.trim_matches('/').to_string()).collect(),
+			prefixes: prefixes
+				.iter()
+				.map(|p| moqros::normalize_broadcast_name(p).to_string())
+				.collect(),
 			topic_template,
 			frame_id,
 			stamp,
@@ -302,13 +308,17 @@ impl Discovery {
 
 	/// Whether the broadcast `name` is under one of the prefixes.
 	pub fn covers(&self, name: &str) -> bool {
-		self.prefixes.iter().any(|prefix| is_under(name, prefix))
+		self.prefixes
+			.iter()
+			.any(|prefix| moqros::broadcast_is_under(name, prefix))
 	}
 
 	/// What to do with the found broadcast `name`, or why it can't be republished. Names come
 	/// from whoever announces the broadcast, so the topic they make must be a plain ROS name.
 	pub fn broadcast(&self, name: &str) -> Result<SubBroadcast, String> {
-		let topic = self.topic_template.replace("{name}", name.trim_matches('/'));
+		let topic = self
+			.topic_template
+			.replace("{name}", moqros::normalize_broadcast_name(name));
 		if !is_ros_topic(&topic) {
 			return Err(format!(
 				"{topic:?} isn't a topic name moqros republishes on (letters, digits, `_` and `/` only)"
@@ -324,13 +334,6 @@ impl Discovery {
 			encoding: self.encoding,
 		})
 	}
-}
-
-/// Whether the broadcast `name` is under `prefix` (without slashes at its ends), by whole path
-/// segments. An empty prefix covers everything.
-fn is_under(name: &str, prefix: &str) -> bool {
-	let name = name.trim_matches('/');
-	prefix.is_empty() || name == prefix || name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether `topic` is an absolute ROS topic name of plain tokens: each a letter or `_` followed
@@ -355,7 +358,7 @@ pub fn check_no_loop(
 	broadcasts: &[SubBroadcast],
 	discovery: Option<&Discovery>,
 ) -> anyhow::Result<()> {
-	let name = |name: &str| name.trim_matches('/').to_string();
+	let name = moqros::normalize_broadcast_name;
 	for topic in topics {
 		if let Some(discovery) = discovery {
 			ensure!(

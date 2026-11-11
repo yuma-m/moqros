@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail, ensure};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use moqros::ros::{BitrateControl, Bridge, MoqToRos, QosProfile, ROS_COMPRESSED_IMAGE_TYPE, ROS_IMAGE_TYPE, r2r};
+use moqros::ros::{BitrateControl, Bridge, MoqToRos, QosProfile, ROS_COMPRESSED_IMAGE_TYPE, r2r};
 use tokio::task::JoinError;
 
 use crate::args::Format;
 use crate::diagnostics::Diagnostics;
 use crate::runtime::{SharedNode, Spinner, shutdown_signal, spawn_spinner};
-use crate::spec::{Discovery, PubTopic, SubBroadcast};
+use crate::spec::{Discovery, PubTopic, SubBroadcast, check_video_type};
 
 /// What a bridge node does: ROS topics to publish to the relay, and broadcasts to republish
 /// on ROS.
@@ -97,7 +97,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 	// Broadcasts and topics taken, so a found broadcast doesn't take one again.
 	let mut known_broadcasts: HashSet<String> = broadcasts
 		.iter()
-		.map(|b| b.broadcast.trim_matches('/').to_string())
+		.map(|b| moqros::normalize_broadcast_name(&b.broadcast).to_string())
 		.collect();
 	let mut used_topics: HashSet<String> = broadcasts
 		.iter()
@@ -183,7 +183,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			}
 			Some(name) = next_announcement(&mut announcements) => {
 				let Some(discovery) = &discovery else { continue };
-				if !discovery.covers(&name) || !known_broadcasts.insert(name.trim_matches('/').to_string()) {
+				if !discovery.covers(&name) || !known_broadcasts.insert(moqros::normalize_broadcast_name(&name).to_string()) {
 					continue;
 				}
 				match discovery.broadcast(&name) {
@@ -462,14 +462,11 @@ fn start_pub_topic(
 	};
 	let bridge = match topic.format.data() {
 		None => {
+			check_video_type(&topic.topic, &ros_type)?;
 			let images = publisher.create_image_broadcast(&topic.broadcast, video.clone())?;
 			match ros_type.as_str() {
-				ROS_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?,
 				ROS_COMPRESSED_IMAGE_TYPE => moqros::ros::spawn_ros_to_moq_compressed(node, &topic.topic, qos, images)?,
-				other => bail!(
-					"{}: video needs {ROS_IMAGE_TYPE} or {ROS_COMPRESSED_IMAGE_TYPE} messages, not {other}; use format=json or cdr",
-					topic.topic
-				),
+				_ => moqros::ros::spawn_ros_to_moq(node, &topic.topic, qos, images)?,
 			}
 		}
 		Some(format) => {
