@@ -4,9 +4,9 @@
 
 use anyhow::ensure;
 use clap::Parser;
-use moqros::ros::StampSource;
 use moqros_cli::{
-	Bridges, BroadcastSpec, DiagnosticsArgs, EncoderArgs, Format, QosArgs, Relay, RelayArgs, TopicSpec, init_logging,
+	Bridges, BroadcastSpec, DiagnosticsArgs, EncoderArgs, Format, QosArgs, Relay, RelayArgs, RepublishArgs, TopicSpec,
+	init_logging,
 };
 
 #[derive(Debug, Parser)]
@@ -33,23 +33,8 @@ struct Cli {
 	#[arg(long, default_value_t = moqros::DataMode::default())]
 	mode: moqros::DataMode,
 
-	/// `header.frame_id` of the republished images; defaults to the one the publisher announces.
-	#[arg(long)]
-	frame_id: Option<String>,
-
-	/// `header.stamp` of the republished images: `source` uses the capture time the publisher
-	/// announces (falling back to the receive time), `receive` the local receive time.
-	#[arg(long, default_value_t = StampSource::default())]
-	stamp: StampSource,
-
-	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
-	/// the largest.
-	#[arg(long)]
-	max_height: Option<u32>,
-
-	/// Pixel encoding of the republished images: `rgb8`, `bgr8`, `rgba8`, `bgra8` or `mono8`.
-	#[arg(long, default_value = "rgb8", value_parser = moqros_cli::parse_encoding)]
-	encoding: moqros::PixelFormat,
+	#[command(flatten)]
+	republish: RepublishArgs,
 
 	#[command(flatten)]
 	encoder: EncoderArgs,
@@ -78,15 +63,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let broadcasts = match cli.broadcast.is_empty() {
 		true => Vec::new(),
-		false => moqros_cli::sub_broadcasts(
-			cli.broadcast,
-			None,
-			None,
-			cli.frame_id.as_deref(),
-			cli.stamp,
-			cli.max_height,
-			cli.encoding,
-		)?,
+		false => moqros_cli::sub_broadcasts(cli.broadcast, None, None, &cli.republish.options())?,
 	};
 	moqros_cli::check_no_loop(&topics, &broadcasts, None)?;
 

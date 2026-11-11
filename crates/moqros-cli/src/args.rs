@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Args, ValueEnum};
-use moqros::ros::QosProfile;
+use moqros::ros::{QosProfile, StampSource};
 
+use crate::spec::{RepublishOptions, parse_encoding};
 use crate::url::{insecurity, redact_url};
 
 /// Relay connection flags.
@@ -166,6 +167,39 @@ impl EncoderArgs {
 		moqros::ImageBroadcastSettings {
 			encoder: self.settings(),
 			renditions: self.renditions.clone(),
+		}
+	}
+}
+
+/// How MoQ -> ROS bridges republish video.
+#[derive(Debug, Clone, Args)]
+pub struct RepublishArgs {
+	/// `header.frame_id` of the republished images; defaults to the one the publisher announces.
+	#[arg(long)]
+	pub frame_id: Option<String>,
+
+	/// `header.stamp` of the republished images: `source` uses the capture time the publisher
+	/// announces (falling back to the receive time), `receive` the local receive time.
+	#[arg(long, default_value_t = StampSource::default())]
+	pub stamp: StampSource,
+
+	/// Pick the largest video rendition at most this tall (the smallest if none is), instead of
+	/// the largest.
+	#[arg(long)]
+	pub max_height: Option<u32>,
+
+	/// Pixel encoding of the republished images: `rgb8`, `bgr8`, `rgba8`, `bgra8` or `mono8`.
+	#[arg(long, default_value = "rgb8", value_parser = parse_encoding)]
+	pub encoding: moqros::PixelFormat,
+}
+
+impl RepublishArgs {
+	pub fn options(&self) -> RepublishOptions {
+		RepublishOptions {
+			frame_id: self.frame_id.clone(),
+			stamp: self.stamp,
+			max_height: self.max_height,
+			encoding: self.encoding,
 		}
 	}
 }
