@@ -93,6 +93,9 @@
 //!   which may be sim time). It is republished whenever the timeline re-anchors. When the
 //!   capture times are wall-clock times since 2020, hang's `clock` carries the same origin.
 //!   Data broadcasts published with [`DataPublisher::publish_at`] use it.
+//! - **Version:** the `moqros` section carries `version` (1 now; a section without one is
+//!   version 1). It only goes up when a field changes meaning, and a subscriber ignores a section
+//!   newer than it understands.
 
 // On docs.rs, label feature-gated items with the feature they need.
 #![cfg_attr(docsrs, feature(doc_cfg))]

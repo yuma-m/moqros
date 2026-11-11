@@ -43,6 +43,11 @@ pub(crate) type MoqrosCatalog = Catalog<Map<String, Value>>;
 /// Name of the root section [`MoqrosSection`] lives in.
 const SECTION_KEY: &str = "moqros";
 
+/// Version of the `moqros` section this build writes and reads, in its `version` field. It only
+/// goes up when a field changes meaning; new fields don't raise it. A section without one is
+/// version 1.
+const SECTION_VERSION: u64 = 1;
+
 /// Longest `frameId` accepted from a catalog.
 const MAX_FRAME_ID_LEN: usize = 256;
 
@@ -63,6 +68,15 @@ impl MoqrosSection {
 		let Some(section) = catalog.ext.get(SECTION_KEY).and_then(Value::as_object) else {
 			return Self::default();
 		};
+		let version = section.get("version").and_then(Value::as_u64).unwrap_or(1);
+		if version > SECTION_VERSION {
+			tracing::warn!(
+				version,
+				supported = SECTION_VERSION,
+				"ignoring the catalog's moqros section: it is newer than this build understands"
+			);
+			return Self::default();
+		}
 		Self {
 			capture_origin: section.get("captureOrigin").and_then(Value::as_i64),
 			frame_id: section
@@ -77,17 +91,14 @@ impl MoqrosSection {
 	/// wall-clock time hang can represent.
 	pub(crate) fn write(&self, catalog: &mut MoqrosCatalog) {
 		let mut section = Map::new();
+		section.insert("version".into(), SECTION_VERSION.into());
 		if let Some(origin) = self.capture_origin {
 			section.insert("captureOrigin".into(), origin.into());
 		}
 		if let Some(frame_id) = &self.frame_id {
 			section.insert("frameId".into(), frame_id.clone().into());
 		}
-		if section.is_empty() {
-			catalog.ext.remove(SECTION_KEY);
-		} else {
-			catalog.ext.insert(SECTION_KEY.into(), section.into());
-		}
+		catalog.ext.insert(SECTION_KEY.into(), section.into());
 		catalog.clock = self.capture_origin.and_then(hang_clock);
 	}
 
@@ -483,8 +494,32 @@ mod tests {
 		] {
 			let json = data(&settings, &section).unwrap().to_json().unwrap();
 			let catalog: MoqrosCatalog = serde_json::from_str(&json).unwrap();
+			assert_eq!(catalog.ext[SECTION_KEY]["version"], SECTION_VERSION, "{json}");
 			assert_eq!(MoqrosSection::read(&catalog), section, "{json}");
 		}
+	}
+
+	/// A section without a version is version 1; one from a newer moqros is ignored, since its
+	/// fields may mean something else.
+	#[test]
+	fn moqros_section_versions() {
+		let read = |section: serde_json::Value| MoqrosSection::read(&catalog(serde_json::json!({ "moqros": section })));
+		let expected = MoqrosSection {
+			capture_origin: Some(12),
+			frame_id: Some("cam".into()),
+		};
+		assert_eq!(
+			read(serde_json::json!({ "captureOrigin": 12, "frameId": "cam" })),
+			expected
+		);
+		assert_eq!(
+			read(serde_json::json!({ "version": 1, "captureOrigin": 12, "frameId": "cam" })),
+			expected
+		);
+		assert_eq!(
+			read(serde_json::json!({ "version": 2, "captureOrigin": 12, "frameId": "cam" })),
+			MoqrosSection::default()
+		);
 	}
 
 	#[test]
