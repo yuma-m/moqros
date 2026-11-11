@@ -1,6 +1,8 @@
 //! Publish images to a MoQ relay as hang (WebCodecs-compatible) VP8, H.264, or AV1 broadcasts,
 //! and other messages as hang data broadcasts.
 
+use std::time::Duration;
+
 use hang::catalog::PRIORITY;
 use hang::moq_net;
 
@@ -131,18 +133,6 @@ pub struct ImagePublisher {
 	clock: StreamClock,
 }
 
-/// One rendition of an [`ImagePublisher`].
-struct VideoTrack {
-	name: String,
-	writer: GroupWriter,
-	encoder: Encoder,
-	/// The height to scale images down to; `None` for the full-size rendition.
-	height: Option<u32>,
-	/// What the catalog announces; `None` while nothing was sent yet (or since the rendition
-	/// was last skipped).
-	rendition: Option<Rendition>,
-}
-
 impl ImagePublisher {
 	pub(crate) fn new(
 		origin: &moq_net::origin::Producer,
@@ -153,6 +143,7 @@ impl ImagePublisher {
 		let broadcast = BroadcastWriter::create(origin, name)?;
 		let track = |track_name: String, settings: EncoderSettings, height| -> Result<VideoTrack> {
 			Ok(VideoTrack {
+				broadcast: name.to_string(),
 				writer: GroupWriter::new(
 					broadcast.create_track(&track_name, hang::container::track_info(PRIORITY.video))?,
 				),
@@ -204,18 +195,13 @@ impl ImagePublisher {
 
 	/// The encoder settings of the full-size rendition, with the bitrate last set.
 	pub fn settings(&self) -> &EncoderSettings {
-		self.tracks[0].encoder.settings()
+		self.main().encoder.settings()
 	}
 
 	/// Aim for `bitrate` bit/s in the full-size rendition from the next image on; see
 	/// [`Encoder::set_bitrate`]. The catalog announces it from the next keyframe.
 	pub fn set_bitrate(&mut self, bitrate: u32) {
-		let main = &mut self.tracks[0];
-		if bitrate != main.encoder.settings().bitrate {
-			main.encoder.set_bitrate(bitrate);
-			// Republished with the next keyframe.
-			main.rendition = None;
-		}
+		self.main_mut().set_bitrate(bitrate);
 	}
 
 	/// Announce `frame_id` (e.g. the ROS `header.frame_id` of the images) in the catalog, so
@@ -241,30 +227,29 @@ impl ImagePublisher {
 		// Every rendition is encoded before the catalog is updated, so a new subscriber's first
 		// catalog lists all of them.
 		let mut frames = Vec::with_capacity(self.tracks.len());
-		for index in 0..self.tracks.len() {
-			let frame = match self.tracks[index].height {
-				None => self.tracks[index].encoder.encode_yuv(&yuv, image.timestamp)?,
-				Some(height) if (height as usize) < yuv.height() => {
-					let scaled = yuv.downscale(scaled_width(yuv.width(), yuv.height(), height), height as usize);
-					self.tracks[index].encoder.encode_yuv(&scaled, image.timestamp)?
+		for track in &mut self.tracks {
+			let frame = match track.encode(&yuv, image.timestamp)? {
+				Encoded::Frame(frame) => {
+					stale |= track.update_rendition(&frame);
+					Some(frame)
 				}
-				// No larger than the images: drop the rendition from the catalog until they grow.
-				Some(_) => {
-					stale |= self.tracks[index].rendition.take().is_some();
-					continue;
+				Encoded::Dropped => None,
+				// Drop the rendition from the catalog until the images grow.
+				Encoded::Skipped => {
+					stale |= track.rendition.take().is_some();
+					None
 				}
 			};
-			if let Some(frame) = frame {
-				stale |= self.update_rendition(index, &frame);
-				frames.push((index, frame));
-			}
+			frames.push(frame);
 		}
 		if stale {
 			self.publish_catalog()?;
 		}
-		let sent = frames.first().is_some_and(|(index, _)| *index == 0);
-		for (index, frame) in frames {
-			self.write(index, &frame, pts)?;
+		let sent = frames.first().is_some_and(Option::is_some);
+		for (track, frame) in self.tracks.iter_mut().zip(&frames) {
+			if let Some(frame) = frame {
+				track.write(frame, pts)?;
+			}
 		}
 		Ok(sent)
 	}
@@ -274,10 +259,18 @@ impl ImagePublisher {
 	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<()> {
 		let pts = self.clock.micros(frame.timestamp);
 		let stale = self.update_capture_origin();
-		if self.update_rendition(0, frame) || stale {
+		if self.main_mut().update_rendition(frame) || stale {
 			self.publish_catalog()?;
 		}
-		self.write(0, frame, pts)
+		self.main_mut().write(frame, pts)
+	}
+
+	fn main(&self) -> &VideoTrack {
+		&self.tracks[0]
+	}
+
+	fn main_mut(&mut self) -> &mut VideoTrack {
+		&mut self.tracks[0]
 	}
 
 	/// Announce the capture time of timestamp 0 from now on, returning whether that changes the
@@ -287,63 +280,6 @@ impl ImagePublisher {
 		let changed = origin != self.section.capture_origin;
 		self.section.capture_origin = origin;
 		changed
-	}
-
-	/// Announce what the keyframe `frame` of the track at `index` carries from now on, returning
-	/// whether that changes the catalog.
-	fn update_rendition(&mut self, index: usize, frame: &EncodedFrame) -> bool {
-		if !frame.keyframe {
-			return false;
-		}
-		let rendition = Rendition::from(frame);
-		if self.tracks[index].rendition.as_ref() == Some(&rendition) {
-			return false;
-		}
-		tracing::info!(
-			broadcast = %self.name(),
-			track = self.tracks[index].name,
-			codec = %rendition.codec,
-			width = rendition.width,
-			height = rendition.height,
-			"new video rendition"
-		);
-		self.tracks[index].rendition = Some(rendition);
-		true
-	}
-
-	/// Write `frame` at stream time `pts` into the track at `index`, whose catalog entry is
-	/// up to date.
-	fn write(&mut self, index: usize, frame: &EncodedFrame, pts: u64) -> Result<()> {
-		let name = self.broadcast.name().to_string();
-		let track = &mut self.tracks[index];
-		if frame.keyframe {
-			track.writer.start_group()?;
-		} else if track.writer.is_open() && !track.writer.fits(frame.data.len()) {
-			// moq-net would abort the group on this write. Close it and drop frames
-			// until the next keyframe opens a new one.
-			tracing::warn!(
-				broadcast = name,
-				track = track.name,
-				"video group is full; raise the bitrate budget or shorten the keyframe interval"
-			);
-			track.writer.finish_group()?;
-		}
-
-		// Nothing decodable can be sent until the first keyframe opens a group.
-		if !track.writer.is_open() {
-			track.encoder.force_keyframe();
-			return Ok(());
-		}
-
-		track.writer.write_container(&hang::container::Frame {
-			timestamp: moq_net::Timestamp::from_micros(pts).map_err(|_| Error::Timestamp)?,
-			payload: frame.data.clone(),
-		})?;
-		// Start the next group early, so a long keyframe interval doesn't fill this one.
-		if track.writer.nearly_full() {
-			track.encoder.force_keyframe();
-		}
-		Ok(())
 	}
 
 	/// Publish the catalog of the renditions sent so far, once there is one.
@@ -361,6 +297,106 @@ impl ImagePublisher {
 	}
 }
 
+/// One rendition of an [`ImagePublisher`].
+struct VideoTrack {
+	/// Name of the broadcast, for logs.
+	broadcast: String,
+	name: String,
+	writer: GroupWriter,
+	encoder: Encoder,
+	/// The height to scale images down to; `None` for the full-size rendition.
+	height: Option<u32>,
+	/// What the catalog announces; `None` while nothing was sent yet (or since the rendition
+	/// was last skipped).
+	rendition: Option<Rendition>,
+}
+
+/// What a [`VideoTrack`] made of one image.
+enum Encoded {
+	Frame(EncodedFrame),
+	/// The encoder dropped the image.
+	Dropped,
+	/// The images are no taller than the rendition, so it isn't sent.
+	Skipped,
+}
+
+impl VideoTrack {
+	fn set_bitrate(&mut self, bitrate: u32) {
+		if bitrate != self.encoder.settings().bitrate {
+			self.encoder.set_bitrate(bitrate);
+			// Republished with the next keyframe.
+			self.rendition = None;
+		}
+	}
+
+	/// Encode `yuv`, scaled down to this rendition's height.
+	fn encode(&mut self, yuv: &I420, timestamp: Duration) -> Result<Encoded> {
+		let frame = match self.height {
+			None => self.encoder.encode_yuv(yuv, timestamp)?,
+			Some(height) if (height as usize) < yuv.height() => {
+				let scaled = yuv.downscale(scaled_width(yuv.width(), yuv.height(), height), height as usize);
+				self.encoder.encode_yuv(&scaled, timestamp)?
+			}
+			Some(_) => return Ok(Encoded::Skipped),
+		};
+		Ok(frame.map_or(Encoded::Dropped, Encoded::Frame))
+	}
+
+	/// Announce what the keyframe `frame` carries from now on, returning whether that changes
+	/// the catalog.
+	fn update_rendition(&mut self, frame: &EncodedFrame) -> bool {
+		if !frame.keyframe {
+			return false;
+		}
+		let rendition = Rendition::from(frame);
+		if self.rendition.as_ref() == Some(&rendition) {
+			return false;
+		}
+		tracing::info!(
+			broadcast = self.broadcast,
+			track = self.name,
+			codec = %rendition.codec,
+			width = rendition.width,
+			height = rendition.height,
+			"new video rendition"
+		);
+		self.rendition = Some(rendition);
+		true
+	}
+
+	/// Write `frame` at stream time `pts`, once the catalog entry is up to date.
+	fn write(&mut self, frame: &EncodedFrame, pts: u64) -> Result<()> {
+		if frame.keyframe {
+			self.writer.start_group()?;
+		} else if self.writer.is_open() && !self.writer.fits(frame.data.len()) {
+			// moq-net would abort the group on this write. Close it and drop frames
+			// until the next keyframe opens a new one.
+			tracing::warn!(
+				broadcast = self.broadcast,
+				track = self.name,
+				"video group is full; raise the bitrate budget or shorten the keyframe interval"
+			);
+			self.writer.finish_group()?;
+		}
+
+		// Nothing decodable can be sent until the first keyframe opens a group.
+		if !self.writer.is_open() {
+			self.encoder.force_keyframe();
+			return Ok(());
+		}
+
+		self.writer.write_container(&hang::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(pts).map_err(|_| Error::Timestamp)?,
+			payload: frame.data.clone(),
+		})?;
+		// Start the next group early, so a long keyframe interval doesn't fill this one.
+		if self.writer.nearly_full() {
+			self.encoder.force_keyframe();
+		}
+		Ok(())
+	}
+}
+
 /// The even width of a rendition `height` pixels tall of a `width`x`full_height` picture.
 fn scaled_width(width: usize, full_height: usize, height: u32) -> usize {
 	(width * height as usize / full_height).max(2) & !1
@@ -368,8 +404,6 @@ fn scaled_width(width: usize, full_height: usize, height: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
-
 	use bytes::Bytes;
 	use hang::catalog::{Catalog, VideoCodec};
 
@@ -395,7 +429,7 @@ mod tests {
 			publisher
 				.publish(&crate::codec::tests::test_pattern(16, 16, t))
 				.unwrap();
-			keyframes += usize::from(publisher.tracks[0].writer.frames() == 1);
+			keyframes += usize::from(publisher.main().writer.frames() == 1);
 		}
 		assert_eq!(keyframes, 2);
 	}
@@ -419,9 +453,9 @@ mod tests {
 		for n in 0..limit + 10 {
 			publisher.publish_encoded(&frame(n, n == 0)).unwrap();
 		}
-		assert!(!publisher.tracks[0].writer.is_open());
+		assert!(!publisher.main().writer.is_open());
 		publisher.publish_encoded(&frame(limit + 10, true)).unwrap();
-		assert_eq!(publisher.tracks[0].writer.frames(), 1);
+		assert_eq!(publisher.main().writer.frames(), 1);
 	}
 
 	/// Smaller renditions are encoded from scaled images into tracks of their own, and listed in
