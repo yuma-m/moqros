@@ -159,7 +159,7 @@ mod tests {
 	use clap::CommandFactory;
 
 	use super::*;
-	use crate::{EncoderArgs, Format, QosArgs, RelayArgs, TopicSpec};
+	use crate::{EncoderArgs, Format, QosArgs, RelayArgs, RepublishArgs, TopicSpec};
 
 	fn strip(args: &[&str]) -> Vec<String> {
 		strip_ros_args(args.iter().map(|arg| arg.to_string()))
@@ -352,6 +352,35 @@ mod tests {
 		let cli: EncoderCli = parse(&["--hw", "require"], &params).unwrap();
 		assert_eq!(cli.encoder.hw, moqros::Hardware::Require);
 		assert!(parse::<EncoderCli>(&["--hw", "gpu"], &[]).is_err());
+	}
+
+	#[derive(Debug, Parser)]
+	struct RepublishCli {
+		#[command(flatten)]
+		republish: RepublishArgs,
+	}
+
+	#[test]
+	fn republish_params_fill_flags() {
+		let params = [
+			("frame_id", string("camera")),
+			("stamp", string("receive")),
+			("max_height", ParameterValue::Integer(480)),
+			("encoding", string("bgr8")),
+		];
+		let options = parse::<RepublishCli>(&[], &params).unwrap().republish.options();
+		assert_eq!(
+			options,
+			crate::RepublishOptions {
+				frame_id: Some("camera".into()),
+				stamp: moqros::ros::StampSource::Receive,
+				max_height: Some(480),
+				encoding: moqros::PixelFormat::Bgr8,
+			}
+		);
+		let cli: RepublishCli = parse(&["--max-height", "360"], &params).unwrap();
+		assert_eq!(cli.republish.max_height, Some(360));
+		assert!(parse::<RepublishCli>(&[], &[("encoding", string("yuyv"))]).is_err());
 	}
 
 	#[test]

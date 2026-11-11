@@ -311,10 +311,8 @@ async fn subscribe_after(
 	delay: Duration,
 ) -> (MoqToRos, SubBroadcast) {
 	tokio::time::sleep(delay).await;
-	let mut options = moqros::ImageOptions::default();
-	options.max_height = broadcast.max_height;
 	(
-		MoqToRos::subscribe_with(subscriber, &broadcast.broadcast, options).await,
+		MoqToRos::subscribe_with(subscriber, &broadcast.broadcast, broadcast.image_options()).await,
 		broadcast,
 	)
 }
@@ -495,15 +493,7 @@ fn spawn_sub_broadcast(
 	broadcast: &SubBroadcast,
 	qos: QosProfile,
 ) -> moqros::Result<Bridge> {
-	let target = moqros::ros::RosTarget {
-		topic: broadcast.topic.clone(),
-		qos,
-		frame_id: broadcast.frame_id.clone(),
-		stamp: broadcast.stamp,
-		encoding: broadcast.encoding,
-		ros_type: broadcast.ros_type.clone(),
-	};
-	let bridge = ready.spawn(node, target)?;
+	let bridge = ready.spawn(node, broadcast.target(qos))?;
 	tracing::info!(
 		broadcast = broadcast.broadcast,
 		topic = broadcast.topic,

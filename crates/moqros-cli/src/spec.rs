@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{bail, ensure};
 use clap::ValueEnum;
-use moqros::ros::{ROS_COMPRESSED_IMAGE_TYPE, ROS_IMAGE_TYPE, StampSource};
+use moqros::ros::{QosProfile, ROS_COMPRESSED_IMAGE_TYPE, ROS_IMAGE_TYPE, RosTarget, StampSource};
 
 use crate::args::Format;
 
@@ -195,6 +195,41 @@ pub fn parse_encoding(value: &str) -> Result<moqros::PixelFormat, String> {
 	}
 }
 
+/// How a broadcast's video is republished on ROS: from the flags, or a broadcast's options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepublishOptions {
+	/// `header.frame_id` of the images; the publisher's when `None`.
+	pub frame_id: Option<String>,
+	pub stamp: StampSource,
+	/// The tallest video rendition to pick; the largest when `None`.
+	pub max_height: Option<u32>,
+	/// Pixel encoding of the images.
+	pub encoding: moqros::PixelFormat,
+}
+
+impl Default for RepublishOptions {
+	fn default() -> Self {
+		Self {
+			frame_id: None,
+			stamp: StampSource::default(),
+			max_height: None,
+			encoding: moqros::PixelFormat::Rgb8,
+		}
+	}
+}
+
+impl RepublishOptions {
+	/// These options, with the ones `spec` gives instead.
+	fn overridden_by(&self, spec: &BroadcastSpec) -> Self {
+		Self {
+			frame_id: spec.frame_id.clone().or_else(|| self.frame_id.clone()),
+			stamp: spec.stamp.unwrap_or(self.stamp),
+			max_height: spec.max_height.or(self.max_height),
+			encoding: spec.encoding.unwrap_or(self.encoding),
+		}
+	}
+}
+
 /// What `moqros-sub` does with one broadcast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubBroadcast {
@@ -202,29 +237,41 @@ pub struct SubBroadcast {
 	pub topic: String,
 	/// Taken from the catalog when `None`.
 	pub ros_type: Option<String>,
-	/// The publisher's when `None`.
-	pub frame_id: Option<String>,
-	pub stamp: StampSource,
-	/// The tallest video rendition to pick; the largest when `None`.
-	pub max_height: Option<u32>,
-	/// Pixel encoding of republished images.
-	pub encoding: moqros::PixelFormat,
+	pub options: RepublishOptions,
+}
+
+impl SubBroadcast {
+	/// Which video rendition to subscribe to.
+	pub fn image_options(&self) -> moqros::ImageOptions {
+		let mut options = moqros::ImageOptions::default();
+		options.max_height = self.options.max_height;
+		options
+	}
+
+	/// The ROS topic to republish on, with `qos`.
+	pub fn target(&self, qos: QosProfile) -> RosTarget {
+		RosTarget {
+			topic: self.topic.clone(),
+			qos,
+			frame_id: self.options.frame_id.clone(),
+			stamp: self.options.stamp,
+			ros_type: self.ros_type.clone(),
+			encoding: self.options.encoding,
+		}
+	}
 }
 
 /// Topic of a lone broadcast that neither `topic=` nor `--topic` names.
 pub const DEFAULT_SUB_TOPIC: &str = "/moqros/image";
 
-/// Fill in each broadcast's options from the flags. `topic` and `ros_type` name one
-/// broadcast, so they need exactly one. Without either `topic=` or `--topic`, a lone
+/// Fill in each broadcast's options from the flags: `options` apply to every broadcast, while
+/// `topic` and `ros_type` name one broadcast, so they need exactly one. Without either `topic=` or `--topic`, a lone
 /// broadcast goes to [`DEFAULT_SUB_TOPIC`], and each of several to `/moqros/<broadcast>`.
 pub fn sub_broadcasts(
 	specs: Vec<BroadcastSpec>,
 	topic: Option<String>,
 	ros_type: Option<String>,
-	frame_id: Option<&str>,
-	stamp: StampSource,
-	max_height: Option<u32>,
-	encoding: moqros::PixelFormat,
+	options: &RepublishOptions,
 ) -> anyhow::Result<Vec<SubBroadcast>> {
 	ensure!(!specs.is_empty(), "no broadcast to subscribe to");
 	let single = specs.len() == 1;
@@ -236,16 +283,14 @@ pub fn sub_broadcasts(
 	specs
 		.into_iter()
 		.map(|spec| {
+			let options = options.overridden_by(&spec);
 			let broadcast = SubBroadcast {
 				topic: spec.topic.or(topic.clone()).unwrap_or_else(|| match single {
 					true => DEFAULT_SUB_TOPIC.to_string(),
 					false => format!("/moqros/{}", moqros::normalize_broadcast_name(&spec.broadcast)),
 				}),
+				options,
 				ros_type: spec.ros_type.or(ros_type.clone()),
-				frame_id: spec.frame_id.or_else(|| frame_id.map(String::from)),
-				stamp: spec.stamp.unwrap_or(stamp),
-				max_height: spec.max_height.or(max_height),
-				encoding: spec.encoding.unwrap_or(encoding),
 				broadcast: spec.broadcast,
 			};
 			ensure!(
@@ -265,11 +310,7 @@ pub struct Discovery {
 	pub prefixes: Vec<String>,
 	/// The topic of a found broadcast, with `{name}` standing for the broadcast name.
 	pub topic_template: String,
-	/// The publisher's when `None`.
-	pub frame_id: Option<String>,
-	pub stamp: StampSource,
-	pub max_height: Option<u32>,
-	pub encoding: moqros::PixelFormat,
+	pub options: RepublishOptions,
 }
 
 /// Default of [`Discovery::topic_template`].
@@ -277,14 +318,7 @@ pub const DEFAULT_TOPIC_TEMPLATE: &str = "/moqros/{name}";
 
 impl Discovery {
 	/// Check the template on the way in.
-	pub fn new(
-		prefixes: Vec<String>,
-		topic_template: String,
-		frame_id: Option<String>,
-		stamp: StampSource,
-		max_height: Option<u32>,
-		encoding: moqros::PixelFormat,
-	) -> anyhow::Result<Self> {
+	pub fn new(prefixes: Vec<String>, topic_template: String, options: RepublishOptions) -> anyhow::Result<Self> {
 		ensure!(
 			topic_template.contains("{name}"),
 			"--topic-template {topic_template:?} has no {{name}}"
@@ -295,10 +329,7 @@ impl Discovery {
 				.map(|p| moqros::normalize_broadcast_name(p).to_string())
 				.collect(),
 			topic_template,
-			frame_id,
-			stamp,
-			max_height,
-			encoding,
+			options,
 		};
 		if let Err(err) = discovery.broadcast("name") {
 			bail!("--topic-template {:?}: {err}", discovery.topic_template);
@@ -328,10 +359,7 @@ impl Discovery {
 			broadcast: name.to_string(),
 			topic,
 			ros_type: None,
-			frame_id: self.frame_id.clone(),
-			stamp: self.stamp,
-			max_height: self.max_height,
-			encoding: self.encoding,
+			options: self.options.clone(),
 		})
 	}
 }
@@ -542,16 +570,7 @@ mod tests {
 		};
 		let broadcasts = |specs: &[&str]| {
 			let specs = specs.iter().map(|s| s.parse::<BroadcastSpec>().unwrap()).collect();
-			sub_broadcasts(
-				specs,
-				None,
-				None,
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8,
-			)
-			.unwrap()
+			sub_broadcasts(specs, None, None, &RepublishOptions::default()).unwrap()
 		};
 
 		let odom = topics(&["/odom,broadcast=robot/odom"]);
@@ -574,18 +593,7 @@ mod tests {
 		let topics = |broadcasts: Vec<SubBroadcast>| broadcasts.into_iter().map(|b| b.topic).collect::<Vec<_>>();
 
 		assert_eq!(
-			topics(
-				sub_broadcasts(
-					specs(&["image_raw"]),
-					None,
-					None,
-					None,
-					StampSource::Source,
-					None,
-					moqros::PixelFormat::Rgb8
-				)
-				.unwrap()
-			),
+			topics(sub_broadcasts(specs(&["image_raw"]), None, None, &RepublishOptions::default()).unwrap()),
 			[DEFAULT_SUB_TOPIC]
 		);
 		assert_eq!(
@@ -594,10 +602,7 @@ mod tests {
 					specs(&["image_raw"]),
 					Some("/x".into()),
 					None,
-					None,
-					StampSource::Source,
-					None,
-					moqros::PixelFormat::Rgb8
+					&RepublishOptions::default()
 				)
 				.unwrap()
 			),
@@ -611,29 +616,23 @@ mod tests {
 			]),
 			None,
 			None,
-			Some("camera"),
-			StampSource::Source,
-			Some(480),
-			moqros::PixelFormat::Bgr8,
+			&RepublishOptions {
+				frame_id: Some("camera".into()),
+				stamp: StampSource::Source,
+				max_height: Some(480),
+				encoding: moqros::PixelFormat::Bgr8,
+			},
 		)
 		.unwrap();
-		assert_eq!(broadcasts[0].frame_id.as_deref(), Some("camera"));
-		assert_eq!(broadcasts[0].stamp, StampSource::Source);
-		assert_eq!(broadcasts[2].frame_id.as_deref(), Some("imu"));
-		assert_eq!(broadcasts[2].stamp, StampSource::Receive);
-		assert_eq!(broadcasts[2].max_height, Some(480));
-		assert_eq!(broadcasts[2].encoding, moqros::PixelFormat::Bgr8);
+		assert_eq!(broadcasts[0].options.frame_id.as_deref(), Some("camera"));
+		assert_eq!(broadcasts[0].options.stamp, StampSource::Source);
+		assert_eq!(broadcasts[2].options.frame_id.as_deref(), Some("imu"));
+		assert_eq!(broadcasts[2].options.stamp, StampSource::Receive);
+		assert_eq!(broadcasts[2].options.max_height, Some(480));
+		assert_eq!(broadcasts[2].options.encoding, moqros::PixelFormat::Bgr8);
 		assert_eq!(
-			sub_broadcasts(
-				specs(&["image_raw"]),
-				None,
-				None,
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
-			)
-			.unwrap()[0]
+			sub_broadcasts(specs(&["image_raw"]), None, None, &RepublishOptions::default()).unwrap()[0]
+				.options
 				.frame_id,
 			None
 		);
@@ -647,10 +646,7 @@ mod tests {
 				specs(&["a", "b"]),
 				Some("/x".into()),
 				None,
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
+				&RepublishOptions::default()
 			)
 			.is_err()
 		);
@@ -659,10 +655,7 @@ mod tests {
 				specs(&["a", "b"]),
 				None,
 				Some("t/msg/T".into()),
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
+				&RepublishOptions::default()
 			)
 			.is_err()
 		);
@@ -671,10 +664,7 @@ mod tests {
 				specs(&["a,topic=/x", "b,topic=/x"]),
 				None,
 				None,
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
+				&RepublishOptions::default()
 			)
 			.is_err()
 		);
@@ -685,10 +675,12 @@ mod tests {
 		let discovery = Discovery::new(
 			vec!["robots/".into(), "/drones".into()],
 			DEFAULT_TOPIC_TEMPLATE.into(),
-			Some("camera".into()),
-			StampSource::Receive,
-			Some(480),
-			moqros::PixelFormat::Mono8,
+			RepublishOptions {
+				frame_id: Some("camera".into()),
+				stamp: StampSource::Receive,
+				max_height: Some(480),
+				encoding: moqros::PixelFormat::Mono8,
+			},
 		)
 		.unwrap();
 		assert!(discovery.covers("robots/r1/camera"));
@@ -698,10 +690,10 @@ mod tests {
 
 		let found = discovery.broadcast("robots/r1/camera").unwrap();
 		assert_eq!(found.topic, "/moqros/robots/r1/camera");
-		assert_eq!(found.max_height, Some(480));
-		assert_eq!(found.encoding, moqros::PixelFormat::Mono8);
+		assert_eq!(found.options.max_height, Some(480));
+		assert_eq!(found.options.encoding, moqros::PixelFormat::Mono8);
 		assert_eq!(
-			(found.frame_id.as_deref(), found.stamp),
+			(found.options.frame_id.as_deref(), found.options.stamp),
 			(Some("camera"), StampSource::Receive)
 		);
 		// Names from the network that don't make plain topic names are refused.
@@ -716,37 +708,9 @@ mod tests {
 			assert!(discovery.broadcast(bad).is_err(), "{bad}");
 		}
 
-		assert!(
-			Discovery::new(
-				vec![],
-				"/remote".into(),
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
-			)
-			.is_err()
-		);
-		assert!(
-			Discovery::new(
-				vec![],
-				"remote/{name}".into(),
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8
-			)
-			.is_err()
-		);
-		let custom = Discovery::new(
-			vec![],
-			"/remote/{name}/image".into(),
-			None,
-			StampSource::Source,
-			None,
-			moqros::PixelFormat::Rgb8,
-		)
-		.unwrap();
+		assert!(Discovery::new(vec![], "/remote".into(), RepublishOptions::default()).is_err());
+		assert!(Discovery::new(vec![], "remote/{name}".into(), RepublishOptions::default()).is_err());
+		let custom = Discovery::new(vec![], "/remote/{name}/image".into(), RepublishOptions::default()).unwrap();
 		assert_eq!(custom.broadcast("r1").unwrap().topic, "/remote/r1/image");
 	}
 
@@ -764,10 +728,7 @@ mod tests {
 			Discovery::new(
 				vec![prefix.into()],
 				DEFAULT_TOPIC_TEMPLATE.into(),
-				None,
-				StampSource::Source,
-				None,
-				moqros::PixelFormat::Rgb8,
+				RepublishOptions::default(),
 			)
 			.unwrap()
 		};
