@@ -189,7 +189,7 @@ impl EncoderSettings {
 		self
 	}
 
-	/// Set [`EncoderSettings::threads`].
+	/// Set [`threads`](EncoderSettings#structfield.threads).
 	pub fn with_threads(mut self, threads: u16) -> Self {
 		self.threads = threads;
 		self
