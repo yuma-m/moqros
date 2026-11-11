@@ -9,8 +9,8 @@ use super::bridge::StatsSender;
 use super::meter::{RateMeter, WarnOnce};
 use super::{Bridge, QosProfile, RosImage, Teardown, image_into_ros, now_stamp, stamp};
 use crate::{
-	DataFormat, DataSettings, DataSubscriber, Error, ImageOptions, ImageSubscriber, PixelFormat, Result, Subscriber,
-	Subscription,
+	DataFormat, DataSettings, DataSubscriber, Error, ImageSubscriber, PixelFormat, Result, SubscribeOptions,
+	Subscriber, Subscription,
 };
 
 /// Republish a MoQ broadcast onto a ROS topic, whatever it carries: video decoded into
@@ -118,19 +118,19 @@ impl RosTarget {
 pub struct MoqToRos {
 	subscriber: Subscriber,
 	broadcast: String,
-	options: ImageOptions,
+	options: SubscribeOptions,
 	first: Subscription,
 }
 
 impl MoqToRos {
 	/// Subscribe to `broadcast`, retrying until it is announced and readable.
 	pub async fn subscribe(subscriber: Subscriber, broadcast: &str) -> Self {
-		Self::subscribe_with(subscriber, broadcast, ImageOptions::default()).await
+		Self::subscribe_with(subscriber, broadcast, SubscribeOptions::default()).await
 	}
 
 	/// Like [`MoqToRos::subscribe`], picking a video rendition by `options`, also when
 	/// resubscribing.
-	pub async fn subscribe_with(subscriber: Subscriber, broadcast: &str, options: ImageOptions) -> Self {
+	pub async fn subscribe_with(subscriber: Subscriber, broadcast: &str, options: SubscribeOptions) -> Self {
 		let first = subscribe(&subscriber, broadcast, &options).await;
 		Self {
 			subscriber,
@@ -212,7 +212,7 @@ impl MoqToRos {
 }
 
 /// Subscribe to `broadcast`, retrying until it is announced and readable.
-async fn subscribe(subscriber: &Subscriber, broadcast: &str, options: &ImageOptions) -> Subscription {
+async fn subscribe(subscriber: &Subscriber, broadcast: &str, options: &SubscribeOptions) -> Subscription {
 	loop {
 		match subscriber.subscribe_with(broadcast, options).await {
 			Ok(subscription) => return subscription,
@@ -257,7 +257,7 @@ impl RosOutput {
 async fn republish(
 	subscriber: Subscriber,
 	broadcast: String,
-	options: ImageOptions,
+	options: SubscribeOptions,
 	first: Subscription,
 	output: &mut RosOutput,
 	stats: StatsSender,

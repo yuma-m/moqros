@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use moqros::{
 	ClientConfig, Codec, DataFormat, DataMode, DataSettings, EncoderSettings, Image, ImageBroadcastSettings,
-	ImageOptions, PixelFormat, Publisher, RenditionSettings, Subscriber, Subscription,
+	PixelFormat, Publisher, RenditionSettings, SubscribeOptions, Subscriber, Subscription,
 };
 
 struct Relay(Child);
@@ -142,7 +142,7 @@ async fn images_through_relay(publisher: &Publisher, subscriber: &Subscriber, co
 	);
 
 	// The smaller rendition, for a subscriber that wants at most 100 rows.
-	let options = ImageOptions::default().with_max_height(100);
+	let options = SubscribeOptions::default().with_max_height(100);
 	let mut small = tokio::time::timeout(
 		Duration::from_secs(10),
 		subscriber.subscribe_images_with(&name, &options),
