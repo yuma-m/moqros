@@ -18,9 +18,6 @@ on:
       - ".github/workflows/e2e.yml"
   pull_request:
     paths: *paths
-  # Catches breakage from the base images (ros:jazzy-ros-base, rust, node) moving on.
-  schedule:
-    - cron: "0 18 * * *"
   workflow_dispatch:
 
 permissions:
