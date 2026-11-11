@@ -1,5 +1,6 @@
 //! Flags shared by the bridge binaries.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -64,15 +65,13 @@ pub enum Format {
 	Cdr,
 }
 
-impl Format {
-	pub fn name(self) -> &'static str {
-		match self {
-			Self::Video => "video",
-			Self::Json => "json",
-			Self::Cdr => "cdr",
-		}
+impl fmt::Display for Format {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(self.to_possible_value().expect("no variant is skipped").get_name())
 	}
+}
 
+impl Format {
 	/// The data track format, or `None` for video.
 	pub fn data(self) -> Option<moqros::DataFormat> {
 		match self {
@@ -117,21 +116,25 @@ pub struct EncoderArgs {
 	pub hw: moqros::Hardware,
 
 	/// Target video bitrate in bits per second.
-	#[arg(long, default_value_t = 2_000_000)]
+	#[arg(long, default_value_t = moqros::EncoderSettings::default().bitrate)]
 	pub bitrate: u32,
 
 	/// Expected maximum input frame rate of the video.
-	#[arg(long, default_value_t = 30.0)]
+	#[arg(long, default_value_t = moqros::EncoderSettings::default().max_fps)]
 	pub fps: f32,
 
 	/// Maximum keyframe (MoQ group) interval of the video in milliseconds.
-	#[arg(long, default_value_t = 2000)]
+	#[arg(long, default_value_t = default_keyframe_interval_ms())]
 	pub keyframe_interval_ms: u64,
 
 	/// A smaller rendition of each video, as `HEIGHTp@BITRATE` (e.g. `360p@500000`); repeat for
 	/// several. Viewers pick the one that suits them.
 	#[arg(id = "rendition", long = "rendition", value_parser = parse_rendition)]
 	pub renditions: Vec<moqros::RenditionSettings>,
+}
+
+fn default_keyframe_interval_ms() -> u64 {
+	u64::try_from(moqros::EncoderSettings::default().keyframe_interval.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Parse `HEIGHT[p]@BITRATE`, e.g. `360p@500000`.
@@ -203,5 +206,28 @@ mod tests {
 		] {
 			assert!(parse_rendition(bad).is_err(), "{bad}");
 		}
+	}
+
+	#[test]
+	fn formats_display_their_flag_values() {
+		for format in Format::value_variants() {
+			assert_eq!(Format::from_str(&format.to_string(), false), Ok(*format));
+		}
+	}
+
+	#[test]
+	fn encoder_flags_default_to_the_library_defaults() {
+		#[derive(clap::Parser)]
+		struct Cli {
+			#[command(flatten)]
+			encoder: EncoderArgs,
+		}
+		let settings = <Cli as clap::Parser>::parse_from(["test"]).encoder.settings();
+		let defaults = moqros::EncoderSettings::default();
+		assert_eq!(settings.bitrate, defaults.bitrate);
+		assert_eq!(settings.max_fps, defaults.max_fps);
+		assert_eq!(settings.keyframe_interval, defaults.keyframe_interval);
+		assert_eq!(settings.codec, defaults.codec);
+		assert_eq!(settings.hardware, defaults.hardware);
 	}
 }

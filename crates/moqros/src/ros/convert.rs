@@ -52,15 +52,7 @@ pub fn image_into_ros(image: Image, header: Header) -> RosImage {
 
 /// Convert an [`Image`] into a `sensor_msgs/Image` with the given header.
 pub fn image_to_ros(image: &Image, header: Header) -> RosImage {
-	RosImage {
-		header,
-		height: image.height,
-		width: image.width,
-		encoding: image.format.as_ros_encoding().to_string(),
-		is_bigendian: 0,
-		step: image.step,
-		data: image.data.to_vec(),
-	}
+	image_into_ros(image.clone(), header)
 }
 
 /// A `builtin_interfaces/Time` for the current wall clock, saturating past 2038.
