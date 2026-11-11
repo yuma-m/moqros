@@ -8,8 +8,8 @@ use hang::catalog::Catalog;
 use hang::moq_net;
 use serde::Serialize;
 
-use crate::Result;
 use crate::catalog::{MoqrosCatalog, MoqrosSection};
+use crate::{Error, Result};
 
 /// One announced broadcast and its catalog track. Closes the broadcast when dropped.
 pub(crate) struct BroadcastWriter {
@@ -274,7 +274,7 @@ pub(crate) struct GroupReader {
 impl GroupReader {
 	/// Subscribe to `track`. With `skip`, the reader jumps to a newer group as soon as one
 	/// arrives, dropping the rest of the current one.
-	pub(crate) async fn subscribe(
+	async fn subscribe(
 		broadcast: &moq_net::broadcast::Consumer,
 		track: &str,
 		skip: bool,
@@ -297,7 +297,7 @@ impl GroupReader {
 	}
 
 	/// Next frame, or `None` once the track ends or the broadcast's route changes.
-	pub(crate) async fn next_frame(&mut self) -> Result<Option<moq_net::frame::Frame>> {
+	async fn next_frame(&mut self) -> Result<Option<moq_net::frame::Frame>> {
 		if self.ended {
 			return Ok(None);
 		}
@@ -314,6 +314,82 @@ impl GroupReader {
 				tracing::info!(broadcast = self.route.name, ?kind, "broadcast announcement changed, ending the subscription");
 				self.ended = true;
 				Ok(None)
+			}
+		}
+	}
+}
+
+/// A subscribed broadcast whose first catalog has arrived, before one of its tracks is read.
+pub(crate) struct OpenBroadcast {
+	broadcast: moq_net::broadcast::Consumer,
+	catalog: CatalogWatch,
+	route: RouteWatch,
+}
+
+impl OpenBroadcast {
+	/// Wait for `name` to be announced on `origin` and read its first catalog. Also watches the
+	/// announcement, which the subscription ends with.
+	pub(crate) async fn open(origin: &moq_net::origin::Producer, name: &str) -> Result<Self> {
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		loop {
+			let update = announced
+				.next()
+				.await
+				.ok_or_else(|| Error::NotAnnounced(name.to_string()))?;
+			if update.kind.is_active() && update.prefix.as_str() == name {
+				break;
+			}
+		}
+
+		let broadcast = consumer.request_broadcast(name).await?;
+		let mut updates = MoqrosCatalog::subscribe(&broadcast).await?;
+		let first = updates.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
+		Ok(Self {
+			broadcast,
+			catalog: CatalogWatch::new(updates, first),
+			route: RouteWatch::new(announced, name),
+		})
+	}
+
+	/// The first catalog.
+	pub(crate) fn catalog(&self) -> &MoqrosCatalog {
+		self.catalog.catalog()
+	}
+
+	/// Subscribe to `track`; `skip` as for [`GroupReader::subscribe`].
+	pub(crate) async fn subscribe(self, track: &str, skip: bool) -> Result<TrackReader> {
+		Ok(TrackReader {
+			frames: GroupReader::subscribe(&self.broadcast, track, skip, self.route).await?,
+			catalog: self.catalog,
+			_broadcast: self.broadcast,
+		})
+	}
+}
+
+/// Reads one track of a broadcast while following the broadcast's catalog.
+pub(crate) struct TrackReader {
+	_broadcast: moq_net::broadcast::Consumer,
+	frames: GroupReader,
+	catalog: CatalogWatch,
+}
+
+impl TrackReader {
+	/// The current catalog of the broadcast.
+	pub(crate) fn catalog(&self) -> &CatalogWatch {
+		&self.catalog
+	}
+
+	/// Next frame, or `None` once the track ends or the broadcast's route changes.
+	///
+	/// A catalog update that arrived first is applied first, so a new capture origin comes
+	/// before the frames stamped against it.
+	pub(crate) async fn next_frame(&mut self) -> Result<Option<moq_net::frame::Frame>> {
+		loop {
+			tokio::select! {
+				biased;
+				() = self.catalog.changed() => {}
+				frame = self.frames.next_frame() => return frame,
 			}
 		}
 	}

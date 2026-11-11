@@ -17,7 +17,7 @@ use hang::moq_net;
 
 use crate::catalog::{self, DATA_TRACK, MoqrosSection};
 use crate::clock::StreamClock;
-use crate::track::{BroadcastWriter, CatalogWatch, GroupReader, GroupWriter};
+use crate::track::{BroadcastWriter, GroupWriter, TrackReader};
 use crate::{Error, Result};
 
 /// How each message is serialized on the wire.
@@ -184,25 +184,13 @@ pub struct DataMessage {
 /// For [`DataMode::Snapshot`] tracks it always jumps to the newest message, so a slow
 /// reader stays at the live edge; [`DataMode::Stream`] tracks are read in order.
 pub struct DataSubscriber {
-	_broadcast: moq_net::broadcast::Consumer,
-	reader: GroupReader,
+	reader: TrackReader,
 	settings: DataSettings,
-	catalog: CatalogWatch,
 }
 
 impl DataSubscriber {
-	pub(crate) fn new(
-		broadcast: moq_net::broadcast::Consumer,
-		reader: GroupReader,
-		settings: DataSettings,
-		catalog: CatalogWatch,
-	) -> Self {
-		Self {
-			_broadcast: broadcast,
-			reader,
-			settings,
-			catalog,
-		}
+	pub(crate) fn new(reader: TrackReader, settings: DataSettings) -> Self {
+		Self { reader, settings }
 	}
 
 	/// Format, mode and ROS type announced in the catalog.
@@ -212,22 +200,15 @@ impl DataSubscriber {
 
 	/// Next message, or `None` once the broadcast ends.
 	pub async fn next_message(&mut self) -> Result<Option<DataMessage>> {
-		loop {
-			let frame = tokio::select! {
-				// A new capture origin comes before the messages stamped against it.
-				biased;
-				() = self.catalog.changed() => continue,
-				frame = self.reader.next_frame() => frame?,
-			};
-			return Ok(frame.map(|frame| {
-				let timestamp = frame.timestamp.into();
-				DataMessage {
-					timestamp,
-					capture_time: self.catalog.capture_time(timestamp),
-					payload: frame.payload,
-				}
-			}));
-		}
+		let frame = self.reader.next_frame().await?;
+		Ok(frame.map(|frame| {
+			let timestamp = frame.timestamp.into();
+			DataMessage {
+				timestamp,
+				capture_time: self.reader.catalog().capture_time(timestamp),
+				payload: frame.payload,
+			}
+		}))
 	}
 }
 

@@ -6,10 +6,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::moq_net;
 
-use crate::catalog::{self, Kind, MoqrosCatalog};
+use crate::catalog::{self, Kind};
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSubscriber};
-use crate::track::{CatalogWatch, GroupReader, RouteWatch};
+use crate::track::{OpenBroadcast, TrackReader};
 use crate::{ClientConfig, Error, Image, PixelFormat, Result, Session};
 
 /// A connection to a relay used to consume image and data broadcasts.
@@ -67,14 +67,12 @@ impl Subscriber {
 
 	/// Like [`Subscriber::subscribe_images`], picking the rendition by `options`.
 	pub async fn subscribe_images_with(&self, name: &str, options: &ImageOptions) -> Result<ImageSubscriber> {
-		let (broadcast, catalog, route) = self.catalog(name).await?;
-		images(name, broadcast, catalog, route, options).await
+		images(name, self.open(name).await?, options).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to its data track.
 	pub async fn subscribe_data(&self, name: &str) -> Result<DataSubscriber> {
-		let (broadcast, catalog, route) = self.catalog(name).await?;
-		data(name, broadcast, catalog, route).await
+		data(name, self.open(name).await?).await
 	}
 
 	/// Wait for `name` to be announced, then subscribe to whatever it carries: its video
@@ -85,12 +83,10 @@ impl Subscriber {
 
 	/// Like [`Subscriber::subscribe`], picking a video rendition by `options`.
 	pub async fn subscribe_with(&self, name: &str, options: &ImageOptions) -> Result<Subscription> {
-		let (broadcast, catalog, route) = self.catalog(name).await?;
-		match Kind::of(catalog.catalog()) {
-			Kind::Images => Ok(Subscription::Images(
-				images(name, broadcast, catalog, route, options).await?,
-			)),
-			Kind::Data => Ok(Subscription::Data(data(name, broadcast, catalog, route).await?)),
+		let opened = self.open(name).await?;
+		match Kind::of(opened.catalog()) {
+			Kind::Images => Ok(Subscription::Images(images(name, opened, options).await?)),
+			Kind::Data => Ok(Subscription::Data(data(name, opened).await?)),
 			Kind::None => Err(Error::NoTracks(name.to_string())),
 		}
 	}
@@ -105,37 +101,14 @@ impl Subscriber {
 		}
 	}
 
-	/// Wait for `name` to be announced and read its first catalog. Also returns a watch on
-	/// the announcement, which the subscription ends with.
-	async fn catalog(&self, name: &str) -> Result<(moq_net::broadcast::Consumer, CatalogWatch, RouteWatch)> {
-		let consumer = self.origin.consume();
-		let mut announced = consumer.announced();
-		loop {
-			let update = announced
-				.next()
-				.await
-				.ok_or_else(|| Error::NotAnnounced(name.to_string()))?;
-			if update.kind.is_active() && update.prefix.as_str() == name {
-				break;
-			}
-		}
-
-		let broadcast = consumer.request_broadcast(name).await?;
-		let mut updates = MoqrosCatalog::subscribe(&broadcast).await?;
-		let first = updates.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
-		let route = RouteWatch::new(announced, name);
-		Ok((broadcast, CatalogWatch::new(updates, first), route))
+	/// Wait for `name` to be announced and read its first catalog.
+	async fn open(&self, name: &str) -> Result<OpenBroadcast> {
+		OpenBroadcast::open(&self.origin, name).await
 	}
 }
 
-async fn images(
-	name: &str,
-	broadcast: moq_net::broadcast::Consumer,
-	catalog: CatalogWatch,
-	route: RouteWatch,
-	options: &ImageOptions,
-) -> Result<ImageSubscriber> {
-	let (track, config, codec) = catalog::select_video(catalog.catalog(), name, options.max_height)?;
+async fn images(name: &str, opened: OpenBroadcast, options: &ImageOptions) -> Result<ImageSubscriber> {
+	let (track, config, codec) = catalog::select_video(opened.catalog(), name, options.max_height)?;
 	tracing::info!(
 		broadcast = name,
 		// The track name comes from the remote catalog: record it as a str (quoted
@@ -147,23 +120,16 @@ async fn images(
 		"subscribing"
 	);
 
-	let video = GroupReader::subscribe(&broadcast, track, true, route).await?;
+	let track = track.to_string();
 	Ok(ImageSubscriber {
-		_broadcast: broadcast,
-		video,
-		catalog,
+		video: opened.subscribe(&track, true).await?,
 		codec,
 		decoder: Arc::new(Mutex::new(Decoder::new(codec)?)),
 	})
 }
 
-async fn data(
-	name: &str,
-	broadcast: moq_net::broadcast::Consumer,
-	catalog: CatalogWatch,
-	route: RouteWatch,
-) -> Result<DataSubscriber> {
-	let (track, settings) = catalog::find_data(catalog.catalog()).ok_or_else(|| Error::NoData(name.to_string()))?;
+async fn data(name: &str, opened: OpenBroadcast) -> Result<DataSubscriber> {
+	let (track, settings) = catalog::find_data(opened.catalog()).ok_or_else(|| Error::NoData(name.to_string()))?;
 	tracing::info!(
 		broadcast = name,
 		track,
@@ -172,8 +138,8 @@ async fn data(
 		ros_type = settings.ros_type.as_deref().unwrap_or_default(),
 		"subscribing"
 	);
-	let reader = GroupReader::subscribe(&broadcast, &track, settings.mode == DataMode::Snapshot, route).await?;
-	Ok(DataSubscriber::new(broadcast, reader, settings, catalog))
+	let reader = opened.subscribe(&track, settings.mode == DataMode::Snapshot).await?;
+	Ok(DataSubscriber::new(reader, settings))
 }
 
 /// Broadcasts announced under a prefix, from [`Subscriber::announced`].
@@ -245,9 +211,7 @@ pub struct VideoFrame {
 /// Reads frames of one video track, always jumping to the newest group so a slow
 /// reader falls back to the live edge instead of accumulating latency.
 pub struct ImageSubscriber {
-	_broadcast: moq_net::broadcast::Consumer,
-	video: GroupReader,
-	catalog: CatalogWatch,
+	video: TrackReader,
 	codec: Codec,
 	/// Shared with the blocking task decoding the current frame, which keeps running (and then
 	/// lets go) when [`ImageSubscriber::next_image`] is cancelled, so the decoder stays in step
@@ -263,13 +227,13 @@ impl ImageSubscriber {
 
 	/// The frame id the publisher announces (e.g. the ROS `header.frame_id` of its images), if any.
 	pub fn frame_id(&self) -> Option<&str> {
-		self.catalog.section().frame_id.as_deref()
+		self.video.catalog().section().frame_id.as_deref()
 	}
 
 	/// Whether the broadcast announces capture times, so that [`VideoFrame::capture_time`] is set
 	/// and [`ImageSubscriber::next_image`] stamps images with them.
 	pub fn has_capture_times(&self) -> bool {
-		self.catalog.has_capture_times()
+		self.video.catalog().has_capture_times()
 	}
 
 	/// Accept decoded pictures of up to `max_pixels`; see [`Decoder::set_max_pixels`].
@@ -284,22 +248,14 @@ impl ImageSubscriber {
 
 	/// Next encoded frame, or `None` once the broadcast ends.
 	pub async fn next_frame(&mut self) -> Result<Option<VideoFrame>> {
-		let frame = loop {
-			tokio::select! {
-				// A new capture origin comes before the frames stamped against it.
-				biased;
-				() = self.catalog.changed() => {}
-				frame = self.video.next_frame() => break frame?,
-			}
-		};
-		let Some(frame) = frame else {
+		let Some(frame) = self.video.next_frame().await? else {
 			return Ok(None);
 		};
 		let frame = hang::container::Frame::decode(frame.payload)?;
 		let timestamp = Duration::from_micros(u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX));
 		Ok(Some(VideoFrame {
 			timestamp,
-			capture_time: self.catalog.capture_time(timestamp),
+			capture_time: self.video.catalog().capture_time(timestamp),
 			keyframe: self.codec.is_keyframe(&frame.payload),
 			data: frame.payload,
 		}))
@@ -347,20 +303,8 @@ mod tests {
 
 	/// Subscribe to `name` on `origin` the way [`Subscriber::subscribe_images`] does.
 	async fn subscribe_images(origin: &moq_net::origin::Producer, name: &str) -> ImageSubscriber {
-		let consumer = origin.consume();
-		let announced = consumer.announced();
-		let broadcast = consumer.request_broadcast(name).await.unwrap();
-		let mut updates = MoqrosCatalog::subscribe(&broadcast).await.unwrap();
-		let first = updates.next().await.unwrap().unwrap();
-		images(
-			name,
-			broadcast,
-			CatalogWatch::new(updates, first),
-			RouteWatch::new(announced, name),
-			&ImageOptions::default(),
-		)
-		.await
-		.unwrap()
+		let opened = OpenBroadcast::open(origin, name).await.unwrap();
+		images(name, opened, &ImageOptions::default()).await.unwrap()
 	}
 
 	#[test]
