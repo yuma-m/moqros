@@ -12,19 +12,34 @@ use super::meter::{RateMeter, WarnOnce};
 use super::{BitrateControl, Bridge, QosProfile, RosImage, image_from_ros};
 use crate::{DataFormat, DataPublisher, Error, ImagePublisher, Result};
 
+/// The ROS topic a ROS -> MoQ bridge reads.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RosSource {
+	/// Topic name to subscribe to.
+	pub topic: String,
+	/// QoS of the ROS subscription.
+	pub qos: QosProfile,
+}
+
+impl RosSource {
+	/// Subscribe to `topic` with `qos`.
+	pub fn new(topic: impl Into<String>, qos: QosProfile) -> Self {
+		Self {
+			topic: topic.into(),
+			qos,
+		}
+	}
+}
+
 /// Forward a ROS image topic into a MoQ broadcast.
 ///
 /// Encoding runs on a dedicated blocking thread. When it can't keep up, a
 /// pending image is replaced by the newest one so latency stays bounded.
 /// The returned [`Bridge`] resolves when the topic stream or the broadcast ends; its
 /// [`bitrate_control`](Bridge::bitrate_control) changes the bitrate while it runs.
-pub fn spawn_ros_to_moq(
-	node: &mut r2r::Node,
-	topic: &str,
-	qos: QosProfile,
-	broadcast: ImagePublisher,
-) -> Result<Bridge> {
-	spawn_image_bridge(node, topic, qos, broadcast, image_from_ros)
+pub fn spawn_ros_to_moq(node: &mut r2r::Node, source: RosSource, broadcast: ImagePublisher) -> Result<Bridge> {
+	spawn_image_bridge(node, source, broadcast, image_from_ros)
 }
 
 /// Forward a ROS `sensor_msgs/CompressedImage` topic (JPEG or PNG) into a MoQ broadcast,
@@ -34,11 +49,10 @@ pub fn spawn_ros_to_moq(
 #[cfg(feature = "compressed")]
 pub fn spawn_ros_to_moq_compressed(
 	node: &mut r2r::Node,
-	topic: &str,
-	qos: QosProfile,
+	source: RosSource,
 	broadcast: ImagePublisher,
 ) -> Result<Bridge> {
-	spawn_image_bridge(node, topic, qos, broadcast, compressed_image_from_ros)
+	spawn_image_bridge(node, source, broadcast, compressed_image_from_ros)
 }
 
 /// A ROS message carrying an image.
@@ -63,16 +77,15 @@ impl ImageMessage for super::RosCompressedImage {
 /// Forward messages of type `M`, converted by `convert`, into a video broadcast.
 fn spawn_image_bridge<M>(
 	node: &mut r2r::Node,
-	topic: &str,
-	qos: QosProfile,
+	source: RosSource,
 	mut broadcast: ImagePublisher,
 	convert: fn(M) -> Result<crate::Image>,
 ) -> Result<Bridge>
 where
 	M: ImageMessage,
 {
-	let mut stream = node.subscribe::<M>(topic, qos)?;
-	let topic = topic.to_string();
+	let RosSource { topic, qos } = source;
+	let mut stream = node.subscribe::<M>(&topic, qos)?;
 	let (bitrate_control, mut bitrate) = BitrateControl::new(broadcast.settings().bitrate);
 
 	let bridge = Bridge::spawn(|stats| async move {
@@ -176,12 +189,9 @@ impl<T> Drop for CloseOnDrop<T> {
 /// The broadcast's [`DataSettings`](crate::DataSettings) pick the serialization and
 /// must name the ROS type (see [`wait_for_topic_type`](super::wait_for_topic_type)). Messages are forwarded as
 /// they arrive. The returned [`Bridge`] resolves when the topic stream ends.
-pub fn spawn_ros_to_moq_data(
-	node: &mut r2r::Node,
-	topic: &str,
-	qos: QosProfile,
-	mut broadcast: DataPublisher,
-) -> Result<Bridge> {
+pub fn spawn_ros_to_moq_data(node: &mut r2r::Node, source: RosSource, mut broadcast: DataPublisher) -> Result<Bridge> {
+	let RosSource { topic, qos } = source;
+	let topic = topic.as_str();
 	let settings = broadcast.settings();
 	let ros_type = settings
 		.ros_type
