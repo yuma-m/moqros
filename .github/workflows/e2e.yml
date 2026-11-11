@@ -1,0 +1,74 @@
+name: E2E
+
+# Runs the Docker demos (docker/compose.yml, docker/teleop.compose.yml) with the checks in
+# docker/e2e, so the examples and the bridges they wire together keep working end to end.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "crates/**"
+      - "examples/**"
+      - "!examples/**/*.md"
+      - "docker/**"
+      - "!docker/*.md"
+      - "scripts/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".dockerignore"
+      - ".github/workflows/e2e.yml"
+  pull_request:
+    paths: *paths
+  # Catches breakage from the base images (ros:jazzy-ros-base, rust, node) moving on.
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The Python examples and checks, and the compose files.
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: pipx run ruff==0.17.2 check examples/sim docker/e2e
+      - name: Validate compose files
+        run: |
+          docker compose -f docker/compose.yml -f docker/e2e/sample.compose.yml --profile e2e config --quiet
+          docker compose -f docker/teleop.compose.yml -f docker/e2e/teleop.compose.yml --profile e2e config --quiet
+
+  demos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      # The ros, relay and web images of both demos all come from compose.yml's build targets.
+      - name: Build images
+        uses: docker/bake-action@v7.5.0
+        with:
+          source: .
+          files: docker/compose.yml
+          load: true
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+      - name: Sample (VP8)
+        run: scripts/e2e.sh sample
+      - name: Sample (AV1)
+        run: scripts/e2e.sh sample
+        env:
+          CODEC: av1
+      - name: Teleop
+        run: scripts/e2e.sh teleop
+      - if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: e2e-logs
+          path: e2e-logs
+          retention-days: 14

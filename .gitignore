@@ -5,3 +5,4 @@ openh264
 .idea
 .DS_Store
 __pycache__/
+e2e-logs

@@ -1,0 +1,16 @@
+# Adds the end-to-end check to docker/compose.yml:
+#
+#   docker compose -f docker/compose.yml -f docker/e2e/sample.compose.yml up -d --build
+#   docker compose -f docker/compose.yml -f docker/e2e/sample.compose.yml run --rm check
+services:
+  check:
+    image: moqros/ros:latest
+    environment:
+      ROS_DOMAIN_ID: "42"
+    command: ["python3", "/e2e/check.py", "sample"]
+    volumes:
+      - ./e2e:/e2e:ro
+    network_mode: service:source
+    ipc: service:source
+    depends_on: [moqros-pub, moqros-sub]
+    profiles: [e2e]

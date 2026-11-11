@@ -8,6 +8,7 @@ Two end-to-end demos that only need Docker. They use the same ports, so run one 
 | `compose.yml` | The [end-to-end sample](#end-to-end-sample). |
 | `teleop.compose.yml` | The [teleop demo](#teleop-demo). |
 | `relay.toml` | moq-relay config: self-signed certificate, anonymous publish and subscribe under `anon/`. |
+| `e2e/` | The [end-to-end checks](#end-to-end-checks) CI runs against both demos. |
 
 Read [Security](#security) before you run either on a machine others can reach.
 
@@ -76,6 +77,28 @@ To watch the commands arrive on the ROS side:
 docker compose -f docker/teleop.compose.yml exec bridge bash -c \
   'source /opt/ros/jazzy/setup.bash && ROS_DOMAIN_ID=42 ros2 topic echo /cmd_vel'
 ```
+
+## End-to-end checks
+
+CI (`.github/workflows/e2e.yml`) runs both demos with the compose files in `e2e/` layered on top, and a
+`check` service (`e2e/check.py`, rclpy) that joins the ROS services' namespaces and validates what comes back:
+
+- **Sample:** `/moqros/image` and `/moqros/frames` arrive as rgb8 images of the source's size with its
+  `frame_id`, and `/moqros/chatter` and `/moqros/pose` with the published contents. Runs with VP8 and AV1.
+- **Teleop:** a `moqros-sub` stands in for the viewer and a `moqros-pub` for the teleop pad. The camera and
+  map come back through the relay, and a turn command sent as `robot/cmd_vel` turns the robot on
+  `robot/odom`.
+
+To run one locally (the demo's ports must be free):
+
+```sh
+scripts/e2e.sh sample --build
+CODEC=av1 scripts/e2e.sh sample
+scripts/e2e.sh teleop
+```
+
+It exits non-zero if a check fails or a topic stays silent for 120 s, and then writes the services' logs to
+`e2e-logs/`.
 
 ## Security
 
