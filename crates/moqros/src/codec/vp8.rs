@@ -290,50 +290,7 @@ fn check(err: vpx::vpx_codec_err_t, ctx: Option<&vpx::vpx_codec_ctx_t>) -> Resul
 mod tests {
 	use super::super::{Codec, tests};
 
-	#[test]
-	fn round_trip() {
-		tests::round_trip(Codec::Vp8);
-	}
-
-	#[test]
-	fn keyframes() {
-		tests::keyframes(Codec::Vp8);
-	}
-
-	#[test]
-	fn bitrate_changes() {
-		tests::bitrate_changes(Codec::Vp8);
-	}
-
-	#[test]
-	fn pixel_formats() {
-		tests::pixel_formats(Codec::Vp8);
-	}
-
-	#[test]
-	fn irregular_timestamps() {
-		tests::irregular_timestamps(Codec::Vp8);
-	}
-
-	#[test]
-	fn forced_keyframe() {
-		tests::forced_keyframe(Codec::Vp8);
-	}
-
-	#[test]
-	fn rejects_invalid_images() {
-		tests::rejects_invalid_images(Codec::Vp8);
-	}
-
-	#[test]
-	fn keyframe_after_clock_jump() {
-		tests::keyframe_after_clock_jump(Codec::Vp8);
-	}
-
-	#[test]
-	fn rejects_oversized_pictures() {
-		tests::rejects_oversized_pictures(Codec::Vp8);
-	}
+	tests::shared_codec_tests!(Codec::Vp8);
 
 	/// A key frame header declaring 16383x16383 fails before libvpx allocates for it.
 	#[test]
