@@ -127,7 +127,7 @@ pub use convert::{I420, Planes, yuv_to_packed, yuv_to_rgb8};
 pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
-pub use publisher::{ImageBroadcastSettings, ImagePublisher, Publisher, RenditionSettings};
+pub use publisher::{ImageBroadcastSettings, ImagePublisher, Published, Publisher, RenditionSettings};
 pub use subscriber::{
 	Announcements, DecodedImage, ImageOptions, ImageSubscriber, Subscriber, Subscription, VideoFrame,
 };
