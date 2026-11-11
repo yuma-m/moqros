@@ -133,6 +133,7 @@ crate::names::named_enum!(Hardware, "hardware mode", {
 
 /// Tuning knobs for [`Encoder`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EncoderSettings {
 	/// Codec to encode with.
 	pub codec: Codec,
@@ -164,6 +165,42 @@ impl Default for EncoderSettings {
 }
 
 impl EncoderSettings {
+	/// Set [`EncoderSettings::codec`].
+	pub fn with_codec(mut self, codec: Codec) -> Self {
+		self.codec = codec;
+		self
+	}
+
+	/// Set [`EncoderSettings::bitrate`].
+	pub fn with_bitrate(mut self, bitrate: u32) -> Self {
+		self.bitrate = bitrate;
+		self
+	}
+
+	/// Set [`EncoderSettings::max_fps`].
+	pub fn with_max_fps(mut self, max_fps: f32) -> Self {
+		self.max_fps = max_fps;
+		self
+	}
+
+	/// Set [`EncoderSettings::keyframe_interval`].
+	pub fn with_keyframe_interval(mut self, keyframe_interval: Duration) -> Self {
+		self.keyframe_interval = keyframe_interval;
+		self
+	}
+
+	/// Set [`threads`](EncoderSettings#structfield.threads).
+	pub fn with_threads(mut self, threads: u16) -> Self {
+		self.threads = threads;
+		self
+	}
+
+	/// Set [`EncoderSettings::hardware`].
+	pub fn with_hardware(mut self, hardware: Hardware) -> Self {
+		self.hardware = hardware;
+		self
+	}
+
 	pub(crate) fn threads(&self) -> u32 {
 		match self.threads {
 			0 => default_threads(),

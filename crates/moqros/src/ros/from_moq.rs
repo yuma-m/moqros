@@ -40,6 +40,7 @@ pub async fn spawn_moq_to_ros(
 
 /// The ROS topic [`spawn_moq_to_ros`] republishes a broadcast on.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RosTarget {
 	/// Topic name to publish on.
 	pub topic: String,

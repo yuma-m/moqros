@@ -9,6 +9,7 @@ use crate::{Publisher, Result, Subscriber};
 
 /// Where and how to connect to a MoQ relay.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ClientConfig {
 	/// Relay URL. The path scopes broadcast names, e.g. `http://localhost:4443/anon`.
 	///
@@ -32,6 +33,12 @@ impl ClientConfig {
 			tls_cert: None,
 			tls_key: None,
 		}
+	}
+
+	/// Set [`ClientConfig::insecure`].
+	pub fn with_insecure(mut self, insecure: bool) -> Self {
+		self.insecure = insecure;
+		self
 	}
 
 	/// Present a client certificate to the relay (mTLS).

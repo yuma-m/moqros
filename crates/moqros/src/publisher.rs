@@ -80,6 +80,7 @@ impl Publisher {
 
 /// A smaller copy of a video broadcast, for viewers with less bandwidth or smaller screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RenditionSettings {
 	/// Picture height in pixels; the width keeps the aspect ratio. Rounded down to an even number.
 	pub height: u32,
@@ -87,9 +88,17 @@ pub struct RenditionSettings {
 	pub bitrate: u32,
 }
 
+impl RenditionSettings {
+	/// A rendition `height` pixels tall at `bitrate` bit/s.
+	pub fn new(height: u32, bitrate: u32) -> Self {
+		Self { height, bitrate }
+	}
+}
+
 /// How [`Publisher::create_image_broadcast`] encodes a video broadcast: its full-size rendition,
 /// and optionally smaller ones (simulcast).
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ImageBroadcastSettings {
 	/// The full-size rendition, and the codec and timing of every rendition.
 	pub encoder: EncoderSettings,
@@ -98,12 +107,25 @@ pub struct ImageBroadcastSettings {
 	pub renditions: Vec<RenditionSettings>,
 }
 
-impl From<EncoderSettings> for ImageBroadcastSettings {
-	fn from(encoder: EncoderSettings) -> Self {
+impl ImageBroadcastSettings {
+	/// Only the full-size rendition, encoded as `encoder` says.
+	pub fn new(encoder: EncoderSettings) -> Self {
 		Self {
 			encoder,
 			renditions: Vec::new(),
 		}
+	}
+
+	/// Set [`ImageBroadcastSettings::renditions`].
+	pub fn with_renditions(mut self, renditions: impl IntoIterator<Item = RenditionSettings>) -> Self {
+		self.renditions = renditions.into_iter().collect();
+		self
+	}
+}
+
+impl From<EncoderSettings> for ImageBroadcastSettings {
+	fn from(encoder: EncoderSettings) -> Self {
+		Self::new(encoder)
 	}
 }
 

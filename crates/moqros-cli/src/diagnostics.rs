@@ -211,17 +211,13 @@ mod tests {
 	#[test]
 	fn computes_rates_since_the_previous_report() {
 		let started = Instant::now();
-		let previous = BridgeStats {
-			received: 10,
-			dropped: 1,
-			..Default::default()
-		};
-		let current = BridgeStats {
-			received: 30,
-			dropped: 3,
-			last_received: Some(started + Duration::from_secs(2)),
-			..Default::default()
-		};
+		let mut previous = BridgeStats::default();
+		previous.received = 10;
+		previous.dropped = 1;
+		let mut current = BridgeStats::default();
+		current.received = 30;
+		current.dropped = 3;
+		current.last_received = Some(started + Duration::from_secs(2));
 		let report = Report::new(
 			&current,
 			&(started, previous),
