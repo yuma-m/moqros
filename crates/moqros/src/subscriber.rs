@@ -350,9 +350,9 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = ImagePublisher::new(&origin, "camera", EncoderSettings::default()).unwrap();
 		// The catalog only exists once the first keyframe is out.
-		assert!(publisher.publish(&test_pattern(64, 48, 0)).unwrap());
+		assert!(publisher.publish(&test_pattern(64, 48, 0)).unwrap().is_sent());
 		let mut images = subscribe_images(&origin, "camera").await;
-		assert!(publisher.publish(&test_pattern(64, 48, 1)).unwrap());
+		assert!(publisher.publish(&test_pattern(64, 48, 1)).unwrap().is_sent());
 
 		let ran = Arc::new(AtomicBool::new(false));
 		tokio::spawn({
@@ -379,7 +379,7 @@ mod tests {
 			image.timestamp = Duration::from_millis(millis);
 			image
 		};
-		assert!(publisher.publish(&at(0, 100_000)).unwrap());
+		assert!(publisher.publish(&at(0, 100_000)).unwrap().is_sent());
 		let mut images = subscribe_images(&origin, "camera").await;
 		assert_eq!(images.frame_id(), Some("camera_optical"));
 		assert!(images.has_capture_times());

@@ -129,6 +129,24 @@ impl From<EncoderSettings> for ImageBroadcastSettings {
 	}
 }
 
+/// What [`ImagePublisher::publish`] or [`ImagePublisher::publish_encoded`] did with a picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Published {
+	/// The picture was written to the full-size rendition.
+	Sent,
+	/// Nothing reached the full-size rendition: the encoder dropped the image (e.g. to hold its
+	/// bitrate), or the group was full and the next keyframe has to open a new one.
+	Dropped,
+}
+
+impl Published {
+	/// Whether the picture was [sent](Published::Sent).
+	pub fn is_sent(self) -> bool {
+		self == Self::Sent
+	}
+}
+
 /// Encodes images and writes them into one MoQ broadcast.
 ///
 /// The codec is chosen by [`EncoderSettings::codec`] (VP8 by default).
@@ -238,11 +256,11 @@ impl ImagePublisher {
 		Ok(())
 	}
 
-	/// Encode and send one image, in every rendition. Returns whether a full-size frame was written.
+	/// Encode and send one image, in every rendition, and say what became of the full-size one.
 	///
 	/// Encoding is CPU bound; call this from a blocking-friendly thread when
 	/// running inside an async runtime.
-	pub fn publish(&mut self, image: &Image) -> Result<bool> {
+	pub fn publish(&mut self, image: &Image) -> Result<Published> {
 		let yuv = I420::from_image(image)?;
 		let pts = self.clock.micros(image.timestamp);
 		let mut stale = self.update_capture_origin();
@@ -267,24 +285,34 @@ impl ImagePublisher {
 		if stale {
 			self.publish_catalog()?;
 		}
-		let sent = frames.first().is_some_and(Option::is_some);
-		for (track, frame) in self.tracks.iter_mut().zip(&frames) {
-			if let Some(frame) = frame {
-				track.write(frame, pts)?;
+		// The full-size rendition comes first.
+		let mut published = Published::Dropped;
+		for (index, (track, frame)) in self.tracks.iter_mut().zip(&frames).enumerate() {
+			if let Some(frame) = frame
+				&& track.write(frame, pts)?
+				&& index == 0
+			{
+				published = Published::Sent;
 			}
 		}
-		Ok(sent)
+		Ok(published)
 	}
 
 	/// Send an already encoded frame of the full-size rendition (VP8, Annex-B H.264 with SPS/PPS
 	/// inline in keyframes, or an AV1 temporal unit with the sequence header in keyframes).
-	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<()> {
+	///
+	/// A delta frame is [dropped](Published::Dropped) while no keyframe has opened a group, or
+	/// once the group is full.
+	pub fn publish_encoded(&mut self, frame: &EncodedFrame) -> Result<Published> {
 		let pts = self.clock.micros(frame.timestamp);
 		let stale = self.update_capture_origin();
 		if self.main_mut().update_rendition(frame) || stale {
 			self.publish_catalog()?;
 		}
-		self.main_mut().write(frame, pts)
+		Ok(match self.main_mut().write(frame, pts)? {
+			true => Published::Sent,
+			false => Published::Dropped,
+		})
 	}
 
 	fn main(&self) -> &VideoTrack {
@@ -386,8 +414,9 @@ impl VideoTrack {
 		true
 	}
 
-	/// Write `frame` at stream time `pts`, once the catalog entry is up to date.
-	fn write(&mut self, frame: &EncodedFrame, pts: u64) -> Result<()> {
+	/// Write `frame` at stream time `pts`, once the catalog entry is up to date. Returns whether
+	/// it was written: a delta frame without an open group to go into is discarded.
+	fn write(&mut self, frame: &EncodedFrame, pts: u64) -> Result<bool> {
 		if frame.keyframe {
 			self.writer.start_group()?;
 		} else if self.writer.is_open() && !self.writer.fits(frame.data.len()) {
@@ -404,7 +433,7 @@ impl VideoTrack {
 		// Nothing decodable can be sent until the first keyframe opens a group.
 		if !self.writer.is_open() {
 			self.encoder.force_keyframe();
-			return Ok(());
+			return Ok(false);
 		}
 
 		self.writer.write_container(&hang::container::Frame {
@@ -415,7 +444,7 @@ impl VideoTrack {
 		if self.writer.nearly_full() {
 			self.encoder.force_keyframe();
 		}
-		Ok(())
+		Ok(true)
 	}
 }
 
@@ -473,10 +502,12 @@ mod tests {
 		};
 		let limit = moq_net::group::MAX_GROUP_FRAMES as u64;
 		for n in 0..limit + 10 {
-			publisher.publish_encoded(&frame(n, n == 0)).unwrap();
+			let published = publisher.publish_encoded(&frame(n, n == 0)).unwrap();
+			assert_eq!(published.is_sent(), n < limit, "frame {n}");
 		}
 		assert!(!publisher.main().writer.is_open());
-		publisher.publish_encoded(&frame(limit + 10, true)).unwrap();
+		let published = publisher.publish_encoded(&frame(limit + 10, true)).unwrap();
+		assert_eq!(published, Published::Sent);
 		assert_eq!(publisher.main().writer.frames(), 1);
 	}
 
@@ -525,10 +556,11 @@ mod tests {
 				})
 				.collect()
 		};
-		assert!(
+		assert_eq!(
 			publisher
 				.publish(&crate::codec::tests::test_pattern(64, 48, 0))
-				.unwrap()
+				.unwrap(),
+			Published::Sent
 		);
 		// The first catalog already lists every rendition.
 		let catalog = catalogs.next().await.unwrap().unwrap();

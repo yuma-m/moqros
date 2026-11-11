@@ -126,7 +126,7 @@ pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, Encod
 pub use data::{DataFormat, DataMessage, DataMode, DataPublisher, DataSettings, DataSubscriber};
 pub use error::{Error, Result};
 pub use image::{Image, PixelFormat};
-pub use publisher::{ImageBroadcastSettings, ImagePublisher, Publisher, RenditionSettings};
+pub use publisher::{ImageBroadcastSettings, ImagePublisher, Published, Publisher, RenditionSettings};
 pub use subscriber::{
 	Announcements, DecodedImage, ImageSubscriber, SubscribeOptions, Subscriber, Subscription, VideoFrame,
 };

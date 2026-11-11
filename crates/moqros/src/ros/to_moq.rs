@@ -110,7 +110,7 @@ where
 							continue;
 						}
 					};
-					if broadcast.publish(&image)? {
+					if broadcast.publish(&image)?.is_sent() {
 						stats.sent();
 					}
 				}
