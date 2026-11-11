@@ -117,7 +117,9 @@ mod track;
 pub mod ros;
 
 pub use catalog::{CDR_MIME, DATA_TRACK, VIDEO_TRACK};
-pub use client::{ClientConfig, Session, broadcast_name_for_topic, connect_both};
+pub use client::{
+	ClientConfig, Session, broadcast_is_under, broadcast_name_for_topic, connect_both, normalize_broadcast_name,
+};
 #[cfg(feature = "h264")]
 pub use codec::set_openh264_library;
 pub use codec::{Codec, DEFAULT_MAX_PIXELS, Decoder, EncodedFrame, Encoder, EncoderSettings, Hardware};
