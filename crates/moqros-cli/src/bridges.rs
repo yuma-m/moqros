@@ -151,11 +151,7 @@ pub async fn run_bridges(node: r2r::Node, relay: Relay, bridges: Bridges) -> any
 			for (topic, bridge) in pending.start_ready(&node, publisher, &video, &qos, &mut restarts)? {
 				let stats = bridge.watch_stats();
 				if let Some((diagnostics, _)) = &mut diagnostics {
-					diagnostics.running(
-						&topic.topic,
-						&format!("ROS -> MoQ {}", topic.format.name()),
-						stats.clone(),
-					);
+					diagnostics.running(&topic.topic, &format!("ROS -> MoQ {}", topic.format), stats.clone());
 				}
 				if let Some(control) = bridge.bitrate_control() {
 					bitrates.insert(topic.topic.clone(), control);
