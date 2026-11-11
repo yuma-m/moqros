@@ -302,50 +302,7 @@ mod tests {
 	use super::super::obu::tests::{obu, sequence_header_payload};
 	use super::super::{Codec, Decoder, Encoder, EncoderSettings, tests};
 
-	#[test]
-	fn round_trip() {
-		tests::round_trip(Codec::Av1);
-	}
-
-	#[test]
-	fn keyframes() {
-		tests::keyframes(Codec::Av1);
-	}
-
-	#[test]
-	fn bitrate_changes() {
-		tests::bitrate_changes(Codec::Av1);
-	}
-
-	#[test]
-	fn pixel_formats() {
-		tests::pixel_formats(Codec::Av1);
-	}
-
-	#[test]
-	fn irregular_timestamps() {
-		tests::irregular_timestamps(Codec::Av1);
-	}
-
-	#[test]
-	fn forced_keyframe() {
-		tests::forced_keyframe(Codec::Av1);
-	}
-
-	#[test]
-	fn rejects_invalid_images() {
-		tests::rejects_invalid_images(Codec::Av1);
-	}
-
-	#[test]
-	fn keyframe_after_clock_jump() {
-		tests::keyframe_after_clock_jump(Codec::Av1);
-	}
-
-	#[test]
-	fn rejects_oversized_pictures() {
-		tests::rejects_oversized_pictures(Codec::Av1);
-	}
+	tests::shared_codec_tests!(Codec::Av1);
 
 	/// A sequence header declaring 65536x65536 fails before libaom allocates for it.
 	#[test]

@@ -153,33 +153,14 @@ impl DecoderBackend for H264Decoder {
 mod tests {
 	use super::super::{Codec, tests};
 
+	tests::shared_codec_tests!(Codec::H264, if available());
+
 	fn available() -> bool {
 		let ok = std::env::var_os(super::OPENH264_LIBRARY_ENV).is_some();
 		if !ok {
 			eprintln!("OPENH264_LIBRARY not set; skipping H.264 test");
 		}
 		ok
-	}
-
-	#[test]
-	fn round_trip() {
-		if available() {
-			tests::round_trip(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn keyframes() {
-		if available() {
-			tests::keyframes(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn bitrate_changes() {
-		if available() {
-			tests::bitrate_changes(Codec::H264);
-		}
 	}
 
 	#[test]
@@ -192,48 +173,6 @@ mod tests {
 			.unwrap();
 			let frame = encoder.encode(&tests::test_pattern(64, 48, 0)).unwrap().unwrap();
 			assert!(frame.codec.to_string().starts_with("avc3.42"), "{}", frame.codec);
-		}
-	}
-
-	#[test]
-	fn pixel_formats() {
-		if available() {
-			tests::pixel_formats(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn irregular_timestamps() {
-		if available() {
-			tests::irregular_timestamps(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn forced_keyframe() {
-		if available() {
-			tests::forced_keyframe(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn rejects_invalid_images() {
-		if available() {
-			tests::rejects_invalid_images(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn rejects_oversized_pictures() {
-		if available() {
-			tests::rejects_oversized_pictures(Codec::H264);
-		}
-	}
-
-	#[test]
-	fn keyframe_after_clock_jump() {
-		if available() {
-			tests::keyframe_after_clock_jump(Codec::H264);
 		}
 	}
 }
