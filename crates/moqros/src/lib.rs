@@ -130,6 +130,4 @@ pub use image::{Image, PixelFormat};
 pub use publisher::{ImageBroadcastSettings, ImagePublisher, Publisher, RenditionSettings};
 pub use subscriber::{Announcements, ImageOptions, ImageSubscriber, Subscriber, Subscription, VideoFrame};
 
-/// Re-exported so applications can name hang/moq types without version skew.
-pub use hang;
 pub use url::Url;

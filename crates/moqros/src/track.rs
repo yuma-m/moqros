@@ -9,6 +9,7 @@ use hang::moq_net;
 use serde::Serialize;
 
 use crate::catalog::{MoqrosCatalog, MoqrosSection};
+use crate::error::Wrap;
 use crate::{Error, Result};
 
 /// One announced broadcast and its catalog track. Closes the broadcast when dropped.
@@ -21,9 +22,11 @@ pub(crate) struct BroadcastWriter {
 impl BroadcastWriter {
 	/// Create and announce the broadcast `name`, with an empty catalog track.
 	pub(crate) fn create(origin: &moq_net::origin::Producer, name: &str) -> Result<Self> {
-		let broadcast = origin.create_broadcast(name)?;
-		broadcast.announce(Default::default())?;
-		let catalog = broadcast.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())?;
+		let broadcast = origin.create_broadcast(name).moq()?;
+		broadcast.announce(Default::default()).moq()?;
+		let catalog = broadcast
+			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+			.moq()?;
 		Ok(Self {
 			name: name.to_string(),
 			broadcast,
@@ -37,14 +40,16 @@ impl BroadcastWriter {
 	}
 
 	pub(crate) fn create_track(&self, name: &str, info: moq_net::track::Info) -> Result<moq_net::track::Producer> {
-		Ok(self.broadcast.create_track(name, info)?)
+		self.broadcast.create_track(name, info).moq()
 	}
 
 	/// Replace the catalog subscribers see.
 	pub(crate) fn publish_catalog<E: Serialize>(&mut self, catalog: &Catalog<E>) -> Result<()> {
-		let mut group = self.catalog.append_group()?;
-		group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
-		group.finish()?;
+		let mut group = self.catalog.append_group().moq()?;
+		group
+			.write_frame(moq_net::Timestamp::now(), catalog.to_json().hang()?)
+			.moq()?;
+		group.finish().moq()?;
 		Ok(())
 	}
 }
@@ -76,7 +81,7 @@ impl GroupWriter {
 	/// Finish the open group, if any, and start a new one.
 	pub(crate) fn start_group(&mut self) -> Result<()> {
 		self.finish_group()?;
-		self.group = Some(self.track.append_group()?);
+		self.group = Some(self.track.append_group().moq()?);
 		self.budget = GroupBudget::default();
 		Ok(())
 	}
@@ -84,7 +89,7 @@ impl GroupWriter {
 	/// Finish the open group, if any.
 	pub(crate) fn finish_group(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.finish()?;
+			group.finish().moq()?;
 		}
 		Ok(())
 	}
@@ -106,14 +111,14 @@ impl GroupWriter {
 	/// Write one frame into the open group, starting one if there is none.
 	pub(crate) fn write_frame(&mut self, timestamp: moq_net::Timestamp, payload: Bytes) -> Result<()> {
 		let size = payload.len();
-		self.group()?.write_frame(timestamp, payload)?;
+		self.group()?.write_frame(timestamp, payload).moq()?;
 		self.budget.add(size);
 		Ok(())
 	}
 
 	/// Write one frame in the hang container into the open group, starting one if there is none.
 	pub(crate) fn write_container(&mut self, frame: &hang::container::Frame) -> Result<()> {
-		frame.write_to(self.group()?)?;
+		frame.write_to(self.group()?).hang()?;
 		self.budget.add(frame.payload.len());
 		Ok(())
 	}
@@ -281,9 +286,11 @@ impl GroupReader {
 		route: RouteWatch,
 	) -> Result<Self> {
 		let track = broadcast
-			.track(track)?
+			.track(track)
+			.moq()?
 			.subscribe(moq_net::track::Subscription::default())
-			.await?
+			.await
+			.moq()?
 			.ordered();
 		Ok(Self {
 			frames: Frames {
@@ -342,9 +349,13 @@ impl OpenBroadcast {
 			}
 		}
 
-		let broadcast = consumer.request_broadcast(name).await?;
-		let mut updates = MoqrosCatalog::subscribe(&broadcast).await?;
-		let first = updates.next().await?.ok_or_else(|| Error::NoTracks(name.to_string()))?;
+		let broadcast = consumer.request_broadcast(name).await.moq()?;
+		let mut updates = MoqrosCatalog::subscribe(&broadcast).await.hang()?;
+		let first = updates
+			.next()
+			.await
+			.hang()?
+			.ok_or_else(|| Error::NoTracks(name.to_string()))?;
 		Ok(Self {
 			broadcast,
 			catalog: CatalogWatch::new(updates, first),
@@ -408,7 +419,7 @@ impl Frames {
 	async fn next(&mut self) -> Result<Option<moq_net::frame::Frame>> {
 		loop {
 			let Some(group) = self.group.as_mut() else {
-				match self.track.next_group().await? {
+				match self.track.next_group().await.moq()? {
 					Some(group) => self.group = Some(group),
 					None => return Ok(None),
 				}
@@ -421,7 +432,7 @@ impl Frames {
 					// A newer group starts with a keyframe (or a complete message), so the rest of
 					// this one can go.
 					next = self.track.next_group() => {
-						match next? {
+						match next.moq()? {
 							Some(group) => self.group = Some(group),
 							None => return Ok(None),
 						}

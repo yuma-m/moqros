@@ -9,6 +9,7 @@ use hang::moq_net;
 use crate::catalog::{self, Kind};
 use crate::codec::{Codec, Decoder};
 use crate::data::{DataMode, DataSubscriber};
+use crate::error::Wrap;
 use crate::track::{OpenBroadcast, TrackReader};
 use crate::{ClientConfig, Error, Image, PixelFormat, Result, Session};
 
@@ -246,7 +247,7 @@ impl ImageSubscriber {
 		let Some(frame) = self.video.next_frame().await? else {
 			return Ok(None);
 		};
-		let frame = hang::container::Frame::decode(frame.payload)?;
+		let frame = hang::container::Frame::decode(frame.payload).hang()?;
 		let timestamp = Duration::from_micros(u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX));
 		Ok(Some(VideoFrame {
 			timestamp,

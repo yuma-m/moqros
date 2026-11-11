@@ -61,16 +61,14 @@ pub(crate) fn round_trip(codec: Codec) {
 	let mut decoder = Decoder::new(codec).unwrap();
 
 	let mut decoded = 0;
-	let mut keyframe_codec = None;
 	for t in 0..10 {
 		let image = test_pattern(64, 48, t);
 		let Some(frame) = encoder.encode(&image).unwrap() else {
 			continue;
 		};
-		assert_eq!(Codec::from_catalog(&frame.codec), Some(codec));
-		// Delta frames carry the description of the keyframe they depend on.
-		let keyframe_codec = keyframe_codec.get_or_insert_with(|| frame.codec.clone());
-		assert_eq!(&frame.codec, keyframe_codec);
+		assert_eq!(frame.codec, codec);
+		// Only keyframes carry what the codec string is read from.
+		assert_eq!(frame.codec_string().is_some(), frame.keyframe);
 		assert_eq!(codec.is_keyframe(&frame.data), frame.keyframe);
 		if t == 0 {
 			assert!(frame.keyframe, "first frame must be a keyframe");

@@ -21,6 +21,7 @@ use hang::moq_net;
 use serde_json::{Map, Value};
 
 use crate::codec::{Codec, EncodedFrame, EncoderSettings};
+use crate::error::Wrap;
 use crate::{DataFormat, DataMode, DataSettings, Error, Result};
 
 /// Name of the single video track inside every moqros broadcast.
@@ -126,10 +127,11 @@ pub(crate) struct Rendition {
 	pub(crate) height: u32,
 }
 
-impl From<&EncodedFrame> for Rendition {
-	fn from(frame: &EncodedFrame) -> Self {
+impl Rendition {
+	/// What the keyframe `frame` carries.
+	pub(crate) fn of_keyframe(frame: &EncodedFrame) -> Self {
 		Self {
-			codec: frame.codec.clone(),
+			codec: frame.codec.catalog_codec(&frame.data),
 			width: frame.width,
 			height: frame.height,
 		}
@@ -150,7 +152,7 @@ pub(crate) fn video<'a>(
 		config.bitrate = Some(u64::from(settings.bitrate));
 		config.framerate = Some(f64::from(settings.max_fps));
 		config.container = Container::Legacy;
-		catalog.video.insert(track, config)?;
+		catalog.video.insert(track, config).hang()?;
 	}
 	section.write(&mut catalog);
 	Ok(catalog)
@@ -201,13 +203,13 @@ pub(crate) fn data(settings: &DataSettings, section: &MoqrosSection) -> Result<M
 			let mut config = JsonConfig::new(mode);
 			config.schema = settings.ros_type.as_ref().map(|ros_type| format!("ros2:{ros_type}"));
 			config.extra = extra;
-			catalog.json.insert(DATA_TRACK, config)?;
+			catalog.json.insert(DATA_TRACK, config).hang()?;
 		}
 		DataFormat::Cdr => {
 			let mut config = BinaryConfig::new(mode);
 			config.mime = Some(CDR_MIME.into());
 			config.extra = extra;
-			catalog.binary.insert(DATA_TRACK, config)?;
+			catalog.binary.insert(DATA_TRACK, config).hang()?;
 		}
 	}
 	section.write(&mut catalog);

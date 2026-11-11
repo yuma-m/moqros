@@ -589,7 +589,7 @@ mod tests {
 		let element = encoder.hardware_encoder().expect("encoding through GStreamer");
 		assert!(SOFTWARE.iter().any(|c| c.element == element), "{element}");
 		assert!(frame.keyframe, "{codec}: first frame must be a keyframe");
-		assert_eq!(Codec::from_catalog(&frame.codec), Some(codec));
+		assert_eq!(frame.codec, codec);
 
 		tests::round_trip(codec);
 		tests::keyframes(codec);
@@ -735,7 +735,11 @@ mod tests {
 			match encoder.encode(&tests::test_pattern(64, 48, 0)) {
 				Ok(frame) => {
 					let frame = frame.unwrap();
-					eprintln!("{codec}: {} ({})", encoder.hardware_encoder().unwrap(), frame.codec);
+					eprintln!(
+						"{codec}: {} ({})",
+						encoder.hardware_encoder().unwrap(),
+						frame.codec_string().unwrap_or_default()
+					);
 					tests::round_trip(codec);
 					tests::keyframes(codec);
 					tests::pixel_formats(codec);

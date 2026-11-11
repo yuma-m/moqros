@@ -1,3 +1,6 @@
+/// The error of another crate, kept opaque so that crate's version isn't part of moqros's API.
+type Source = Box<dyn std::error::Error + Send + Sync>;
+
 /// Errors produced by moqros.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -35,15 +38,15 @@ pub enum Error {
 
 	/// A MoQ track, group or broadcast failed.
 	#[error("moq error: {0}")]
-	Moq(#[from] hang::moq_net::Error),
+	Moq(#[source] Source),
 
-	/// Connecting to the relay failed.
+	/// Connecting to the relay failed, or the relay refused the session (see [`Error::is_auth`]).
 	#[error("moq connection error: {0}")]
-	Connection(#[from] moq_tokio::Error),
+	Connection(#[source] Source),
 
 	/// Reading or writing the hang catalog or a container failed.
 	#[error("hang error: {0}")]
-	Hang(#[from] hang::Error),
+	Hang(#[source] Source),
 
 	/// A timestamp doesn't fit the wire format.
 	#[error("timestamp out of range")]
@@ -103,6 +106,42 @@ pub enum Error {
 		/// What it carries now.
 		to: String,
 	},
+}
+
+impl Error {
+	/// Whether the relay refused the session for missing or wrong credentials.
+	pub fn is_auth(&self) -> bool {
+		match self {
+			Self::Connection(source) => source
+				.downcast_ref::<moq_tokio::Error>()
+				.is_some_and(moq_tokio::Error::is_auth),
+			_ => false,
+		}
+	}
+}
+
+/// Wraps the errors of the moq crates, whose types stay out of the public API.
+pub(crate) trait Wrap<T> {
+	/// Fail with [`Error::Moq`].
+	fn moq(self) -> Result<T>;
+	/// Fail with [`Error::Connection`].
+	fn connection(self) -> Result<T>;
+	/// Fail with [`Error::Hang`].
+	fn hang(self) -> Result<T>;
+}
+
+impl<T, E: Into<Source>> Wrap<T> for std::result::Result<T, E> {
+	fn moq(self) -> Result<T> {
+		self.map_err(|err| Error::Moq(err.into()))
+	}
+
+	fn connection(self) -> Result<T> {
+		self.map_err(|err| Error::Connection(err.into()))
+	}
+
+	fn hang(self) -> Result<T> {
+		self.map_err(|err| Error::Hang(err.into()))
+	}
 }
 
 /// [`std::result::Result`] defaulting to moqros's [`Error`].

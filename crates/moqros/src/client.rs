@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::{Publisher, Result, Subscriber};
+use crate::error::Wrap;
+use crate::{Error, Publisher, Result, Subscriber};
 
 /// Where and how to connect to a MoQ relay.
 #[derive(Debug, Clone)]
@@ -48,7 +49,7 @@ impl ClientConfig {
 		}
 		connect.tls.cert = self.tls_cert.clone();
 		connect.tls.key = self.tls_key.clone();
-		Ok(connect.init(Default::default())?)
+		connect.init(Default::default()).connection()
 	}
 }
 
@@ -99,11 +100,11 @@ impl Session {
 		// a refusal (e.g. `Unauthorized`) closes a session that already looked established.
 		// Watch the connection for a moment longer so that refusal is returned here.
 		// The returned handle is a clone; our handle keeps the dial alive.
-		let _ = self.connection.clone().established().await?;
+		let _ = self.connection.clone().established().await.connection()?;
 		tokio::select! {
 			res = self.connection.closed() => {
-				res?;
-				Err(moq_tokio::Error::Reconnect("the connection closed right after it was established".into()).into())
+				res.connection()?;
+				Err(Error::Connection("the connection closed right after it was established".into()))
 			}
 			_ = tokio::time::sleep(REFUSAL_WINDOW) => Ok(()),
 		}
@@ -111,7 +112,7 @@ impl Session {
 
 	/// Resolves when the connection gives up for good.
 	pub async fn closed(&self) -> Result<()> {
-		Ok(self.connection.closed().await?)
+		self.connection.closed().await.connection()
 	}
 
 	/// Close the connection for every clone, without redialing.
@@ -120,7 +121,7 @@ impl Session {
 	/// exiting so the relay ends this session's broadcasts and subscriptions right away;
 	/// otherwise it holds them until the session times out.
 	pub async fn close(&self) -> Result<()> {
-		Ok(self.connection.clone().close().await?)
+		self.connection.clone().close().await.connection()
 	}
 }
 

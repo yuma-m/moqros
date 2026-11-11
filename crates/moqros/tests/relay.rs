@@ -358,10 +358,7 @@ url = "{auth_url}"
 	// Without a certificate the relay refuses the session.
 	let anonymous = Publisher::connect(&ClientConfig::new(url.clone()))?;
 	let refused = tokio::time::timeout(Duration::from_secs(10), anonymous.established()).await?;
-	assert!(
-		matches!(&refused, Err(moqros::Error::Connection(err)) if err.is_auth()),
-		"{refused:?}"
-	);
+	assert!(matches!(&refused, Err(err) if err.is_auth()), "{refused:?}");
 
 	let config = ClientConfig::new(url.clone()).with_client_cert(dir.join("robot.pem"), dir.join("robot.key"));
 	let publisher = Publisher::connect(&config)?;

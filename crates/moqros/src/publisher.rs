@@ -348,7 +348,7 @@ impl VideoTrack {
 		if !frame.keyframe {
 			return false;
 		}
-		let rendition = Rendition::from(frame);
+		let rendition = Rendition::of_keyframe(frame);
 		if self.rendition.as_ref() == Some(&rendition) {
 			return false;
 		}
@@ -405,7 +405,7 @@ fn scaled_width(width: usize, full_height: usize, height: u32) -> usize {
 #[cfg(test)]
 mod tests {
 	use bytes::Bytes;
-	use hang::catalog::{Catalog, VideoCodec};
+	use hang::catalog::Catalog;
 
 	use super::*;
 	use crate::codec::Codec;
@@ -447,7 +447,7 @@ mod tests {
 			width: 16,
 			height: 16,
 			timestamp: Duration::from_millis(n * 33),
-			codec: VideoCodec::VP8,
+			codec: Codec::Vp8,
 		};
 		let limit = moq_net::group::MAX_GROUP_FRAMES as u64;
 		for n in 0..limit + 10 {
