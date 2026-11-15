@@ -76,12 +76,13 @@ pub(crate) fn round_trip(codec: Codec) {
 		if let Some(out) = decoder.decode(&frame.data, frame.timestamp).unwrap() {
 			assert_eq!((out.width, out.height), (64, 48));
 			assert_eq!(out.timestamp, image.timestamp);
-			let err =
-				out.data
-					.iter()
-					.zip(image.data.iter())
-					.map(|(a, b)| u64::from(a.abs_diff(*b)))
-					.sum::<u64>() / out.data.len() as u64;
+			let err = out
+				.data
+				.iter()
+				.zip(image.data.iter())
+				.map(|(a, b)| u64::from(a.abs_diff(*b)))
+				.sum::<u64>()
+				/ out.data.len() as u64;
 			assert!(err < 12, "{codec}: mean abs error {err}");
 			decoded += 1;
 		}
