@@ -146,6 +146,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The workspace still builds on the declared MSRV (`rust-version` in Cargo.toml), so APIs newer
+  # than it can't slip in while every other job runs on stable. ROS code is checked through r2r's
+  # `doc-only` bindings, as in `docs`.
+  msrv:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvpx-dev libaom-dev libclang-dev pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - run: cargo check -p moqros -p moqros-cli --all-targets --features moqros/h264,moqros/av1,moqros/hw,moqros/doc-only --locked
+
   # Full workspace against a real ROS 2 install, plus the colcon (ament_cargo) package.
   ros:
     needs: changes
@@ -218,7 +240,7 @@ jobs:
   # `ros (jazzy)`, so the matrix jobs can't be required checks themselves.
   ci:
     if: always()
-    needs: [changes, lockfile, core, docs, ros]
+    needs: [changes, lockfile, core, docs, msrv, ros]
     runs-on: ubuntu-24.04
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
