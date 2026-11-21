@@ -14,15 +14,14 @@ targets = [
 ]
 
 [advisories]
+# Only flag unmaintained crates the workspace depends on directly: those we can replace ourselves.
+# Transitive ones can only be fixed upstream, so failing CI on them is just noise. Vulnerabilities
+# are still checked across the whole graph.
+unmaintained = "workspace"
 ignore = [
 	# rsa (Marvin attack): only reached through moq-auth, a dev-dependency the relay tests use to sign
 	# throwaway tokens. No fixed release exists.
 	{ id = "RUSTSEC-2023-0071", reason = "dev-only via moq-auth; no fixed rsa release" },
-	# paste is unmaintained: a proc-macro r2r uses at build time. Nothing to upgrade to until r2r drops it.
-	{ id = "RUSTSEC-2024-0436", reason = "build-time proc-macro pulled in by r2r" },
-	# humantime is unmaintained (it wraps chrono): pulled in by moq-tokio, which every release still
-	# depends on. No maintained replacement to upgrade to until moq-tokio drops it.
-	{ id = "RUSTSEC-2026-0542", reason = "transitive via moq-tokio; no upgrade available" },
 ]
 
 [licenses]
